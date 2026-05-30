@@ -1,0 +1,31 @@
+{
+  "name": "meta-instagram-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP server for official Meta Instagram API read-only analytics.",
+  "bin": {
+    "meta-instagram-mcp": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "meta:auth-url": "node dist/cli/auth-url.js",
+    "meta:callback": "node dist/cli/callback.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

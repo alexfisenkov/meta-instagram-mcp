@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+app secret.md.rtf
+app-secret.*
+.DS_Store
+coverage/
+*.log
+
+# Local/private operator state. Keep the public repository reusable.
+HANDOFF.md
+docs/implementation-log.md
+docs/verification-log.md
+
+# Personal analytics outputs stay local by default. Keep only the public index.
+queries/local-index.md
+queries/*/
+!queries/README.md
+
+# Local profile screenshots and derived private analytics artifacts.
+2026-05-29-Скрины профиля для промпта/
