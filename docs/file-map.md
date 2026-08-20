@@ -59,6 +59,7 @@
 | `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с правами `0600`. |
 | `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook login URLs, меняет auth code на long-lived token, refreshes token, задает scope presets. |
 | `src/callback-server.ts` | Local OAuth helper | Стартует localhost callback, обрабатывает Meta redirect, меняет `code`, сохраняет token. |
+| `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | правка сетевого слоя, отладка отказов DNS |
 | `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token. |
 | `src/tools.ts` | MCP use cases | Реализует handlers: auth status, login URL, exchange/refresh, account/media/comments/insights, page list, account resolver, raw GET. |
 | `src/server.ts` | MCP transport | Регистрирует MCP tools со schemas/annotations и запускает stdio transport. |

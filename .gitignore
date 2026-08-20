@@ -21,3 +21,24 @@ queries/*/
 
 # Local profile screenshots and derived private analytics artifacts.
 2026-05-29-Скрины профиля для промпта/
+
+# ── Локальный операторский контур. Наружу не отдаётся ────────────────────────
+# Служебные папки проекта (правило гигиены: наружу никогда).
+.критики/
+Исследования/
+
+# Операторские копии документации с личными путями и хэндлом.
+docs/local/
+docs/completion-audit-*.md
+docs/ios-appium-operator-runbook.md
+AGENTS.md
+
+# Скрипты личного контура: iPhone/Appium, архиваторы профиля, доставка в
+# Google Drive владельца. Содержат абсолютные пути, хэндл и личный e-mail.
+# Публичной части репозитория нужен только build.mjs.
+scripts/*
+!scripts/build.mjs
+
+# Python-мусор.
+__pycache__/
+*.pyc

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { loadConfig, redactToken } from "./config.js";
-import { buildAuthUrl, exchangeCodeForLongLivedToken } from "./oauth.js";
+import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken } from "./oauth.js";
 import { saveStoredToken } from "./token-store.js";
 
 export type ParsedCallback =
@@ -75,7 +75,7 @@ export async function runCallbackServer(): Promise<void> {
     authMode: config.authMode,
     appId: config.appId,
     redirectUri: config.redirectUri,
-    scopes: config.defaultScopes,
+    scopes: config.defaultScopes ?? defaultScopesForAuthMode(config.authMode),
     forceReauth: true,
     graphApiVersion: config.graphApiVersion,
   });

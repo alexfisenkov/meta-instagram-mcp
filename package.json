@@ -4,6 +4,24 @@
   "private": true,
   "type": "module",
   "description": "Local MCP server for official Meta Instagram API read-only analytics.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexfisenkov/meta-instagram-mcp.git"
+  },
+  "homepage": "https://github.com/alexfisenkov/meta-instagram-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/alexfisenkov/meta-instagram-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "instagram",
+    "meta",
+    "graph-api",
+    "analytics",
+    "read-only"
+  ],
   "bin": {
     "meta-instagram-mcp": "./dist/server.js"
   },

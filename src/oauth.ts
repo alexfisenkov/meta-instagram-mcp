@@ -1,323 +1,231 @@
-import type { StoredToken } from "./token-store.js";
+import { requestJsonHttp, type JsonHttpRequestInit } from "./http-json.js";
 
-export type AuthMode = "instagram" | "facebook";
+export type AuthMode = "facebook" | "instagram";
 
-export const DEFAULT_READ_SCOPES = [
-  "instagram_business_basic",
-  "instagram_business_manage_insights",
-] as const;
-
-export const DEFAULT_ANALYTICS_SCOPES = [
-  ...DEFAULT_READ_SCOPES,
-  "instagram_business_manage_comments",
-] as const;
-
-export const FULL_STANDARD_SCOPES = [
-  ...DEFAULT_ANALYTICS_SCOPES,
-  "instagram_business_content_publish",
-  "instagram_business_manage_messages",
-] as const;
-
-export const SCOPE_PRESETS = {
-  readOnly: [...DEFAULT_READ_SCOPES],
-  analytics: [...DEFAULT_ANALYTICS_SCOPES],
-  fullStandard: [...FULL_STANDARD_SCOPES],
-} as const;
-
-export const FACEBOOK_READ_SCOPES = [
-  "instagram_basic",
-  "pages_show_list",
-] as const;
-
-export const FACEBOOK_ANALYTICS_SCOPES = [
-  ...FACEBOOK_READ_SCOPES,
-  "pages_read_engagement",
-  "instagram_manage_insights",
-  "instagram_manage_comments",
-] as const;
-
-export const FACEBOOK_FULL_STANDARD_SCOPES = [
-  ...FACEBOOK_ANALYTICS_SCOPES,
-  "instagram_content_publish",
-  "instagram_manage_messages",
-] as const;
-
-export const FACEBOOK_SCOPE_PRESETS = {
-  readOnly: [...FACEBOOK_READ_SCOPES],
-  analytics: [...FACEBOOK_ANALYTICS_SCOPES],
-  fullStandard: [...FACEBOOK_FULL_STANDARD_SCOPES],
-} as const;
-
-type FetchLike = typeof fetch;
-
-export interface BuildAuthUrlOptions {
+export interface OAuthToken {
+  accessToken: string;
+  tokenType?: string;
   authMode?: AuthMode;
+  expiresAt?: string;
+  userId?: string;
+  pageId?: string;
+  permissions?: string[];
+}
+
+export function defaultScopesForAuthMode(authMode: AuthMode): string[] {
+  return [...getScopePresets(authMode).analytics];
+}
+
+export function getScopePresets(authMode: AuthMode): Record<"readOnly" | "analytics" | "fullStandard", string[]> {
+  if (authMode === "facebook") {
+    return {
+      readOnly: ["instagram_basic", "pages_show_list", "pages_read_engagement"],
+      analytics: [
+        "instagram_basic",
+        "pages_show_list",
+        "pages_read_engagement",
+        "instagram_manage_insights",
+        "instagram_manage_comments"
+      ],
+      fullStandard: [
+        "instagram_basic",
+        "pages_show_list",
+        "pages_read_engagement",
+        "instagram_manage_insights",
+        "instagram_manage_comments",
+        "instagram_content_publish",
+        "instagram_manage_messages"
+      ]
+    };
+  }
+  return {
+    readOnly: ["instagram_business_basic"],
+    analytics: [
+      "instagram_business_basic",
+      "instagram_business_manage_insights",
+      "instagram_business_manage_comments"
+    ],
+    fullStandard: [
+      "instagram_business_basic",
+      "instagram_business_manage_insights",
+      "instagram_business_manage_comments",
+      "instagram_business_content_publish",
+      "instagram_business_manage_messages"
+    ]
+  };
+}
+
+export function buildAuthUrl(options: {
+  authMode: AuthMode;
   appId: string;
   redirectUri: string;
-  scopes?: string[];
+  scopes: string[];
   forceReauth?: boolean;
   enableFacebookLogin?: boolean;
   graphApiVersion?: string;
+}): URL {
+  const url = options.authMode === "facebook"
+    ? new URL(`https://www.facebook.com/${options.graphApiVersion ?? "v25.0"}/dialog/oauth`)
+    : new URL("https://www.instagram.com/oauth/authorize");
+  url.searchParams.set("client_id", options.appId);
+  url.searchParams.set("redirect_uri", options.redirectUri);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", options.scopes.join(","));
+  if (options.forceReauth) {
+    if (options.authMode === "facebook") url.searchParams.set("auth_type", "rerequest");
+    else url.searchParams.set("force_reauth", "true");
+  }
+  if (options.authMode === "instagram" && options.enableFacebookLogin !== undefined) {
+    url.searchParams.set("enable_fb_login", options.enableFacebookLogin ? "1" : "0");
+  }
+  return url;
 }
 
-export interface ExchangeCodeOptions {
-  authMode?: AuthMode;
+export async function exchangeCodeForLongLivedToken(options: {
+  authMode: AuthMode;
   code: string;
   appId: string;
   appSecret: string;
   redirectUri: string;
-  graphApiVersion?: string;
-  fetchImpl?: FetchLike;
-  now?: Date;
+  graphApiVersion: string;
+}): Promise<OAuthToken> {
+  if (options.authMode === "facebook") {
+    const shortToken = await graphGet(`https://graph.facebook.com/${options.graphApiVersion}/oauth/access_token`, {
+      client_id: options.appId,
+      client_secret: options.appSecret,
+      redirect_uri: options.redirectUri,
+      code: options.code
+    });
+    const accessToken = requireString(shortToken.access_token, "Facebook short-lived access_token");
+    const longToken = await graphGet(`https://graph.facebook.com/${options.graphApiVersion}/oauth/access_token`, {
+      grant_type: "fb_exchange_token",
+      client_id: options.appId,
+      client_secret: options.appSecret,
+      fb_exchange_token: accessToken
+    });
+    return normalizeToken(longToken, "facebook");
+  }
+
+  const shortToken = await graphPostForm("https://api.instagram.com/oauth/access_token", {
+    client_id: options.appId,
+    client_secret: options.appSecret,
+    grant_type: "authorization_code",
+    redirect_uri: options.redirectUri,
+    code: options.code
+  });
+  const accessToken = requireString(shortToken.access_token, "Instagram short-lived access_token");
+  const longToken = await graphGet("https://graph.instagram.com/access_token", {
+    grant_type: "ig_exchange_token",
+    client_secret: options.appSecret,
+    access_token: accessToken
+  });
+  return normalizeToken(longToken, "instagram");
 }
 
-export interface RefreshTokenOptions {
-  authMode?: AuthMode;
+export async function refreshLongLivedToken(options: {
+  authMode: AuthMode;
   accessToken: string;
   appId?: string;
   appSecret?: string;
   userId?: string;
   pageId?: string;
-  graphApiVersion?: string;
-  fetchImpl?: FetchLike;
-  now?: Date;
-}
-
-interface ShortTokenResponse {
-  data?: Array<{
-    access_token: string;
-    user_id?: string;
-    permissions?: string;
-  }>;
-  access_token?: string;
-  user_id?: string;
-  permissions?: string;
-}
-
-interface LongTokenResponse {
-  access_token: string;
-  token_type?: string;
-  expires_in?: number;
-}
-
-export function buildAuthUrl(options: BuildAuthUrlOptions): URL {
-  if ((options.authMode ?? "instagram") === "facebook") return buildFacebookAuthUrl(options);
-
-  const url = new URL("https://www.instagram.com/oauth/authorize");
-  url.searchParams.set("client_id", options.appId);
-  url.searchParams.set("redirect_uri", options.redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", (options.scopes ?? defaultScopesForAuthMode("instagram")).join(","));
-
-  if (options.forceReauth) url.searchParams.set("force_reauth", "1");
-  if (options.enableFacebookLogin !== undefined) {
-    url.searchParams.set("enable_fb_login", options.enableFacebookLogin ? "1" : "0");
+  graphApiVersion: string;
+}): Promise<OAuthToken> {
+  if (options.authMode === "facebook") {
+    if (!options.appId || !options.appSecret) {
+      throw new Error("META_INSTAGRAM_APP_ID and META_INSTAGRAM_APP_SECRET are required to refresh Facebook Login tokens.");
+    }
+    const token = await graphGet(`https://graph.facebook.com/${options.graphApiVersion}/oauth/access_token`, {
+      grant_type: "fb_exchange_token",
+      client_id: options.appId,
+      client_secret: options.appSecret,
+      fb_exchange_token: options.accessToken
+    });
+    return {
+      ...normalizeToken(token, "facebook"),
+      userId: options.userId,
+      pageId: options.pageId
+    };
   }
 
-  return url;
-}
-
-export async function exchangeCodeForLongLivedToken(options: ExchangeCodeOptions): Promise<StoredToken> {
-  if ((options.authMode ?? "instagram") === "facebook") return exchangeFacebookCodeForLongLivedToken(options);
-
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const shortToken = await exchangeCodeForShortToken(options, fetchImpl);
-  const longTokenUrl = new URL("https://graph.instagram.com/access_token");
-  longTokenUrl.searchParams.set("grant_type", "ig_exchange_token");
-  longTokenUrl.searchParams.set("client_secret", options.appSecret);
-  longTokenUrl.searchParams.set("access_token", shortToken.accessToken);
-
-  const response = await fetchImpl(longTokenUrl);
-  const body = await readJson<LongTokenResponse>(response);
-
-  return {
-    accessToken: body.access_token,
-    tokenType: body.token_type ?? "bearer",
-    authMode: "instagram",
-    userId: shortToken.userId,
-    permissions: shortToken.permissions,
-    expiresAt: expiresAtIso(body.expires_in, options.now),
-  };
-}
-
-export async function refreshLongLivedToken(options: RefreshTokenOptions): Promise<StoredToken> {
-  if ((options.authMode ?? "instagram") === "facebook") return refreshFacebookLongLivedToken(options);
-
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const url = new URL("https://graph.instagram.com/refresh_access_token");
-  url.searchParams.set("grant_type", "ig_refresh_token");
-  url.searchParams.set("access_token", options.accessToken);
-
-  const response = await fetchImpl(url);
-  const body = await readJson<LongTokenResponse>(response);
-
-  return {
-    accessToken: body.access_token,
-    tokenType: body.token_type ?? "bearer",
-    authMode: "instagram",
-    userId: options.userId,
-    pageId: options.pageId,
-    expiresAt: expiresAtIso(body.expires_in, options.now),
-  };
-}
-
-export function getScopePresets(authMode: AuthMode) {
-  return authMode === "facebook" ? FACEBOOK_SCOPE_PRESETS : SCOPE_PRESETS;
-}
-
-export function defaultScopesForAuthMode(authMode: AuthMode): string[] {
-  return authMode === "facebook" ? [...FACEBOOK_ANALYTICS_SCOPES] : [...DEFAULT_ANALYTICS_SCOPES];
-}
-
-function buildFacebookAuthUrl(options: BuildAuthUrlOptions): URL {
-  const url = new URL(`https://www.facebook.com/${normalizeVersion(options.graphApiVersion ?? "v25.0")}/dialog/oauth`);
-  url.searchParams.set("client_id", options.appId);
-  url.searchParams.set("redirect_uri", options.redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", (options.scopes ?? defaultScopesForAuthMode("facebook")).join(","));
-
-  if (options.forceReauth) url.searchParams.set("auth_type", "rerequest");
-
-  return url;
-}
-
-async function exchangeFacebookCodeForLongLivedToken(options: ExchangeCodeOptions): Promise<StoredToken> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const shortToken = await exchangeFacebookCodeForShortToken(options, fetchImpl);
-  const longToken = await exchangeFacebookToken({
-    accessToken: shortToken.accessToken,
-    appId: options.appId,
-    appSecret: options.appSecret,
-    graphApiVersion: options.graphApiVersion,
-    fetchImpl,
+  const token = await graphGet("https://graph.instagram.com/refresh_access_token", {
+    grant_type: "ig_refresh_token",
+    access_token: options.accessToken
   });
-
   return {
-    accessToken: longToken.access_token,
-    tokenType: longToken.token_type ?? "bearer",
-    authMode: "facebook",
-    expiresAt: expiresAtIso(longToken.expires_in, options.now),
-  };
-}
-
-async function refreshFacebookLongLivedToken(options: RefreshTokenOptions): Promise<StoredToken> {
-  if (!options.appId || !options.appSecret) {
-    throw new Error("Missing META_INSTAGRAM_APP_ID or META_INSTAGRAM_APP_SECRET for Facebook token refresh.");
-  }
-
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const longToken = await exchangeFacebookToken({
-    accessToken: options.accessToken,
-    appId: options.appId,
-    appSecret: options.appSecret,
-    graphApiVersion: options.graphApiVersion,
-    fetchImpl,
-  });
-
-  return {
-    accessToken: longToken.access_token,
-    tokenType: longToken.token_type ?? "bearer",
-    authMode: "facebook",
+    ...normalizeToken(token, "instagram"),
     userId: options.userId,
-    pageId: options.pageId,
-    expiresAt: expiresAtIso(longToken.expires_in, options.now),
+    pageId: options.pageId
   };
 }
 
-async function exchangeFacebookCodeForShortToken(
-  options: ExchangeCodeOptions,
-  fetchImpl: FetchLike,
-): Promise<{ accessToken: string }> {
-  const url = facebookOAuthUrl(options.graphApiVersion);
-  url.searchParams.set("client_id", options.appId);
-  url.searchParams.set("client_secret", options.appSecret);
-  url.searchParams.set("redirect_uri", options.redirectUri);
-  url.searchParams.set("code", options.code);
-
-  const response = await fetchImpl(url);
-  const body = await readJson<LongTokenResponse>(response);
-
-  if (!body.access_token) {
-    throw new Error("Facebook OAuth response did not include access_token");
-  }
-
-  return { accessToken: body.access_token };
+async function graphGet(urlString: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+  const url = new URL(urlString);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return requestJson(url, { method: "GET" });
 }
 
-async function exchangeFacebookToken(options: {
-  accessToken: string;
-  appId: string;
-  appSecret: string;
-  graphApiVersion?: string;
-  fetchImpl: FetchLike;
-}): Promise<LongTokenResponse> {
-  const url = facebookOAuthUrl(options.graphApiVersion);
-  url.searchParams.set("grant_type", "fb_exchange_token");
-  url.searchParams.set("client_id", options.appId);
-  url.searchParams.set("client_secret", options.appSecret);
-  url.searchParams.set("fb_exchange_token", options.accessToken);
-
-  return readJson<LongTokenResponse>(await options.fetchImpl(url));
-}
-
-async function exchangeCodeForShortToken(
-  options: ExchangeCodeOptions,
-  fetchImpl: FetchLike,
-): Promise<{ accessToken: string; userId?: string; permissions?: string[] }> {
-  const form = new URLSearchParams();
-  form.set("client_id", options.appId);
-  form.set("client_secret", options.appSecret);
-  form.set("grant_type", "authorization_code");
-  form.set("redirect_uri", options.redirectUri);
-  form.set("code", options.code);
-
-  const response = await fetchImpl("https://api.instagram.com/oauth/access_token", {
+async function graphPostForm(urlString: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+  return requestJson(new URL(urlString), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: form,
+    body: new URLSearchParams(params)
   });
-  const body = await readJson<ShortTokenResponse>(response);
-  const token = body.data?.[0] ?? body;
+}
 
-  if (!token.access_token) {
-    throw new Error("Instagram OAuth response did not include access_token");
+async function requestJson(url: URL, init: JsonHttpRequestInit): Promise<Record<string, unknown>> {
+  const response = await requestJsonHttp(url, { ...init, headers: { accept: "application/json", ...init.headers } });
+  const body = isRecord(response.body) ? response.body : {};
+  if (!response.ok || isRecord(body.error)) {
+    const message = isRecord(body.error) && typeof body.error.message === "string"
+      ? body.error.message
+      : `HTTP ${response.status}`;
+    throw new Error(`Meta OAuth error: ${message}`);
   }
+  return body;
+}
 
+function normalizeToken(raw: Record<string, unknown>, authMode: AuthMode): OAuthToken {
+  const accessToken = requireString(raw.access_token, "access_token");
+  // user_id и permissions приходят в ответе Instagram Login и нужны дальше:
+  // callback-server сохраняет userId в токен-стор, иначе аккаунт приходится
+  // отдельно доразрешать через meta_resolve_instagram_account. Рефакторинг
+  // транспорта их потерял — восстановлено 20.08.2026.
+  const userId = typeof raw.user_id === "string" ? raw.user_id
+    : typeof raw.user_id === "number" ? String(raw.user_id)
+    : undefined;
   return {
-    accessToken: token.access_token,
-    userId: token.user_id,
-    permissions: token.permissions
-      ?.split(",")
-      .map((permission) => permission.trim())
-      .filter(Boolean),
+    accessToken,
+    tokenType: typeof raw.token_type === "string" ? raw.token_type : "bearer",
+    authMode,
+    expiresAt: expiresAt(raw.expires_in),
+    ...(userId ? { userId } : {}),
+    ...(normalizePermissions(raw.permissions) ? { permissions: normalizePermissions(raw.permissions) } : {})
   };
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
-
-  if (!response.ok) {
-    const message = typeof body?.error_message === "string"
-      ? body.error_message
-      : typeof body?.error?.message === "string"
-        ? body.error.message
-        : `HTTP ${response.status}`;
-    throw new Error(`Meta OAuth request failed: ${message}`);
+// Meta отдаёт permissions то массивом, то строкой через запятую — приводим к массиву.
+function normalizePermissions(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const list = value.filter((v): v is string => typeof v === "string");
+    return list.length ? list : undefined;
   }
-
-  return body as T;
+  if (typeof value === "string" && value.trim()) {
+    return value.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return undefined;
 }
 
-function facebookOAuthUrl(graphApiVersion: string | undefined): URL {
-  return new URL(`https://graph.facebook.com/${normalizeVersion(graphApiVersion ?? "v25.0")}/oauth/access_token`);
+function expiresAt(expiresIn: unknown): string | undefined {
+  if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) return undefined;
+  return new Date(Date.now() + expiresIn * 1000).toISOString();
 }
 
-function expiresAtIso(expiresInSeconds: number | undefined, now: Date = new Date()): string | undefined {
-  if (expiresInSeconds === undefined) return undefined;
-  return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value) throw new Error(`${label} was not returned by Meta.`);
+  return value;
 }
 
-function normalizeVersion(version: string): string {
-  return version.replace(/^\/+|\/+$/g, "");
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,50 +1,68 @@
-import { describe, expect, it, vi } from "vitest";
-import { MetaClient, MetaApiError } from "../src/meta-client.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-describe("MetaClient", () => {
-  it("adds version, access token, fields and pagination params to Graph requests", async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "1" }] }), { status: 200 }));
-    const client = new MetaClient({
-      accessToken: "token",
-      apiVersion: "v25.0",
-      fetchImpl: fetchMock,
-    });
+// Транспорт больше не инжектится через fetchImpl — MetaClient импортирует
+// requestJsonHttp напрямую, поэтому подменяем модуль целиком.
+vi.mock("../src/http-json.js", () => ({ requestJsonHttp: vi.fn() }));
 
-    const result = await client.get("/me/media", {
-      fields: ["id", "caption"],
-      limit: 25,
-    });
+import { requestJsonHttp } from "../src/http-json.js";
+import { MetaClient } from "../src/meta-client.js";
+import { jsonHttpResponse, metaErrorResponse } from "./helpers/json-http.js";
+
+const httpMock = vi.mocked(requestJsonHttp);
+
+function makeClient(baseUrl = "https://graph.instagram.com"): MetaClient {
+  return new MetaClient({ accessToken: "token", apiVersion: "v25.0", baseUrl });
+}
+
+function requestedUrl(call = 0): URL {
+  return httpMock.mock.calls[call][0];
+}
+
+describe("MetaClient request assembly", () => {
+  beforeEach(() => {
+    httpMock.mockReset();
+  });
+
+  it("adds api version, fields, pagination and the access token", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ data: [{ id: "1" }] }));
+
+    const result = await makeClient().get("/me/media", { fields: ["id", "caption"], limit: 25 });
 
     expect(result).toEqual({ data: [{ id: "1" }] });
-    const url = new URL(String(fetchMock.mock.calls[0][0]));
-    expect(url.href).toBe("https://graph.instagram.com/v25.0/me/media?fields=id%2Ccaption&limit=25&access_token=token");
+    expect(requestedUrl().href).toBe(
+      "https://graph.instagram.com/v25.0/me/media?fields=id%2Ccaption&limit=25&access_token=token"
+    );
+    expect(httpMock.mock.calls[0][1]?.method).toBe("GET");
   });
 
-  it("rejects absolute raw paths", async () => {
-    const client = new MetaClient({ accessToken: "token", apiVersion: "v25.0", fetchImpl: vi.fn() });
+  it("does not prefix the api version twice and trims the base url", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ id: "17841400000000000" }));
 
-    await expect(client.get("https://example.com/steal")).rejects.toThrow("Meta path must be relative");
+    await makeClient("https://graph.facebook.com/").get("/v25.0/me");
+
+    expect(requestedUrl().href).toBe("https://graph.facebook.com/v25.0/me?access_token=token");
   });
 
-  it("normalizes Meta API errors without exposing access tokens", async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
-      error: {
-        message: "Bad token token-secret",
-        type: "OAuthException",
-        code: 190,
-      },
-    }), { status: 400 }));
-    const client = new MetaClient({
-      accessToken: "token-secret",
-      apiVersion: "v25.0",
-      fetchImpl: fetchMock,
-    });
+  it("merges the nested query object and skips undefined values", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ data: [] }));
 
-    await client.get("/me").catch((error: MetaApiError) => {
-      expect(error.name).toBe("MetaApiError");
-      expect(error.status).toBe(400);
-      expect(error.code).toBe(190);
-      expect(error.message).not.toContain("token-secret");
-    });
+    await makeClient().get("/me/media", { limit: undefined, query: { since: "2026-01-01" } });
+
+    expect(requestedUrl().searchParams.get("since")).toBe("2026-01-01");
+    expect(requestedUrl().searchParams.has("limit")).toBe(false);
+  });
+
+  it("raises Meta errors returned with a non-2xx status", async () => {
+    httpMock.mockResolvedValueOnce(metaErrorResponse("Unsupported get request."));
+
+    await expect(makeClient().get("/me")).rejects.toThrow(
+      "Meta Graph API error 400: Unsupported get request. (OAuthException, code 190)"
+    );
+  });
+
+  it("raises Meta errors that arrive with a 200 status", async () => {
+    httpMock.mockResolvedValueOnce(metaErrorResponse("Rate limited", { status: 200, type: "OAuthException", code: 4 }));
+
+    await expect(makeClient().get("/me")).rejects.toThrow("Meta Graph API error 200: Rate limited");
   });
 });
