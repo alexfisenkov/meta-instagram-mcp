@@ -11,6 +11,7 @@ describe("tool handlers", () => {
         redirectUri: "http://localhost:8787/callback",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -36,6 +37,7 @@ describe("tool handlers", () => {
         userId: "ig-user",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -68,6 +70,7 @@ describe("tool handlers", () => {
         userId: "ig-user",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn().mockResolvedValue({
@@ -103,6 +106,7 @@ describe("tool handlers", () => {
         redirectUri: "http://localhost:8787/callback",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -141,6 +145,7 @@ describe("tool handlers", () => {
         accessToken: "env-token",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -170,6 +175,7 @@ describe("tool handlers", () => {
         userId: "ig-1",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -197,6 +203,7 @@ describe("tool handlers", () => {
         userId: "ig-1",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),
@@ -227,6 +234,7 @@ describe("tool handlers", () => {
         accessToken: "env-token",
         graphApiVersion: "v25.0",
         tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
       },
       tokenStore: {
         load: vi.fn(),

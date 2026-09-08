@@ -57,6 +57,42 @@ export class MetaClient {
     return body;
   }
 
+  /**
+   * Единственный записывающий путь клиента: контейнер публикации и сама
+   * публикация (`/media`, `/media_publish`). Параметры едут телом, а не в
+   * строке запроса, — иначе `access_token` осел бы в журналах прокси.
+   * Проверка зарезервированных ключей остаётся и здесь: `path` может нести
+   * «?access_token=…», а тело — свой `access_token`, и любой из них подменил
+   * бы личность, от имени которой публикуется пост. Хост по-прежнему только
+   * графовый: buildUrl общий с GET.
+   */
+  async post(path: string, params: GraphQuery = {}): Promise<unknown> {
+    const url = this.buildUrl(path);
+    assertNoReservedParams(url.searchParams);
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      setParam(body, key, value);
+    }
+    assertNoReservedParams(body);
+    body.set("access_token", this.accessToken);
+
+    const response = await requestJsonHttp(url, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      body,
+      // Запись не повторяем на резервном IP: таймаут здесь мог случиться уже
+      // ПОСЛЕ того, как Meta приняла запрос (контейнер создан / пост
+      // опубликован) — второй POST на другом маршруте стал бы вторым
+      // действием, а не повтором первого. См. JsonHttpRequestInit.allowRouteRetry.
+      allowRouteRetry: false
+    });
+    const responseBody = response.body;
+    if (!response.ok || isMetaError(responseBody)) {
+      throw new Error(formatMetaError(response.status, responseBody, this.accessToken));
+    }
+    return responseBody;
+  }
+
   private buildUrl(path: string): URL {
     // Absolute URLs are allowed only to Meta Graph hosts. Without this an absolute
     // `path` (e.g. "https://attacker.example/collect") would receive our real
@@ -102,12 +138,16 @@ function assertNoReservedParams(params: URLSearchParams): void {
 }
 
 function appendParam(url: URL, key: string, value: GraphQueryValue): void {
+  setParam(url.searchParams, key, value);
+}
+
+function setParam(params: URLSearchParams, key: string, value: GraphQueryValue): void {
   if (value === undefined) return;
   if (Array.isArray(value)) {
-    url.searchParams.set(key, value.join(","));
+    params.set(key, value.join(","));
     return;
   }
-  url.searchParams.set(key, String(value));
+  params.set(key, String(value));
 }
 
 function isMetaError(value: unknown): boolean {

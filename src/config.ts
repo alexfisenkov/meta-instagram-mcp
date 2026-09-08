@@ -14,6 +14,15 @@ export interface MetaInstagramConfig {
   defaultScopes?: string[];
   graphApiVersion: string;
   tokenStorePath: string;
+  /** Предохранитель записи: без него инструменты публикации отказывают. */
+  writeEnabled?: boolean;
+  /**
+   * Журнал публикаций: по строке JSON на каждую попытку. loadConfig — его
+   * единственный источник (он же вычисляет путь по умолчанию, если
+   * META_INSTAGRAM_PUBLISH_LOG не задан) — поэтому здесь не optional: у
+   * второго места, где то же самое вычислялось бы снова, взяться неоткуда.
+   */
+  publishLogPath: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -21,6 +30,8 @@ type Env = Record<string, string | undefined>;
 export function loadConfig(env: Env = process.env): MetaInstagramConfig {
   const effectiveEnv = env === process.env ? { ...loadProjectDotEnv(), ...process.env } : env;
   const home = effectiveEnv.HOME ?? process.env.HOME ?? ".";
+  const tokenStorePath = blankToUndefined(effectiveEnv.META_TOKEN_STORE_PATH)
+    ?? join(home, ".config", "meta-instagram-mcp", "token.json");
   return {
     authMode: parseAuthMode(effectiveEnv.META_AUTH_MODE ?? effectiveEnv.META_INSTAGRAM_AUTH_MODE),
     appId: blankToUndefined(effectiveEnv.META_INSTAGRAM_APP_ID),
@@ -31,7 +42,12 @@ export function loadConfig(env: Env = process.env): MetaInstagramConfig {
     pageId: blankToUndefined(effectiveEnv.META_FACEBOOK_PAGE_ID),
     defaultScopes: parseList(effectiveEnv.META_INSTAGRAM_SCOPES),
     graphApiVersion: blankToUndefined(effectiveEnv.META_GRAPH_API_VERSION) ?? "v25.0",
-    tokenStorePath: blankToUndefined(effectiveEnv.META_TOKEN_STORE_PATH) ?? join(home, ".config", "meta-instagram-mcp", "token.json")
+    tokenStorePath: tokenStorePath,
+    // Строгое «true» и ничего кроме: «1», «yes» и пустая строка не считаются
+    // разрешением. Опечатка в юните не должна открывать публикацию.
+    writeEnabled: blankToUndefined(effectiveEnv.META_INSTAGRAM_WRITE)?.toLowerCase() === "true",
+    publishLogPath: blankToUndefined(effectiveEnv.META_INSTAGRAM_PUBLISH_LOG)
+      ?? join(dirname(tokenStorePath), "publish-log.jsonl")
   };
 }
 

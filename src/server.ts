@@ -239,6 +239,53 @@ export function createServer(): McpServer {
     async (args) => jsonToolResult(await handlers.resolveInstagramAccount(args))
   );
   server.registerTool(
+    "meta_create_media_container",
+    {
+      title: "Create Instagram Media Container",
+      description:
+        "Создать контейнер публикации (POST /{ig-user-id}/media) по ПУБЛИЧНОЙ ссылке на медиа и вернуть его id и status_code. " +
+        "Ничего не публикует: без meta_publish_media контейнер истекает сам. Это сухой прогон публикации.",
+      inputSchema: z.object({
+        accessToken: z.string().optional(),
+        userId: z.string().optional(),
+        imageUrl: z.string().optional().describe("Публичная ссылка на JPEG. Взаимоисключающа с videoUrl."),
+        videoUrl: z.string().optional().describe("Публичная ссылка на MP4/MOV. Взаимоисключающа с imageUrl."),
+        mediaType: z.enum(["IMAGE", "REELS", "STORIES"]).optional(),
+        caption: z.string().max(2200).optional(),
+        coverUrl: z.string().optional(),
+        thumbOffset: z.number().int().min(0).optional(),
+        shareToFeed: z.boolean().optional(),
+        altText: z.string().max(1000).optional(),
+        checkStatus: z.boolean().optional().describe(
+          "Прочитать status_code контейнера один раз сразу после создания — это разовое чтение, а не опрос до " +
+          "готовности. По умолчанию да. Видео (REELS/STORIES) Meta обрабатывает асинхронно: сразу после создания " +
+          "status_code обычно IN_PROGRESS, и повторный опрос контейнера до FINISHED/ERROR — на вызывающей стороне " +
+          "(meta_raw_get по /<containerId> с полем status_code), инструмент сам не повторяет."
+        )
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => jsonToolResult(await handlers.createMediaContainer(args))
+  );
+  server.registerTool(
+    "meta_publish_media",
+    {
+      title: "Publish Instagram Media Container",
+      description:
+        "Опубликовать готовый контейнер (POST /{ig-user-id}/media_publish). Необратимо. " +
+        "Требует confirm: true и переменной окружения META_INSTAGRAM_WRITE=true — без любого из двух отказывает, ничего не публикуя. " +
+        "Каждая попытка и её исход пишутся в журнал публикаций.",
+      inputSchema: z.object({
+        accessToken: z.string().optional(),
+        userId: z.string().optional(),
+        creationId: z.string().min(1).describe("id контейнера из meta_create_media_container."),
+        confirm: z.boolean().optional().describe("Обязателен и обязан быть true: без него отказ.")
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => jsonToolResult(await handlers.publishMedia(args))
+  );
+  server.registerTool(
     "meta_raw_get",
     {
       title: "Meta Raw GET",

@@ -9,6 +9,7 @@ import {
   type AuthMode,
   type OAuthToken
 } from "./oauth.js";
+import { createPublishHandlers } from "./publish.js";
 import { loadStoredToken, saveStoredToken, type StoredInstagramToken } from "./token-store.js";
 
 interface TokenStore {
@@ -79,7 +80,20 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     };
   }
 
+  // Публикация живёт отдельным модулем: у неё свои предохранители и свой
+  // журнал, и мешать её с чтением в одном файле — верный способ однажды
+  // проглядеть, что предохранитель обошли.
+  const publish = createPublishHandlers({
+    config: dependencies.config,
+    resolveToken,
+    makeClient,
+    resolveUserId: (args, resolved) => resolveInstagramUserId(args, resolved, dependencies.config)
+  });
+
   return {
+    createMediaContainer: publish.createMediaContainer,
+    publishMedia: publish.publishMedia,
+
     async authStatus() {
       const stored = await store.load();
       return {

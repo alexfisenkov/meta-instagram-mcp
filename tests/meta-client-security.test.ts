@@ -146,3 +146,51 @@ describe("MetaClient redacts the access token in error messages", () => {
     expect(message).toContain("[redacted-token]");
   });
 });
+
+/**
+ * POST — единственный записывающий путь клиента (публикация, история 29а).
+ * Защиты у него те же, что у GET, и это не самоочевидно: guard'ы писались
+ * под read-only и легко было оставить их только там, где они уже стояли.
+ */
+describe("MetaClient POST keeps the read-path guards", () => {
+  beforeEach(() => {
+    httpMock.mockReset();
+  });
+
+  it.each(["method", "_method", "access_token"])("rejects %s smuggled through the body", async (key) => {
+    await expect(client().post("/ig/media", { [key]: "delete" })).rejects.toThrow(/Reserved query key/);
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a reserved key baked into the path", async () => {
+    await expect(client().post("/ig/media?access_token=attacker-token")).rejects.toThrow(/Reserved query key/);
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to POST to a foreign host", async () => {
+    await expect(client().post("https://attacker.example/collect", { image_url: "https://e/x.jpg" }))
+      .rejects.toThrow(/is not a Meta Graph host/);
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+
+  it("sends parameters in the body and keeps the token out of the URL", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ id: "container-1" }));
+
+    const result = await client().post("/ig/media", { image_url: "https://example.com/a.jpg", caption: "hi" });
+
+    expect(result).toEqual({ id: "container-1" });
+    const [url, init] = httpMock.mock.calls[0];
+    expect(url.href).toBe("https://graph.instagram.com/v25.0/ig/media");
+    expect(init?.method).toBe("POST");
+    expect(String(init?.body)).toBe(
+      "image_url=https%3A%2F%2Fexample.com%2Fa.jpg&caption=hi&access_token=real-token"
+    );
+  });
+
+  it("redacts the token echoed back in a POST error", async () => {
+    httpMock.mockResolvedValueOnce(metaErrorResponse("Invalid OAuth access token real-token for this app"));
+
+    await expect(client().post("/ig/media_publish", { creation_id: "c-1" }))
+      .rejects.toThrow(/\[redacted-token\]/);
+  });
+});

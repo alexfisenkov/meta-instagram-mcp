@@ -5,6 +5,16 @@ export interface JsonHttpRequestInit {
   headers?: Record<string, string | undefined>;
   body?: string | Buffer | URLSearchParams;
   timeoutMs?: number;
+  /**
+   * Перебор резервных IP при сетевом сбое (таймаут, обрыв). По умолчанию
+   * включён — это безопасно для чтения, идемпотентного по определению.
+   * Для записи (POST) вызывающая сторона обязана передать false: сеть могла
+   * оборваться уже ПОСЛЕ того, как Meta приняла и обработала запрос (например,
+   * реально опубликовала пост), и повтор на другом IP превратился бы во вторую
+   * попытку того же действия — Graph API не гарантирует идемпотентность
+   * publish при таймауте на нашей стороне.
+   */
+  allowRouteRetry?: boolean;
 }
 
 export interface JsonHttpAttempt {
@@ -33,7 +43,7 @@ export class JsonHttpNetworkError extends Error {
 }
 
 export async function requestJsonHttp(url: URL, init: JsonHttpRequestInit = {}): Promise<JsonHttpResponse> {
-  const routes = buildRoutes(url.hostname);
+  const routes = init.allowRouteRetry === false ? [{ label: "system-dns" }] : buildRoutes(url.hostname);
   const attempts: JsonHttpAttempt[] = [];
 
   for (const route of routes) {
