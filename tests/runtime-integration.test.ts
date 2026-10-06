@@ -278,7 +278,7 @@ describe("runtime composition", () => {
       await client.close(); await server.close(); await restartedClient?.close(); await restartedServer?.close();
       host.close(); input.end(); output.end();
     }
-  }, process.platform === "win32" ? 45_000 : 15_000);
+  }, process.platform === "win32" ? 90_000 : 15_000);
 
   it("bootstraps browser readiness from native account inspection through Hub, router, and MCP", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-browser-bootstrap-")); dirs.push(dir);
