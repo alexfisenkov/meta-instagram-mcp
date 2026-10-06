@@ -78,7 +78,14 @@ if (-not $item.PSIsContainer) { exit 3 }
       const entry = Object.entries(process.env).find(([key]) => key.toLowerCase() === name.toLowerCase());
       if (entry) runner[name] = entry[1];
     }
-    expect({ minimal: run(minimal), runner: run(runner) }).toEqual({ minimal: "PASS", runner: "PASS" });
+    const modulePathOnly = { ...minimal } as NodeJS.ProcessEnv;
+    const modulePath = Object.entries(process.env).find(([key]) => key.toLowerCase() === "psmodulepath");
+    if (modulePath) modulePathOnly.PSModulePath = modulePath[1];
+    expect({ minimal: run(minimal), modulePathOnly: run(modulePathOnly), runner: run(runner) }).toEqual({
+      minimal: "PASS",
+      modulePathOnly: "PASS",
+      runner: "PASS",
+    });
   }, 12_000);
 
   it("checks containment using the host path rules", () => {
