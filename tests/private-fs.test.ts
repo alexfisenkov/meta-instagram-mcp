@@ -49,7 +49,7 @@ describe("private filesystem helpers", () => {
       const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $path = $env:INSTAGRAM_MCP_TEST_ACL_PATH
-$acl = Get-Acl -LiteralPath $path
+$acl = [System.IO.File]::GetAccessControl($path)
 $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   $everyone,
@@ -59,7 +59,7 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Deny
 )
 [void]$acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $path -AclObject $acl
+[System.IO.File]::SetAccessControl($path, $acl)
 `;
       execFileSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
         encoding: "utf8",
