@@ -204,11 +204,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not set the private phone configuration 
 
 Приложение проверит защищённый DACL и отклонит файл с другими или унаследованными ACE.
 
-Заполните файл локально. Значения ниже — placeholders: замените их на адрес защищённого Hub, его bearer, выбранный профиль и свой handle. `baseUrl` — только HTTPS origin; `bearerToken` должен содержать не менее 32 байт. Профиль ниже read-only:
+Заполните файл локально. Значения ниже — placeholders: замените их на адрес защищённого Hub, его bearer, выбранный профиль и свой handle. `baseUrl` — только HTTPS origin; если доверенный reverse proxy публикует bridge под префиксом, задайте `bridgeBasePath`, например `/instagram`. Без этого поля клиент использует корневые `/bridge/*` маршруты. Префикс должен состоять из букв, цифр, `_` или `-` в сегментах пути, без завершающего `/`. `bearerToken` должен содержать не менее 32 байт. Профиль ниже read-only:
 
 ```json
 {
   "baseUrl": "https://hub.example.invalid",
+  "bridgeBasePath": "/instagram",
   "bearerToken": "replace-with-a-random-private-token-of-at-least-32-bytes",
   "mode": "phone_standalone",
   "source": "phone",
@@ -254,7 +255,7 @@ Companion проверяет Appium и WDA/UiAutomator2, открывает sess
 
 ### Browser Native Messaging host
 
-Extension и Native Host source включены в runtime. Сначала установите Chrome, Node.js 22+ и приложение в постоянный каталог; bridge JSON создайте отдельно в приватном config directory с правами `0600` на macOS/Linux. Его JSON содержит `baseUrl`, `bearerToken`, `mode: "browser_native_host"`, `source: "browser"`, `accountBinding`, `expectedAccountHandle` и список разрешённых `capabilities`; `allowBrowserWrites` остаётся `false`, пока запись отдельно не настроена. Не передавайте token в аргументах команд.
+Extension и Native Host source включены в runtime. Сначала установите Chrome, Node.js 22+ и приложение в постоянный каталог; bridge JSON создайте отдельно в приватном config directory с правами `0600` на macOS/Linux. Его JSON содержит `baseUrl`, необязательный `bridgeBasePath`, `bearerToken`, `mode: "browser_native_host"`, `source: "browser"`, `accountBinding`, `expectedAccountHandle` и список разрешённых `capabilities`; `allowBrowserWrites` остаётся `false`, пока запись отдельно не настроена. Не передавайте token в аргументах команд.
 
 Загрузите extension через `chrome://extensions` → Developer mode → Load unpacked, выберите `<app>/browser-extension` и скопируйте показанный Chrome extension ID. Он должен состоять из 32 символов `a`–`p`. Не добавляйте permissions вручную.
 
@@ -308,8 +309,8 @@ Registering the host does not install or sign the extension, establish bridge cr
 | Runtime asset | `<app>/dist/companion/browser-native-host.js`; Windows launcher — `<app>/tools/native-host/InstagramNativeHost.exe`. |
 | Host name | `com.alexfisenkov.instagram_companion`; origin allowlist — один `chrome-extension://<id>/`. |
 | Private bridge file | macOS/Linux путь задаётся в launcher как `INSTAGRAM_MCP_BRIDGE_CONFIG`; Windows default — `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. |
-| Required JSON fields | `baseUrl` (HTTPS origin), `bearerToken`, `mode`, `source`, `accountBinding`, `expectedAccountHandle`, `capabilities`; file values не передаются через argv. |
-| Hub routes | Host сам инициирует HTTPS `POST /bridge/register`, `/bridge/heartbeat`, `/bridge/poll`, `/bridge/result`; входящий порт на desktop не открывается. |
+| Required JSON fields | `baseUrl` (HTTPS origin), `bearerToken`, `mode`, `source`, `accountBinding`, `expectedAccountHandle`, `capabilities`; необязательный `bridgeBasePath` задаёт канонический mount prefix. File values не передаются через argv. |
+| Hub routes | Host сам инициирует HTTPS `POST /bridge/register`, `/bridge/heartbeat`, `/bridge/poll`, `/bridge/result`; заданный `bridgeBasePath` ставится перед этими путями, например `/instagram/bridge/register`. Входящий порт на desktop не открывается. |
 | MCP listener | По умолчанию `127.0.0.1:8787`; ключи `INSTAGRAM_MCP_HTTP_HOST`, `INSTAGRAM_MCP_HTTP_PORT`, `INSTAGRAM_MCP_HTTP_BEARER_TOKEN`, `INSTAGRAM_MCP_HTTP_ALLOWED_HOSTS`, `INSTAGRAM_MCP_HTTP_ALLOWED_ORIGINS`; public HTTPS ставится через доверенный reverse proxy. |
 | Poll bounds | Browser host по умолчанию опрашивает раз в 1 секунду, batch 10 задач; poll interval ограничен 250–30 000 мс, Hub принимает не более 20 задач за poll. |
 | Read bounds | Browser older-history scroll ограничен 5 страницами; inbox/thread operations используют переданный bounded `limit`. |

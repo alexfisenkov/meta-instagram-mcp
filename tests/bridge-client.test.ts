@@ -40,6 +40,50 @@ describe("OutboundBridgeClient", () => {
     expect(init.redirect).toBe("error");
   });
 
+  it.each([
+    {
+      bridgeBasePath: "",
+      expectedPaths: ["/bridge/register", "/bridge/heartbeat", "/bridge/poll", "/bridge/result"]
+    },
+    {
+      bridgeBasePath: "/instagram",
+      expectedPaths: ["/instagram/bridge/register", "/instagram/bridge/heartbeat", "/instagram/bridge/poll", "/instagram/bridge/result"]
+    }
+  ])("uses all bridge routes under the configured prefix $bridgeBasePath", async ({ bridgeBasePath, expectedPaths }) => {
+    const root = await mkdtemp(join(tmpdir(), "instagram-bridge-prefix-"));
+    roots.push(root);
+    const credentialsPath = join(root, "bridge-config.json");
+    await writeFile(credentialsPath, JSON.stringify({ ...base, bridgeBasePath }), { mode: 0o600 });
+    await ensurePrivateFile(credentialsPath);
+    const paths: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path.endsWith("/bridge/register")) {
+        return new Response(JSON.stringify({ bridgeId: "bridge-1", bridgeToken: "c".repeat(40) }), { status: 201 });
+      }
+      if (path.endsWith("/bridge/poll")) return new Response(JSON.stringify({ tasks: [] }), { status: 200 });
+      return new Response(null, { status: 204 });
+    });
+    const client = new OutboundBridgeClient({ ...base, bridgeBasePath, credentialsPath, fetchImpl });
+
+    await client.register();
+    await client.heartbeat();
+    await expect(client.poll("bridge-1", 1)).resolves.toEqual([]);
+    await client.submit("bridge-1", "task-1", { status: "complete" });
+
+    expect(paths).toEqual(expectedPaths);
+  });
+
+  it.each([
+    "instagram", "/instagram/", "//instagram", "/gateway//instagram", "/../instagram", "/./instagram",
+    "/gateway%2Finstagram", "/gateway\\instagram", "/gateway?debug=1", "/gateway#fragment"
+  ])("rejects noncanonical bridge base path %s before fetch", (bridgeBasePath) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    expect(() => new OutboundBridgeClient({ ...base, bridgeBasePath, fetchImpl })).toThrow(/canonical path prefix/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("registers only live capability subsets and pins the approval key returned over HTTPS", async () => {
     const root = await mkdtemp(join(tmpdir(), "instagram-bridge-client-"));
     roots.push(root);

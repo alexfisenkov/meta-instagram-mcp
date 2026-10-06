@@ -7,6 +7,8 @@ import { assertOutsideDirectory, assertPrivateFile, ensurePrivateDirectory, ensu
 
 export interface BridgeClientConfig {
   baseUrl: string;
+  /** Optional canonical reverse-proxy mount path, e.g. "/instagram". */
+  bridgeBasePath?: string;
   bearerToken: string;
   mode: BridgeMode;
   source: BridgeSource;
@@ -28,9 +30,11 @@ export class OutboundBridgeClient {
   private bridgeToken?: string;
   private trustedApprovalPublicKey?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly bridgeBasePath: string;
 
   constructor(private readonly options: BridgeClientOptions) {
     validateConfig(options);
+    this.bridgeBasePath = validateBridgeBasePath(options.bridgeBasePath);
     this.bridgeId = options.bridgeId;
     this.bridgeToken = options.bridgeToken;
     this.trustedApprovalPublicKey = options.trustedApprovalPublicKey;
@@ -81,7 +85,7 @@ export class OutboundBridgeClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs ?? 15_000);
     try {
-      const response = await this.fetchImpl(new URL(path, this.options.baseUrl), {
+      const response = await this.fetchImpl(new URL(`${this.bridgeBasePath}${path}`, this.options.baseUrl), {
         method: input.method,
         headers: {
           authorization: `Bearer ${this.options.bearerToken}`,
@@ -143,11 +147,20 @@ function validateConfig(config: BridgeClientConfig): void {
   const localTestHttp = config.allowLoopbackHttpForTests === true && url.protocol === "http:" && isLoopbackHost(url.hostname);
   if (url.protocol !== "https:" && !localTestHttp) throw new Error("bridge URL must use HTTPS");
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("bridge URL must be an origin only");
+  validateBridgeBasePath(config.bridgeBasePath);
   if (typeof config.bearerToken !== "string" || Buffer.byteLength(config.bearerToken) < 32) throw new Error("invalid bridge bearer token");
   if (!["browser_native_host", "phone_standalone"].includes(config.mode) || !["browser", "phone"].includes(config.source)) throw new Error("invalid bridge mode/source");
   if ((config.mode === "browser_native_host") !== (config.source === "browser")) throw new Error("bridge mode/source mismatch");
   if (typeof config.accountBinding !== "string" || !/^[a-zA-Z0-9:_-]{1,128}$/.test(config.accountBinding)) throw new Error("invalid account binding");
   if (!Array.isArray(config.capabilities) || config.capabilities.length > 64 || config.capabilities.some((item) => typeof item !== "string" || item.length > 64)) throw new Error("invalid capabilities");
+}
+
+function validateBridgeBasePath(value: unknown): string {
+  if (value === undefined || value === "") return "";
+  if (typeof value !== "string" || !/^\/(?:[A-Za-z0-9_-]+)(?:\/[A-Za-z0-9_-]+)*$/.test(value)) {
+    throw new Error("bridge base path must be a canonical path prefix");
+  }
+  return value;
 }
 
 function assertExternalConfigPath(path: string): void {
