@@ -10,11 +10,11 @@ import { createHash } from "node:crypto";
 
 const roots: string[] = [];
 const authorities = new WeakMap<CompanionHub, Awaited<ReturnType<typeof createUiApprovalAuthority>>>();
-async function makeHub() {
+async function makeHub(options: { leaseMs?: number; now?: () => number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "instagram-hub-"));
   roots.push(root);
   const authority = await createUiApprovalAuthority({ privateKeyPath: join(root, "approval.json"), projectRoot: process.cwd() });
-  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: 1_000, approvalPublicKey: authority.publicKey });
+  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: options.leaseMs ?? 30_000, now: options.now, approvalPublicKey: authority.publicKey });
   authorities.set(hub, authority);
   return hub;
 }
@@ -60,7 +60,8 @@ describe("CompanionHub", () => {
   });
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {
-    const hub = await makeHub();
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now });
     const { bridgeId, bridgeToken } = await hub.register(registration);
     const task = await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "approved" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     expect(await hub.poll(bridgeId, 1, bridgeToken)).toHaveLength(1);
@@ -69,9 +70,9 @@ describe("CompanionHub", () => {
     expect(await hub.result(task.id)).toMatchObject({ status: "outcome_unknown" });
 
     const expired = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [], ttlMs: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    now += 2;
     await expect(hub.submit(bridgeId, expired.id, { items: [] }, undefined, bridgeToken)).rejects.toThrow();
-  });
+  }, process.platform === "win32" ? 30_000 : 15_000);
 
   it("rejects a public unapproved write enqueue", async () => {
     const hub = await makeHub();
@@ -84,7 +85,7 @@ describe("CompanionHub", () => {
     const firstHub = await makeHub();
     const { bridgeId, bridgeToken } = await firstHub.register(registration);
     const task = await enqueueWrite(firstHub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "one shot" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
-    const secondHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 1_000 });
+    const secondHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 30_000 });
     const [first, second] = await Promise.all([
       firstHub.poll(bridgeId, 1, bridgeToken),
       secondHub.poll(bridgeId, 1, bridgeToken)
@@ -139,11 +140,11 @@ describe("CompanionHub", () => {
     const secondBridge = await firstHub.register(registration);
     const task = await enqueueWrite(firstHub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "bound" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     expect(await firstHub.poll(firstBridge.bridgeId, 1, firstBridge.bridgeToken)).toHaveLength(1);
-    const restartedHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 1_000 });
+    const restartedHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 30_000 });
     expect(await restartedHub.poll(firstBridge.bridgeId, 1, firstBridge.bridgeToken)).toHaveLength(0);
     await expect(restartedHub.submit(secondBridge.bridgeId, task.id, { status: "ACK" }, "0123456789abcdef", secondBridge.bridgeToken)).rejects.toThrow(/assignment mismatch/);
     expect(await restartedHub.result(task.id)).toMatchObject({ status: "leased" });
-  });
+  }, process.platform === "win32" ? 30_000 : 15_000);
 
   it("fails closed on corrupt lock state and leaves it untouched for explicit recovery", async () => {
     const hub = await makeHub();

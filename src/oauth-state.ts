@@ -1,5 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { link, mkdir, open, readFile, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
@@ -79,8 +79,11 @@ export class OAuthStateStore {
       return undefined;
     }
     try {
-      // rename atomically claims the pending nonce; only one concurrent caller can win.
-      await rename(pending, join(this.directory, `${hash}.consumed`));
+      // A hard link creates the claim only when it does not exist. rename() may
+      // replace an existing destination on Windows, allowing two readers that
+      // already loaded the pending record to both report success.
+      await link(pending, join(this.directory, `${hash}.consumed`));
+      await unlink(pending);
       return record;
     } catch {
       return undefined;

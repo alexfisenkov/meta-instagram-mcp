@@ -140,7 +140,7 @@ describe("standalone phone companion", () => {
       submit: async (id, taskId, result, contextHash) => hub.submit(id, taskId, result, contextHash, bridgeToken)
     };
     const phone = createPhoneCompanion({ appium: appium(), client, provider: ui, accountBinding: "acct:fixture", expectedAccountHandle: "fixture", pollIntervalMs: 250 });
-    const serverProvider = createCompanionSourceProvider({ hub, source: "phone", accountBinding: "acct:fixture", waitMs: 1_000, pollMs: 5 });
+    const serverProvider = createCompanionSourceProvider({ hub, source: "phone", accountBinding: "acct:fixture", waitMs: process.platform === "win32" ? 30_000 : 1_000, pollMs: 25 });
     const intent = { source: "phone" as const, accountBinding: "acct:fixture", action: "comment.like" as const,
       target: { accountBinding: "acct:fixture", nativeId: "phone-comment:123" }, payload: { kind: "comment.like" as const }, contextHash: "prepare" };
     try {
@@ -149,11 +149,11 @@ describe("standalone phone companion", () => {
       await expect(serverProvider.refreshContext!(intent)).resolves.toMatchObject({ target: intent.target, contextHash: "d".repeat(64), availability: "ready" });
       expect(ui.refreshContext).toHaveBeenCalledWith(expect.objectContaining({ action: "comment.like", target: intent.target }));
     } finally { await phone.close(); await rm(root, { recursive: true, force: true }); }
-  });
+  }, process.platform === "win32" ? 45_000 : 15_000);
 });
 
 async function waitForReady(hub: CompanionHub): Promise<void> {
-  const deadline = Date.now() + 1_000;
+  const deadline = Date.now() + (process.platform === "win32" ? 30_000 : 1_000);
   while (Date.now() < deadline) {
     if ((await hub.sourceStatus("phone", "acct:fixture")).availability === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 5));

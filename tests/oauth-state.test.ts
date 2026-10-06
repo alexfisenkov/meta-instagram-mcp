@@ -1,6 +1,7 @@
-import { mkdtemp, readdir, stat } from "node:fs/promises";
+import { link, mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { assertPrivateFile } from "../src/private-fs.js";
 import { OAuthStateStore } from "../src/oauth-state.js";
@@ -51,10 +52,27 @@ describe("OAuthStateStore", () => {
   it("allows only one concurrent consume", async () => {
     const directory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-"));
     const store = new OAuthStateStore({ directory, now: () => 1_000 });
+    const secondStore = new OAuthStateStore({ directory, now: () => 1_000 });
     const binding = { accountBinding: "owner-1", authMode: "instagram" as const, redirectUri: "https://mcp.example/callback" };
     const state = await store.issue(binding);
 
-    const results = await Promise.all([store.consume(state, binding), store.consume(state, binding)]);
+    const results = await Promise.all([store.consume(state, binding), secondStore.consume(state, binding)]);
     expect(results.filter(Boolean)).toHaveLength(1);
+  });
+
+  it("fails closed when a previous consumer created the claim but crashed before cleanup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-"));
+    const store = new OAuthStateStore({ directory, now: () => 1_000 });
+    const binding = { accountBinding: "owner-1", authMode: "facebook" as const, redirectUri: "https://mcp.example/callback" };
+    const state = await store.issue(binding);
+    const hash = createHash("sha256").update(state, "utf8").digest("hex");
+    const pending = join(directory, `${hash}.pending`);
+    const consumed = join(directory, `${hash}.consumed`);
+
+    // Simulate interruption after the exclusive claim link was created.
+    await link(pending, consumed);
+
+    await expect(store.consume(state, binding)).resolves.toBeUndefined();
+    expect(await readdir(directory)).toEqual([`${hash}.consumed`, `${hash}.pending`]);
   });
 });
