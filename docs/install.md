@@ -177,6 +177,81 @@ Extension ID должен оставаться стабильным между �
 
 Для чтения runtime пробует API → browser → phone в ограниченном бюджете и сохраняет provenance, coverage, полноту истории и причины пропуска источников. Приоритет не обещает полных данных: API может не иметь scope, browser/phone могут быть offline или не подключены. Старшая история Direct через phone не реализована; API ограничивает окно и размер страницы по своим правилам. Для записи preview закрепляет один source/account/target/context; выполнение требует локального source gate, серверного signed grant для UI-действий и подтверждения точного запроса. При `OUTCOME_UNKNOWN` не повторяйте действие и не переключайте источник автоматически; выполните read-back того же target из того же source.
 
+### Companion с подключённым телефоном
+
+Телефонный companion запускается на том же компьютере, где доступны выбранное устройство и настроенный Appium. Для iOS нужны Xcode, Appium, WebDriverAgent (WDA) и Instagram; для Android — Appium с UiAutomator2 и Instagram. Конфигурация хранится вне каталога приложения и содержит секрет Hub и идентификатор выбранного устройства — не коммитьте её и не пересылайте вместе с логами.
+
+Создайте `phone-companion.json` в приватном внешнем каталоге. На macOS/Linux задайте права до заполнения файла:
+
+```bash
+install -d -m 700 "$HOME/.config/meta-instagram-mcp"
+touch "$HOME/.config/meta-instagram-mcp/phone-companion.json"
+chmod 600 "$HOME/.config/meta-instagram-mcp/phone-companion.json"
+```
+
+На Windows создайте пустой файл в `%LOCALAPPDATA%\MetaInstagramCompanion\phone-companion.json`, закройте DACL для наследования и оставьте Full Control только текущему пользователю, SYSTEM и локальным Administrators. Команда рассчитана на новый файл; не применяйте её поверх неизвестного существующего файла:
+
+```powershell
+$ConfigDirectory = Join-Path $env:LOCALAPPDATA 'MetaInstagramCompanion'
+$ConfigPath = Join-Path $ConfigDirectory 'phone-companion.json'
+New-Item -ItemType Directory -Force -Path $ConfigDirectory | Out-Null
+New-Item -ItemType File -Path $ConfigPath -ErrorAction Stop | Out-Null
+$CurrentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& icacls.exe $ConfigPath /inheritance:r /grant:r `
+  "*$($CurrentSid):(F)" '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not set the private phone configuration ACL.' }
+```
+
+Приложение проверит защищённый DACL и отклонит файл с другими или унаследованными ACE.
+
+Заполните файл локально. Значения ниже — placeholders: замените их на адрес защищённого Hub, его bearer, выбранный профиль и свой handle. `baseUrl` — только HTTPS origin; `bearerToken` должен содержать не менее 32 байт. Профиль ниже read-only:
+
+```json
+{
+  "baseUrl": "https://hub.example.invalid",
+  "bearerToken": "replace-with-a-random-private-token-of-at-least-32-bytes",
+  "mode": "phone_standalone",
+  "source": "phone",
+  "accountBinding": "instagram:replace-with-private-binding",
+  "capabilities": [
+    "account.inspect",
+    "account.snapshot",
+    "inbox.list",
+    "conversation.read",
+    "comments.list",
+    "comments.replies",
+    "insights.read",
+    "context.refresh"
+  ],
+  "expectedAccountHandle": "replace-with-your-handle",
+  "writeEnabled": false,
+  "appium": {
+    "serverUrl": "http://127.0.0.1:4723",
+    "platform": "iOS",
+    "selectedDevice": { "id": "replace-with-locally-selected-device-id" },
+    "wdaStatusUrl": "http://127.0.0.1:8100/status",
+    "requestTimeoutMs": 5000
+  }
+}
+```
+
+Для Android задайте `platform: "Android"`, замените `wdaStatusUrl` на `deviceStatusUrl` выбранного UiAutomator2 endpoint и оставьте Appium/device endpoints на loopback. `selectedDevice.id` должен точно совпадать с ID, который Appium возвращает для W3C session. Указанный handle должен совпасть с профилем Instagram в приложении; companion не выбирает устройство или аккаунт.
+
+Из каталога установленного приложения запустите companion после сборки runtime:
+
+```bash
+INSTAGRAM_MCP_PHONE_CONFIG="$HOME/.config/meta-instagram-mcp/phone-companion.json" node dist/companion/phone.js
+```
+
+В Windows PowerShell задайте абсолютный путь и запустите тот же entry point:
+
+```powershell
+$env:INSTAGRAM_MCP_PHONE_CONFIG = Join-Path $env:LOCALAPPDATA 'MetaInstagramCompanion\phone-companion.json'
+node .\dist\companion\phone.js
+```
+
+Companion проверяет Appium и WDA/UiAutomator2, открывает session для выбранного устройства, сверяет handle Instagram, затем регистрируется в Hub и записывает выданные bridge credentials в тот же приватный файл. Регистрация подтверждает только эти gates: она не доказывает, что нужные экраны доступны или UI-действия работают. При `writeEnabled: false` телефон остаётся read-only. Если запись включена отдельно, проверенный набор UI-действий ограничен `comment.like` и `comment.unlike`; остальные phone write intents отклоняются. Реальную готовность устройства, WDA/Appium, аккаунта и UI проверяйте на companion host.
+
 ### Browser Native Messaging host
 
 Extension и Native Host source включены в runtime. Сначала установите Chrome, Node.js 22+ и приложение в постоянный каталог; bridge JSON создайте отдельно в приватном config directory с правами `0600` на macOS/Linux. Его JSON содержит `baseUrl`, `bearerToken`, `mode: "browser_native_host"`, `source: "browser"`, `accountBinding`, `expectedAccountHandle` и список разрешённых `capabilities`; `allowBrowserWrites` остаётся `false`, пока запись отдельно не настроена. Не передавайте token в аргументах команд.

@@ -13,7 +13,7 @@ const jsonToolResult = (data: unknown) => ({
 export function createMcpServer(handlers: ExistingToolHandlers = createToolHandlers({ config: loadConfig() }), layered?: LayeredToolHandlers): McpServer {
   const server = new McpServer({
     name: "meta-instagram-mcp",
-    version: "0.1.0"
+    version: "0.2.0"
   });
 
   server.registerTool(

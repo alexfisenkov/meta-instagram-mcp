@@ -64,6 +64,34 @@ describe("standalone phone companion", () => {
     expect(device.close).toHaveBeenCalledOnce();
   });
 
+  it("routes account inspect and snapshot reads without a target", async () => {
+    const client = bridge();
+    const observe = vi.fn(async () => accountObservation);
+    const ui = provider({
+      readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: ["account.inspect", "account.snapshot"] })),
+      observe,
+    });
+    const phone = createPhoneCompanion({ appium: appium(), client, provider: ui, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" });
+    try {
+      await phone.start();
+      observe.mockClear();
+      for (const [index, operation] of (["account.inspect", "account.snapshot"] as const).entries()) {
+        await phone.handleTask({
+          ...task("write"),
+          id: `task-account-${index}`,
+          kind: "read",
+          operation,
+          targetRefs: [],
+          payload: {},
+        });
+      }
+      expect(observe).toHaveBeenNthCalledWith(1, { op: "account.inspect" });
+      expect(observe).toHaveBeenNthCalledWith(2, { op: "account.snapshot" });
+      expect(client.submissions).toHaveLength(2);
+      expect(client.submissions.map((submission) => submission.result)).toEqual([accountObservation, accountObservation]);
+    } finally { await phone.close(); }
+  });
+
   it("rejects stale writes and submits an uncertain one-shot action only once", async () => {
     const device = appium();
     const client = bridge();

@@ -28,7 +28,13 @@ jobs:
       - name: Diagnose Windows private filesystem before the full suite
         if: runner.os == 'Windows'
         run: npx vitest run tests/private-fs.test.ts --testTimeout=15000
-      - run: npm test
+      # Hosted Windows runners time out several parallel loopback/filesystem fixtures together.
+      - name: Run test suite serially on Windows
+        if: runner.os == 'Windows'
+        run: npm test -- --maxWorkers=1
+      - name: Run test suite
+        if: runner.os != 'Windows'
+        run: npm test
       - run: npm run build
       - run: npm run test:installer
       - run: npm run test:native-registration

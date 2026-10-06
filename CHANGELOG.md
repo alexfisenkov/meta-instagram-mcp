@@ -2,7 +2,7 @@
 
 Изменения относятся к публичным возможностям и инструкциям. Кодовый интерфейс сам по себе не означает, что feature опубликована или проверена live.
 
-## 0.2.0 — предварительная версия, не опубликована
+## 0.2.0 — Unreleased
 
 - Общая factory связывает legacy API, API Direct/comments/insights, API→browser→phone read router, triage/analysis и source-bound prepare/execute tools для stdio и Streamable HTTP.
 - Добавлены portable install/update/rollback/uninstall entrypoints, external-config wrapper, локальный doctor и fixture smoke.
@@ -11,7 +11,8 @@
 - Минимальная версия Node.js повышена до поддерживаемой 22; CI проверяет Node.js 22 и 24 на Linux, macOS и Windows.
 - Добавлены профильная матрица, roadmap, operator/contributor/troubleshooting guides и CI по трём ОС.
 - Browser Native Host/extension и phone companion подключены к runtime; helper не запускался на owner Chrome, а stable extension identity/path, серверный Chrome login, физический iOS/Android setup и live UI acceptance остаются отдельными gates.
+- Phone broker принимает account.inspect/account.snapshot read tasks с пустым target list и передаёт их в выбранный phone provider.
 - Runtime supports OAuth callback and account-bound webhook adapters when configured; Meta consent, hosted HTTPS deployment, permission approval and actual webhook delivery remain unverified.
 - Приватные локальные хранилища проверяют Windows NTFS ACL и используют host-native сравнение путей; POSIX сохраняет строгие режимы файлов `0600` и каталогов `0700`.
 
-Пока release не опубликован с точным commit SHA, используйте только уже опубликованные версии и не считайте эту предварительную запись обещанием доступного installer package.
+Release 0.2.0 и installer package ещё не опубликованы. Для установки используйте только уже опубликованные версии; этот changelog entry описывает текущий кандидат.

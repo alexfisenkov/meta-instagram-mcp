@@ -16,6 +16,7 @@ describe("shared MCP factory", () => {
     try {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
+      expect(client.getServerVersion()).toMatchObject({ name: "meta-instagram-mcp", version: "0.2.0" });
       expect((await client.listTools()).tools).toHaveLength(18);
       const result = await client.callTool({ name: "meta_scope_presets", arguments: {} });
       expect(result).toMatchObject({ content: [{ type: "text", text: JSON.stringify([{ id: "injected" }], null, 2) }] });

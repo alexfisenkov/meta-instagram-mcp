@@ -38,7 +38,7 @@ export interface PhoneCompanion {
 }
 
 const PHONE_OPERATIONS = new Set([
-  "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read", "context.refresh",
+  "account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read", "context.refresh",
   "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply",
   "comment.like", "comment.unlike"
 ]);
@@ -220,6 +220,7 @@ function readOperation(task: BridgeTask): PhoneUiOperation | undefined {
   const payload = task.payload;
   const target = task.targetRefs.length === 1 ? parseTarget(task.targetRefs[0]) : undefined;
   const limit = typeof payload.limit === "number" ? payload.limit : 20;
+  if (task.operation === "account.inspect" || task.operation === "account.snapshot") return { op: task.operation };
   if (task.operation === "inbox.list" && task.targetRefs.length === 0) return { op: "inbox.list", limit };
   if (task.operation === "conversation.read" && target) return { op: "thread.read", target, limit };
   if (task.operation === "comments.list" && target) return { op: "comments.list", target, limit };
@@ -248,6 +249,7 @@ function validAssignedTask(task: BridgeTask, bridgeId: string, accountBinding: s
   if (!task || typeof task.id !== "string" || task.id.length > 128 || task.source !== "phone" || task.bridgeId !== bridgeId || task.accountBinding !== accountBinding || !PHONE_OPERATIONS.has(task.operation) || !["read", "preview", "write"].includes(task.kind) || !Array.isArray(task.targetRefs) || !isRecord(task.payload)) return false;
   if (task.kind === "read") {
     if (ACTIONS.has(task.operation)) return false;
+    if (task.operation === "account.inspect" || task.operation === "account.snapshot") return task.targetRefs.length === 0 && exactKeys(task.payload, []);
     if (task.operation === "context.refresh") return task.targetRefs.length === 1 && exactKeys(task.payload, ["action"]) &&
       ["message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"].includes(String(task.payload.action));
     if (task.operation === "inbox.list") return task.targetRefs.length === 0 && exactKeys(task.payload, ["limit"]);
