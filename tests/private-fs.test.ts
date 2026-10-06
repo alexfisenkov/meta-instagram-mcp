@@ -43,6 +43,44 @@ describe("private filesystem helpers", () => {
     expect(result).toEqual({ minimal: "PASS", runner: "PASS" });
   }, 12_000);
 
+  it("reads the same synthetic directory with Get-Item in both PowerShell environments", async () => {
+    if (process.platform !== "win32") return;
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    expect(systemRoot).toBeTruthy();
+    const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+    const root = await mkdtemp(join(tmpdir(), "mcp-private-get-item-"));
+    temporaryDirectories.push(root);
+    const script = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::Error.WriteLine('MCP_PRIVATE_FS_STAGE|BEFORE_GET_ITEM')
+$item = Get-Item -LiteralPath $env:INSTAGRAM_MCP_PRIVATE_FS_PROBE_PATH -Force
+if (-not $item.PSIsContainer) { exit 3 }
+[Console]::Out.WriteLine('MCP_PRIVATE_FS_GET_ITEM_OK')
+`;
+    const run = (env: NodeJS.ProcessEnv): string => {
+      try {
+        const output = execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+          encoding: "utf8",
+          timeout: 4_000,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...env, INSTAGRAM_MCP_PRIVATE_FS_PROBE_PATH: root },
+        });
+        return output.trim() === "MCP_PRIVATE_FS_GET_ITEM_OK" ? "PASS" : "BAD_OUTPUT";
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return ["EACCES", "ENOENT", "EPERM", "ETIMEDOUT"].includes(code ?? "") ? code! : "PROCESS_FAILURE";
+      }
+    };
+    const minimal = { SystemRoot: systemRoot, WINDIR: systemRoot, INSTAGRAM_MCP_PRIVATE_FS_PROBE: "1" };
+    const runner = { ...minimal } as NodeJS.ProcessEnv;
+    for (const name of ["PATH", "PATHEXT", "PSModulePath", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA"]) {
+      const entry = Object.entries(process.env).find(([key]) => key.toLowerCase() === name.toLowerCase());
+      if (entry) runner[name] = entry[1];
+    }
+    expect({ minimal: run(minimal), runner: run(runner) }).toEqual({ minimal: "PASS", runner: "PASS" });
+  }, 12_000);
+
   it("checks containment using the host path rules", () => {
     const root = resolve(tmpdir(), "mcp-private-fixture");
     expect(isPathInside(root, join(root, "child", "state.json"))).toBe(true);
