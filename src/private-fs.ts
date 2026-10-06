@@ -5,6 +5,19 @@ import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "no
 
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+trap {
+  $category = [string]$_.CategoryInfo.Category
+  $exceptionType = $_.Exception.GetType().Name
+  $errorCode = switch -Regex ($_.FullyQualifiedErrorId) {
+    'CommandNotFoundException' { 'COMMAND_NOT_FOUND'; break }
+    'UnauthorizedAccessException' { 'ACCESS_DENIED'; break }
+    'SecurityException' { 'SECURITY_EXCEPTION'; break }
+    'MethodInvocationException' { 'METHOD_INVOCATION'; break }
+    default { 'POWERSHELL_FAILURE' }
+  }
+  [Console]::Error.WriteLine("MCP_PRIVATE_FS|$exceptionType|$category|$errorCode")
+  exit 42
+}
 $path = $env:INSTAGRAM_MCP_PRIVATE_FS_PATH
 if ([string]::IsNullOrWhiteSpace($path)) { throw 'Private path is unavailable.' }
 $item = Get-Item -LiteralPath $path -Force
@@ -153,7 +166,7 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
       encoding: "utf8",
       timeout: 10_000,
       windowsHide: true,
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", "ignore", "pipe"],
       env: {
         SystemRoot: systemRoot,
         WINDIR: systemRoot,
@@ -161,7 +174,10 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
         INSTAGRAM_MCP_PRIVATE_FS_OPERATION: operation,
       },
     });
-  } catch {
-    throw new Error("Windows private filesystem ACL could not be verified.");
+  } catch (error) {
+    const stderr = (error as NodeJS.ErrnoException & { stderr?: Buffer }).stderr?.toString("utf8") ?? "";
+    const diagnostic = stderr.match(/MCP_PRIVATE_FS\|([A-Za-z]+)\|([A-Za-z]+)\|([A-Z_]+)/);
+    const details = diagnostic ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}` : "PROCESS_FAILURE";
+    throw new Error(`Windows private filesystem ACL could not be verified (${details}).`);
   }
 }
