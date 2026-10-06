@@ -24,9 +24,10 @@ trap {
 Write-Stage 'START'
 $path = $env:INSTAGRAM_MCP_PRIVATE_FS_PATH
 if ([string]::IsNullOrWhiteSpace($path)) { throw 'Private path is unavailable.' }
-Write-Stage 'GET_ITEM'
-$item = Get-Item -LiteralPath $path -Force
-Write-Stage 'ITEM'
+Write-Stage 'GET_ATTRIBUTES'
+$attributes = [System.IO.File]::GetAttributes($path)
+$isDirectory = ($attributes -band [System.IO.FileAttributes]::Directory) -ne 0
+Write-Stage 'ATTRIBUTES_READY'
 Write-Stage 'IDENTITY'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -35,11 +36,11 @@ $allowed = @($identity.Value, $system.Value, $administrators.Value)
 Write-Stage 'IDENTITY_READY'
 
 if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
-  if ($item.PSIsContainer) {
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+  if ($isDirectory) {
+    $acl = [System.Security.AccessControl.DirectorySecurity]::new()
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
   } else {
-    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl = [System.Security.AccessControl.FileSecurity]::new()
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
   }
   $acl.SetAccessRuleProtection($true, $false)
@@ -54,12 +55,14 @@ if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
     [void]$acl.AddAccessRule($rule)
   }
   Write-Stage 'SET_ACL'
-  Set-Acl -LiteralPath $path -AclObject $acl
+  if ($isDirectory) { [System.IO.Directory]::SetAccessControl($path, $acl) }
+  else { [System.IO.File]::SetAccessControl($path, $acl) }
   Write-Stage 'SET_DONE'
 }
 
 Write-Stage 'GET_ACL'
-$actual = Get-Acl -LiteralPath $path
+if ($isDirectory) { $actual = [System.IO.Directory]::GetAccessControl($path) }
+else { $actual = [System.IO.File]::GetAccessControl($path) }
 Write-Stage 'ACL_READ'
 if (-not $actual.AreAccessRulesProtected) { throw 'Private path access rules are not protected.' }
 $rules = $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
@@ -183,7 +186,6 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
   if (!systemRoot) throw new Error("Windows private filesystem support is unavailable.");
   const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-  const psModulePath = Object.entries(process.env).find(([name]) => name.toLowerCase() === "psmodulepath")?.[1];
   try {
     execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT], {
       encoding: "utf8",
@@ -193,7 +195,6 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
       env: {
         SystemRoot: systemRoot,
         WINDIR: systemRoot,
-        ...(psModulePath ? { PSModulePath: psModulePath } : {}),
         INSTAGRAM_MCP_PRIVATE_FS_PATH: path,
         INSTAGRAM_MCP_PRIVATE_FS_OPERATION: operation,
       },
