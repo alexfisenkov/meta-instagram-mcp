@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { relative, resolve, isAbsolute } from "node:path";
+import { resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createNoRedirectFetch } from "../transport-config.js";
+import { assertOutsideDirectory, assertPrivateFile } from "../private-fs.js";
 
 export interface RemoteProxyConfig { url: string; bearerToken: string }
 export interface RemoteClientPort {
@@ -37,10 +38,10 @@ export async function loadRemoteProxyConfig(env: NodeJS.ProcessEnv = process.env
   if (path) {
     if (!isAbsolute(path)) throw new Error("remote proxy config path must be absolute");
     const resolved = resolve(path);
-    const rel = relative(resolve(process.cwd()), resolved);
-    if (!rel.startsWith("..") && rel !== "..") throw new Error("remote proxy config must be outside the project");
+    assertOutsideDirectory(resolve(process.cwd()), resolved, "remote proxy config must be outside the project");
     const info = await stat(resolved);
-    if ((info.mode & 0o077) !== 0) throw new Error("remote proxy config must have private permissions");
+    if (!info.isFile()) throw new Error("remote proxy config must be a private regular file");
+    await assertPrivateFile(resolved);
     config = JSON.parse(await readFile(resolved, "utf8")) as RemoteProxyConfig;
   } else {
     config = { url: env.INSTAGRAM_MCP_REMOTE_URL ?? "", bearerToken: env.INSTAGRAM_MCP_REMOTE_BEARER_TOKEN ?? "" };

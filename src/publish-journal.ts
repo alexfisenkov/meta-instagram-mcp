@@ -1,5 +1,6 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, lstat } from "node:fs/promises";
 import { dirname } from "node:path";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export type PublishEvent = "attempt" | "published" | "failed";
 
@@ -25,6 +26,9 @@ export interface PublishRecord {
  * засорять единственное место, где ищут случившееся.
  */
 export async function appendPublishRecord(path: string, record: PublishRecord): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(dirname(path));
+  try { await lstat(path); await assertPrivateFile(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  await ensurePrivateFile(path);
 }

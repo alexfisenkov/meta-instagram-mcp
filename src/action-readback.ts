@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { MutationAction, MutationSource, Observation, TargetRef } from "./domain-types.js";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export type ActionReadbackStatus = "pending" | "unknown" | "observed" | "failed";
 export interface ActionReadbackRecord {
@@ -107,19 +108,22 @@ export class FileActionReadbackStore implements ActionReadbackStore {
       const updated = new Map(this.#records);
       updated.set(record.requestId, structuredClone(record));
       const dir = dirname(this.#path);
-      await mkdir(dir, { recursive: true, mode: 0o700 });
-      if (process.platform !== "win32") await chmod(dir, 0o700);
+      await ensurePrivateDirectory(dir);
       const temp = `${this.#path}.${randomBytes(8).toString("hex")}.tmp`;
       const noFollow = constants.O_NOFOLLOW ?? 0;
       const handle = await open(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow, 0o600);
-      try { await handle.writeFile(JSON.stringify({ version: 1, records: [...updated.values()] }), "utf8"); await handle.sync(); }
-      finally { await handle.close(); }
+      try {
+        await ensurePrivateFile(temp);
+        await handle.writeFile(JSON.stringify({ version: 1, records: [...updated.values()] }), "utf8");
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await unlink(temp).catch(() => undefined);
+        throw error;
+      } finally { await handle.close().catch(() => undefined); }
       try {
         await rename(temp, this.#path);
-        if (process.platform !== "win32") {
-          await chmod(this.#path, 0o600);
-          if (((await stat(this.#path)).mode & 0o777) !== 0o600) throw new Error("Read-back state permissions are not private.");
-        }
+        await ensurePrivateFile(this.#path);
         this.#records = updated;
       } catch (error) { await unlink(temp).catch(() => undefined); throw error; }
     });
@@ -130,9 +134,10 @@ export class FileActionReadbackStore implements ActionReadbackStore {
     if (this.#records) return;
     let handle;
     try {
+      await assertPrivateFile(this.#path);
       handle = await open(this.#path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const info = await handle.stat();
-      if (!info.isFile() || (process.platform !== "win32" && (info.mode & 0o777) !== 0o600)) throw new Error("Read-back state is not a private regular file.");
+      if (!info.isFile()) throw new Error("Read-back state is not a private regular file.");
       const parsed = JSON.parse(await handle.readFile("utf8")) as { version?: unknown; records?: unknown };
       if (parsed.version !== 1 || !Array.isArray(parsed.records)) throw new Error("Read-back state is invalid.");
       const records = new Map<string, ActionReadbackRecord>();

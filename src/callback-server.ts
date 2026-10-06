@@ -1,8 +1,10 @@
-import { copyFile, chmod } from "node:fs/promises";
+import { copyFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.js";
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken, type OAuthToken } from "./oauth.js";
@@ -159,9 +161,10 @@ async function openSystemBrowser(url: string): Promise<void> {
 }
 
 async function backupTokenFile(path: string): Promise<void> {
+  await ensurePrivateDirectory(dirname(path));
   const backupPath = `${path}.backup-${Date.now()}-${randomBytes(6).toString("hex")}`;
   await copyFile(path, backupPath, fsConstants.COPYFILE_EXCL);
-  await chmod(backupPath, 0o600);
+  await ensurePrivateFile(backupPath);
 }
 async function safeConsume(store: OAuthStateStore, state: string, binding: OAuthStateBinding) {
   try { return await store.consume(state, binding); } catch { return undefined; }

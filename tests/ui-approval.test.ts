@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createUiApprovalAuthority, verifyUiApproval, type UiApprovalTask } from "../src/ui-approval.js";
+import { assertPrivateFile } from "../src/private-fs.js";
 
 describe("UI write approval grants", () => {
   it("signs one exact task and rejects payload, account, or expiry changes", async () => {
@@ -22,7 +23,7 @@ describe("UI write approval grants", () => {
       expect(verifyUiApproval({ ...task, payload: { text: "changed" } }, grant, authority.publicKey, { now: Date.parse("2026-10-06T12:00:00.000Z"), bridgeId: task.bridgeId, source: "browser" })).toBe(false);
       expect(verifyUiApproval({ ...task, accountBinding: "acct:other" }, grant, authority.publicKey, { now: Date.parse("2026-10-06T12:00:00.000Z"), bridgeId: task.bridgeId, source: "browser" })).toBe(false);
       expect(verifyUiApproval(task, grant, authority.publicKey, { now: Date.parse(task.expiresAt), bridgeId: task.bridgeId, source: "browser" })).toBe(false);
-      expect((await stat(keyPath)).mode & 0o077).toBe(0);
+      await expect(assertPrivateFile(keyPath)).resolves.toBeUndefined();
       expect((await readFile(keyPath, "utf8"))).not.toContain("task-0123456789abcdef");
     } finally { await rm(directory, { recursive: true, force: true }); }
   });

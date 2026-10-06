@@ -2,6 +2,7 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { assertPrivateFile } from "../src/private-fs.js";
 import { loadStoredToken, saveStoredToken } from "../src/token-store.js";
 
 describe("token store", () => {
@@ -20,8 +21,8 @@ describe("token store", () => {
     const raw = await readFile(path, "utf8");
     expect(raw).toContain("secret-token");
 
-    const mode = (await stat(path)).mode & 0o777;
-    expect(mode).toBe(0o600);
+    await expect(assertPrivateFile(path)).resolves.toBeUndefined();
+    if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
 
     const loaded = await loadStoredToken(path);
     expect(loaded?.userId).toBe("ig-user");

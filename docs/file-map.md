@@ -56,7 +56,8 @@
 | Путь | Слой | Назначение |
 |---|---|---|
 | `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes, находит token store path, редактирует tokens. |
-| `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с правами `0600`. |
+| `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
+| `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с приватными POSIX mode или Windows ACL. |
 | `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook login URLs, меняет auth code на long-lived token, refreshes token, задает scope presets. |
 | `src/callback-server.ts` | Local OAuth helper | Стартует localhost callback, обрабатывает Meta redirect, меняет `code`, сохраняет token. |
 | `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | правка сетевого слоя, отладка отказов DNS |

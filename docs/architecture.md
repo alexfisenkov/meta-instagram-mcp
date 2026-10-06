@@ -20,7 +20,8 @@
 ## Слои
 
 - `src/config.ts` читает настройки из окружения и локального `.env` в корне проекта.
-- `src/token-store.ts` хранит long-lived token вне репозитория с правами `0600`.
+- `src/token-store.ts` хранит long-lived token вне репозитория: POSIX-файл имеет режим `0600`, Windows-файлы и каталоги получают защищённый NTFS DACL через `src/private-fs.ts`.
+- `src/private-fs.ts` задаёт единые проверки приватных файлов и каталогов для POSIX и Windows, а также сравнение путей с правилами текущей ОС.
 - `src/oauth.ts` строит Instagram Login или Facebook Login URL, меняет `code` на long-lived token и обновляет long-lived token там, где это поддерживает выбранный режим.
 - `src/callback-server.ts` поднимает локальный localhost callback для ручного OAuth consent и сохраняет long-lived token вне репозитория.
 - `src/http-json.ts` — транспорт: JSON-запросы поверх `node:https` с запасными маршрутами,

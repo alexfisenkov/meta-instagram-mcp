@@ -19,7 +19,7 @@ npm run test:native-registration
 
 `npm run test:native-registration` stages exact-origin manifests and launchers in temporary directories; Windows registry access is replaced with a fake adapter. It does not modify the current user's Chrome registration.
 
-CI запускает эти проверки на Node.js 22 и 24 для Linux, macOS и Windows, включая изолированные Native Messaging registration fixtures. Отдельный Windows job собирает `native-host/windows/InstagramNativeHost.csproj` и сохраняет `InstagramNativeHost.exe` вместе с publish output как 14-дневный artifact; это не GitHub Release asset.
+CI запускает эти проверки на Node.js 22 и 24 для Linux, macOS и Windows, включая изолированные Native Messaging registration fixtures и реальную проверку ACL приватного storage на Windows. Отдельный Windows job собирает `native-host/windows/InstagramNativeHost.csproj` и сохраняет `InstagramNativeHost.exe` вместе с publish output как 14-дневный artifact; это не GitHub Release asset.
 
 ## Требования к PR
 

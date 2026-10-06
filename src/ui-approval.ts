@@ -1,7 +1,8 @@
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, open, readFile, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertOutsideDirectory, assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export type UiWriteOperation = "message.send" | "message.react" | "message.unreact" | "comment.reply" |
   "comment.private_reply" | "comment.hide" | "comment.show" | "comment.delete" | "comment.like" | "comment.unlike";
@@ -34,11 +35,8 @@ export async function createUiApprovalAuthority(options: UiApprovalAuthorityOpti
   const keyPath = resolve(options.privateKeyPath);
   if (!isAbsolute(options.privateKeyPath)) throw new Error("UI approval key path must be absolute");
   const projectRoot = resolve(options.projectRoot ?? defaultProjectRoot());
-  const relativePath = relative(projectRoot, keyPath);
-  if (relativePath === ".." || !relativePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
-    throw new Error("UI approval key must be outside the project directory");
-  }
-  await mkdir(dirname(keyPath), { recursive: true, mode: 0o700 });
+  assertOutsideDirectory(projectRoot, keyPath, "UI approval key must be outside the project directory");
+  await ensurePrivateDirectory(dirname(keyPath));
   let record = await readKeyRecord(keyPath);
   if (!record) {
     const pair = generateKeyPairSync("ed25519");
@@ -52,9 +50,16 @@ export async function createUiApprovalAuthority(options: UiApprovalAuthorityOpti
       return undefined;
     });
     if (handle) {
-      try { await handle.writeFile(`${JSON.stringify(generated)}\n`, "utf8"); await handle.sync(); }
-      finally { await handle.close(); }
-      await chmod(keyPath, 0o600);
+      try {
+        await ensurePrivateFile(keyPath);
+        await handle.writeFile(`${JSON.stringify(generated)}\n`, "utf8");
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await unlink(keyPath).catch(() => undefined);
+        throw error;
+      }
+      finally { await handle.close().catch(() => undefined); }
       record = generated;
     } else record = await readKeyRecord(keyPath);
   }
@@ -113,7 +118,8 @@ interface KeyRecord { version: 1; privateKey: string; publicKey: string }
 async function readKeyRecord(path: string): Promise<KeyRecord | undefined> {
   try {
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) throw new Error("UI approval key must be a private regular file");
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("UI approval key must be a private regular file");
+    await assertPrivateFile(path);
     const value = JSON.parse(await readFile(path, "utf8")) as Partial<KeyRecord>;
     if (value.version !== 1 || typeof value.privateKey !== "string" || typeof value.publicKey !== "string") throw new Error("UI approval key is invalid");
     return value as KeyRecord;

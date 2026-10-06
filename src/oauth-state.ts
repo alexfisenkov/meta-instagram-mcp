@@ -1,6 +1,7 @@
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export type OAuthAuthMode = "instagram" | "facebook";
 
@@ -45,9 +46,18 @@ export class OAuthStateStore {
     const hash = hashState(state);
     const issuedAt = this.now();
     const record: OAuthStateRecord = { ...binding, issuedAt, expiresAt: issuedAt + this.ttlMs };
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await chmod(this.directory, 0o700);
-    await writeFile(this.pendingPath(hash), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
+    await ensurePrivateDirectory(this.directory);
+    const path = this.pendingPath(hash);
+    const handle = await open(path, "wx", 0o600);
+    try {
+      await ensurePrivateFile(path);
+      await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+      await handle.sync();
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await rm(path, { force: true }).catch(() => undefined);
+      throw error;
+    } finally { await handle.close().catch(() => undefined); }
     return state;
   }
 
@@ -59,6 +69,7 @@ export class OAuthStateStore {
     const pending = this.pendingPath(hash);
     let record: OAuthStateRecord;
     try {
+      await assertPrivateFile(pending);
       record = JSON.parse(await readFile(pending, "utf8")) as OAuthStateRecord;
     } catch {
       return undefined;

@@ -10,9 +10,9 @@
 |---|---|
 | `.env` | Реальный Meta App ID/Secret и локальные runtime-настройки. |
 | `app secret.md.rtf` | Локальная копия app secret. |
-| `~/.config/meta-instagram-mcp/token.json` | Long-lived access token и сохраненные IG account metadata. |
+| `~/.config/meta-instagram-mcp/token.json` | Long-lived access token и сохраненные IG account metadata. На POSIX файл ограничен режимом `0600`; на Windows применяется защищённый NTFS DACL только для текущего пользователя, SYSTEM и локальных администраторов. |
 
-Token-store должен создаваться с правами `0600`.
+Token-store должен быть приватным: режим `0600` на POSIX; защищённый NTFS DACL на Windows. Windows mode bits не подтверждают приватность, поэтому приложение проверяет ACL и отказывает при неразрешённых allow-правилах.
 
 ## Значения, которые нельзя печатать
 

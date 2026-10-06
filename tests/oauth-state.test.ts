@@ -2,6 +2,7 @@ import { mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { assertPrivateFile } from "../src/private-fs.js";
 import { OAuthStateStore } from "../src/oauth-state.js";
 
 describe("OAuthStateStore", () => {
@@ -18,7 +19,8 @@ describe("OAuthStateStore", () => {
     const files = await readdir(directory);
     expect(files).toHaveLength(2);
     expect(files.every((name) => /^[a-f0-9]{64}\.pending$/.test(name))).toBe(true);
-    expect((await stat(join(directory, files[0]!))).mode & 0o777).toBe(0o600);
+    await expect(assertPrivateFile(join(directory, files[0]!))).resolves.toBeUndefined();
+    if (process.platform !== "win32") expect((await stat(join(directory, files[0]!))).mode & 0o777).toBe(0o600);
     await expect(store.consume(first, binding)).resolves.toMatchObject({ ...binding, issuedAt: 1_000 });
     await expect(store.consume(first, binding)).resolves.toBeUndefined();
   });

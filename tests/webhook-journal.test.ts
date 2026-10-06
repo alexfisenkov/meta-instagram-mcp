@@ -2,6 +2,7 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { assertPrivateFile } from "../src/private-fs.js";
 import { WebhookJournal } from "../src/webhook-journal.js";
 
 describe("WebhookJournal", () => {
@@ -17,6 +18,7 @@ describe("WebhookJournal", () => {
     const lines = (await readFile(path, "utf8")).trim().split("\n");
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]!).event).toEqual(event);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await expect(assertPrivateFile(path)).resolves.toBeUndefined();
+    if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 });

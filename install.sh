@@ -54,9 +54,15 @@ if [[ -e "$target" && ! -f "$target/.meta-instagram-mcp-install.json" ]]; then
 fi
 
 stage="$(mktemp -d "$target_parent/.${target_name}.stage.XXXXXXXX")"
-cleanup() { [[ -z "${stage:-}" || ! -d "$stage" ]] || rm -rf -- "$stage"; }
+archive=""
+cleanup() {
+  [[ -z "${stage:-}" || ! -d "$stage" ]] || rm -rf -- "$stage"
+  [[ -z "${archive:-}" || ! -f "$archive" ]] || rm -f -- "$archive"
+}
 trap cleanup EXIT
-git -C "$source_dir" archive "$actual_revision" | tar -xf - -C "$stage"
+archive="$(mktemp "$target_parent/.${target_name}.archive.XXXXXXXX")"
+git -C "$source_dir" archive "$actual_revision" > "$archive"
+tar -xf "$archive" -C "$stage"
 [[ -f "$stage/package.json" && -f "$stage/package-lock.json" && -f "$stage/.env.example" ]] || { echo "Selected revision is missing required package files." >&2; exit 1; }
 (cd "$stage" && npm ci --no-audit --no-fund && npm run build)
 

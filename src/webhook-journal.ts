@@ -1,5 +1,6 @@
-import { mkdir, open, readFile, chmod, rm } from "node:fs/promises";
+import { open, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export interface StoredWebhookEvent {
   id: string;
@@ -31,14 +32,22 @@ export class WebhookJournal {
   }
 
   private async appendExclusive(events: readonly StoredWebhookEvent[]): Promise<WebhookAppendResult> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await chmod(dirname(this.path), 0o700);
+    await ensurePrivateDirectory(dirname(this.path));
     const lockPath = `${this.path}.lock`;
     let lockHandle;
     const deadline = Date.now() + 5_000;
     while (!lockHandle) {
-      try { lockHandle = await open(lockPath, "wx", 0o600); }
+      let candidate;
+      try {
+        candidate = await open(lockPath, "wx", 0o600);
+        await ensurePrivateFile(lockPath);
+        lockHandle = candidate;
+      }
       catch (error) {
+        if (candidate) {
+          await candidate.close().catch(() => undefined);
+          await rm(lockPath, { force: true });
+        }
         if (!isCode(error, "EEXIST") || Date.now() >= deadline) throw new Error("Webhook journal lock unavailable.");
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -46,6 +55,7 @@ export class WebhookJournal {
     try {
       let existing = new Set<string>();
       try {
+        await assertPrivateFile(this.path);
         const text = await readFile(this.path, "utf8");
         existing = new Set(text.split("\n").filter(Boolean).map((line) => {
           const row = JSON.parse(line) as { id?: unknown };
@@ -64,9 +74,12 @@ export class WebhookJournal {
       }
       if (rows.length) {
         const handle = await open(this.path, "a", 0o600);
-        try { await handle.writeFile(`${rows.join("\n")}\n`, "utf8"); await handle.sync(); }
+        try {
+          await ensurePrivateFile(this.path);
+          await handle.writeFile(`${rows.join("\n")}\n`, "utf8");
+          await handle.sync();
+        }
         finally { await handle.close(); }
-        await chmod(this.path, 0o600);
       }
       return { inserted: rows.length, duplicate };
     } finally {

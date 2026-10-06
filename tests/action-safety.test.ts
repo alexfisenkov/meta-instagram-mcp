@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fingerprintIntent, MutationSafety, type MutationExecutor } from "../src/action-safety.js";
+import { assertPrivateFile } from "../src/private-fs.js";
 import type { MutationIntent, MutationResult } from "../src/domain-types.js";
 
 const tempDirs: string[] = [];
@@ -220,6 +221,7 @@ describe("MutationSafety", () => {
     });
     expect(result.status).toBe("ACK");
     if (process.platform !== "win32") expect((await stat(join(dir, "audit.jsonl"))).mode & 0o777).toBe(0o600);
+    await expect(assertPrivateFile(join(dir, "audit.jsonl"))).resolves.toBeUndefined();
     expect(await readFile(join(dir, "audit.jsonl"), "utf8")).not.toContain("account-α");
   });
 });

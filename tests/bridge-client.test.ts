@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OutboundBridgeClient } from "../src/bridge-client.js";
+import { ensurePrivateFile } from "../src/private-fs.js";
 
 const base = {
   baseUrl: "https://hub.example.test",
@@ -44,6 +45,7 @@ describe("OutboundBridgeClient", () => {
     roots.push(root);
     const configPath = join(root, "config.json");
     await writeFile(configPath, JSON.stringify({ ...base, credentialsPath: undefined }), { mode: 0o600 });
+    await ensurePrivateFile(configPath);
     const publicKey = "-----BEGIN PUBLIC KEY-----\nfixture-key\n-----END PUBLIC KEY-----";
     let registration: Record<string, unknown> | undefined;
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {

@@ -1,9 +1,9 @@
-import { chmod, readFile, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve, isAbsolute } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { open, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, resolve, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createNoRedirectFetch, isLoopbackHost } from "./transport-config.js";
 import type { BridgeMode, BridgeSource, BridgeTask } from "./companion-hub.js";
+import { assertOutsideDirectory, assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export interface BridgeClientConfig {
   baseUrl: string;
@@ -105,8 +105,9 @@ export class OutboundBridgeClient {
 
 export async function loadBridgeClientConfig(path: string): Promise<BridgeClientConfig> {
   assertExternalConfigPath(path);
-  const info = await import("node:fs/promises").then(({ stat }) => stat(path));
-  if ((info.mode & 0o077) !== 0) throw new Error("bridge config must have private file permissions");
+  const info = await stat(path);
+  if (!info.isFile()) throw new Error("bridge config must be a private regular file");
+  await assertPrivateFile(path);
   const value = JSON.parse(await readFile(path, "utf8")) as BridgeClientConfig;
   validateConfig(value);
   return value;
@@ -114,16 +115,24 @@ export async function loadBridgeClientConfig(path: string): Promise<BridgeClient
 
 export async function saveBridgeCredentials(path: string, credentials: { bridgeId: string; bridgeToken: string; trustedApprovalPublicKey?: string }): Promise<void> {
   assertExternalConfigPath(path);
+  await assertPrivateFile(path);
   let config: BridgeClientConfig;
   try { config = JSON.parse(await readFile(path, "utf8")) as BridgeClientConfig; }
   catch { throw new Error("bridge config is unavailable"); }
   const temp = `${path}.${randomUUID()}.tmp`;
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(temp, JSON.stringify({ ...config, ...credentials }), { flag: "wx", mode: 0o600 });
-  await chmod(temp, 0o600);
-  const { rename } = await import("node:fs/promises");
+  await ensurePrivateDirectory(dirname(path));
+  const handle = await open(temp, "wx", 0o600);
+  try {
+    await ensurePrivateFile(temp);
+    await handle.writeFile(JSON.stringify({ ...config, ...credentials }), "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  } finally { await handle.close().catch(() => undefined); }
   await rename(temp, path);
-  await chmod(path, 0o600);
+  await ensurePrivateFile(path);
 }
 
 function validPublicKey(value: string): boolean { return value.length <= 4_096 && value.startsWith("-----BEGIN PUBLIC KEY-----") && value.includes("-----END PUBLIC KEY-----"); }
@@ -145,6 +154,5 @@ function assertExternalConfigPath(path: string): void {
   if (!isAbsolute(path)) throw new Error("bridge config path must be absolute");
   const target = resolve(path);
   const cwd = resolve(process.cwd());
-  const rel = relative(cwd, target);
-  if (!rel.startsWith("..") && rel !== "..") throw new Error("bridge config must be outside the project directory");
+  assertOutsideDirectory(cwd, target, "bridge config must be outside the project directory");
 }

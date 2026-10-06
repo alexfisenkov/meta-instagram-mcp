@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { open, readFile, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 /** Поля, которые пишем мы сами. Именно их принимает saveStoredToken. */
 export interface StoredTokenFields {
@@ -24,6 +26,7 @@ export interface StoredInstagramToken extends StoredTokenFields {
 
 export async function loadStoredToken(path: string): Promise<StoredInstagramToken | undefined> {
   try {
+    await assertPrivateFile(path);
     const raw = await readFile(path, "utf8");
     return JSON.parse(raw) as StoredInstagramToken;
   } catch (error) {
@@ -33,10 +36,20 @@ export async function loadStoredToken(path: string): Promise<StoredInstagramToke
 }
 
 export async function saveStoredToken(path: string, token: StoredTokenFields): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const tmpPath = `${path}.tmp-${process.pid}`;
-  await writeFile(tmpPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  await ensurePrivateDirectory(dirname(path));
+  const tmpPath = `${path}.tmp-${randomUUID()}`;
+  const handle = await open(tmpPath, "wx", 0o600);
+  try {
+    await ensurePrivateFile(tmpPath);
+    await handle.writeFile(`${JSON.stringify(token, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
+  } finally { await handle.close().catch(() => undefined); }
   await rename(tmpPath, path);
+  await ensurePrivateFile(path);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

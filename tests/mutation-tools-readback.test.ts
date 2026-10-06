@@ -6,6 +6,7 @@ import { MutationSafety, type MutationExecutor } from "../src/action-safety.js";
 import { FileActionReadbackStore, type ActionReadbackRecord } from "../src/action-readback.js";
 import { createMutationToolHandlers } from "../src/mutation-tools.js";
 import type { Observation } from "../src/domain-types.js";
+import { assertPrivateFile } from "../src/private-fs.js";
 
 const dirs: string[] = [];
 afterEach(async () => Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))));
@@ -38,7 +39,8 @@ describe("confirmed action read-back", () => {
     expect(result).toMatchObject({ status: "OBSERVED", dispatchStatus: "ACK", receiptId: "sent-1", responseState: "answered" });
     expect(executor.execute).toHaveBeenCalledTimes(1);
     expect(await readFile(storePath, "utf8")).not.toContain("approved words");
-    expect((await stat(storePath)).mode & 0o777).toBe(0o600);
+    await expect(assertPrivateFile(storePath)).resolves.toBeUndefined();
+    if (process.platform !== "win32") expect((await stat(storePath)).mode & 0o777).toBe(0o600);
   });
 
   it("persists unknown receipts, reconciles after restart, and never replays the write", async () => {

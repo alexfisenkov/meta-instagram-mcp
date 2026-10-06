@@ -12,5 +12,6 @@
 - Добавлены профильная матрица, roadmap, operator/contributor/troubleshooting guides и CI по трём ОС.
 - Browser Native Host/extension и phone companion подключены к runtime; helper не запускался на owner Chrome, а stable extension identity/path, серверный Chrome login, физический iOS/Android setup и live UI acceptance остаются отдельными gates.
 - Runtime supports OAuth callback and account-bound webhook adapters when configured; Meta consent, hosted HTTPS deployment, permission approval and actual webhook delivery remain unverified.
+- Приватные локальные хранилища проверяют Windows NTFS ACL и используют host-native сравнение путей; POSIX сохраняет строгие режимы файлов `0600` и каталогов `0700`.
 
 Пока release не опубликован с точным commit SHA, используйте только уже опубликованные версии и не считайте эту предварительную запись обещанием доступного installer package.

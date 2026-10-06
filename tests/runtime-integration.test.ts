@@ -12,6 +12,7 @@ import { createCompanionSourceProvider } from "../src/companion-source-provider.
 import { createBrowserNativeHost, type BrowserBridgeClient } from "../src/companion/browser-native-host.js";
 import { NativeFrameDecoder, encodeNativeFrame } from "../src/companion/native-framing.js";
 import { createRuntime } from "../src/runtime.js";
+import { ensurePrivateFile } from "../src/private-fs.js";
 import type { ExistingToolHandlers } from "../src/mcp-server.js";
 import type { SourceProvider } from "../src/source-router.js";
 import type { Observation } from "../src/domain-types.js";
@@ -161,6 +162,7 @@ describe("runtime composition", () => {
     await (await import("node:fs/promises")).writeFile(tokenStorePath, JSON.stringify({
       accessToken: "synthetic-integration-token", authMode: "instagram", userId: "42", permissions: ["instagram_business_manage_comments"]
     }), { mode: 0o600 });
+    await ensurePrivateFile(tokenStorePath);
     let writeCount = 0;
     vi.mocked(requestJsonHttp).mockImplementation(async (url, init = {}) => {
       const path = url.pathname;

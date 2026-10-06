@@ -1,11 +1,12 @@
-import { chmod, readFile, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { loadBridgeClientConfig, OutboundBridgeClient } from "../bridge-client.js";
 import type { BridgeTask } from "../companion-hub.js";
 import type { MutationIntent, MutationResult, TargetRef } from "../domain-types.js";
 import { verifyUiApproval, type SignedUiApproval } from "../ui-approval.js";
 import { createPhoneUiProvider, type PhoneUiOperation, type PhoneUiProvider } from "../providers/phone-ui.js";
 import { createAppiumClient, type AppiumDeviceConfig, type AppiumReadiness } from "../providers/appium-client.js";
+import { assertOutsideDirectory, assertPrivateFile } from "../private-fs.js";
 
 export interface PhoneBridgeClient {
   register(capabilities?: readonly string[]): Promise<{ bridgeId: string; approvalPublicKey?: string }>;
@@ -181,7 +182,8 @@ export async function runPhoneCompanionCli(env: NodeJS.ProcessEnv = process.env)
   try {
     assertExternalConfigPath(configPath);
     const info = await stat(configPath);
-    if ((info.mode & 0o077) !== 0) throw new Error("phone config must have private file permissions");
+    if (!info.isFile()) throw new Error("phone config must be a private regular file");
+    await assertPrivateFile(configPath);
     const raw = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
     const bridgeConfig = await loadBridgeClientConfig(configPath);
     if (bridgeConfig.mode !== "phone_standalone" || bridgeConfig.source !== "phone") throw new Error("phone bridge mode/source mismatch");
@@ -302,7 +304,6 @@ function parsePhoneAppiumConfig(value: unknown): AppiumDeviceConfig {
 }
 function assertExternalConfigPath(path: string): void {
   const target = resolve(path);
-  const rel = relative(resolve(process.cwd()), target);
-  if (!rel.startsWith("..") && rel !== "..") throw new Error("phone config must be outside the project directory");
+  assertOutsideDirectory(resolve(process.cwd()), target, "phone config must be outside the project directory");
   if (!isAbsolute(path)) throw new Error("phone config path must be absolute");
 }

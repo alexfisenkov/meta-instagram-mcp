@@ -1,12 +1,13 @@
 import { randomUUID, createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { open, readFile, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
   MutationIntent, MutationOptions, MutationPreview, MutationResult, MutationSource,
   TargetRef
 } from "./domain-types.js";
 import type { ActionReadbackEvidence, ActionReadbackRecord } from "./action-readback.js";
+import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export interface MutationExecutor {
   readonly source: MutationSource;
@@ -117,9 +118,10 @@ export class MutationSafety {
     let lock;
     let ownsLock = false;
     try {
-      await mkdir(dirname(this.#auditPath), { recursive: true, mode: 0o700 });
+      await ensurePrivateDirectory(dirname(this.#auditPath));
       lock = await open(lockPath, "wx", 0o600);
       ownsLock = true;
+      await ensurePrivateFile(lockPath);
       await lock.sync();
       const prior = await readJournal(this.#auditPath);
       const existing = prior.get(requestId);
@@ -197,7 +199,10 @@ function auditRow(intent: MutationIntent, requestId: string, fingerprint: string
 
 async function readJournal(path: string): Promise<Map<string, PriorRequest>> {
   let contents: string;
-  try { contents = await readFile(path, "utf8"); }
+  try {
+    await assertPrivateFile(path);
+    contents = await readFile(path, "utf8");
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
@@ -236,11 +241,7 @@ async function appendJournal(path: string, row: AuditRow): Promise<void> {
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new Error("Audit path is not a regular file.");
-    if (process.platform !== "win32") {
-      await chmod(path, 0o600);
-      const mode = (await stat(path)).mode & 0o777;
-      if (mode !== 0o600) throw new Error("Audit journal permissions are not private.");
-    }
+    await ensurePrivateFile(path);
     await handle.writeFile(`${JSON.stringify(row)}\n`, "utf8");
     await handle.sync();
   } finally { await handle.close(); }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { OutboundBridgeClient } from "../src/bridge-client.js";
+import { ensurePrivateFile } from "../src/private-fs.js";
 import type { BridgeTask } from "../src/companion-hub.js";
 import { CompanionHub } from "../src/companion-hub.js";
 import { createBrowserNativeHost, type BrowserBridgeClient } from "../src/companion/browser-native-host.js";
@@ -171,6 +172,7 @@ describe("Browser Native Messaging host", () => {
         baseUrl: `http://127.0.0.1:${port}`, bearerToken: secret, mode: "browser_native_host", source: "browser",
         accountBinding, capabilities: ["inbox.list"]
       }), { mode: 0o600 });
+      await ensurePrivateFile(configPath);
       const client = new OutboundBridgeClient({
         baseUrl: `http://127.0.0.1:${port}`, bearerToken: secret, mode: "browser_native_host", source: "browser",
         accountBinding, capabilities: ["inbox.list"], credentialsPath: configPath, allowLoopbackHttpForTests: true

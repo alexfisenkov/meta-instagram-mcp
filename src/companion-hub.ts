@@ -1,9 +1,10 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from "node:crypto";
-import { chmod, link, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { verifyUiApproval, type SignedUiApproval } from "./ui-approval.js";
 import type { Availability } from "./domain-types.js";
+import { assertOutsideDirectory, assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export type BridgeMode = "browser_native_host" | "phone_standalone";
 export type BridgeSource = "browser" | "phone";
@@ -95,8 +96,7 @@ export class CompanionHub {
 
   constructor(options: CompanionHubOptions) {
     if (!isAbsolute(options.storagePath)) throw new Error("hub storage path must be absolute");
-    const rel = relative(resolve(process.cwd()), resolve(options.storagePath));
-    if (!rel.startsWith("..") && rel !== "..") throw new Error("hub storage must be outside the project directory");
+    assertOutsideDirectory(resolve(process.cwd()), resolve(options.storagePath), "hub storage must be outside the project directory");
     this.options = {
       ...options,
       leaseMs: options.leaseMs ?? 30_000,
@@ -275,15 +275,19 @@ export class CompanionHub {
   }
   private async acquireFileLock(): Promise<() => Promise<void>> {
     const lockPath = `${this.options.storagePath}.lock`;
-    await mkdir(dirname(this.options.storagePath), { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(dirname(this.options.storagePath));
     const owner: HubLockOwner = { version: 1, token: randomBytes(32).toString("base64url"), pid: process.pid, acquiredAt: this.isoNow() };
     const temporaryPath = `${lockPath}.${owner.token}.pending`;
     const handle = await open(temporaryPath, "wx", 0o600);
     try {
+      await ensurePrivateFile(temporaryPath);
       await handle.writeFile(JSON.stringify(owner), "utf8");
       await handle.sync();
-    } finally { await handle.close(); }
-    await chmod(temporaryPath, 0o600);
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    } finally { await handle.close().catch(() => undefined); }
     const deadline = Date.now() + this.options.lockTimeoutMs;
     let acquired = false;
     try {
@@ -326,6 +330,7 @@ export class CompanionHub {
   }
   private async load(): Promise<HubState> {
     try {
+      await assertPrivateFile(this.options.storagePath);
       const state = JSON.parse(await readFile(this.options.storagePath, "utf8")) as HubState;
       if (state.version !== 1 || !Array.isArray(state.bridges) || !Array.isArray(state.tasks) || !Array.isArray(state.audit)) throw new Error("invalid hub state");
       return state;
@@ -335,13 +340,21 @@ export class CompanionHub {
     }
   }
   private async save(state: HubState): Promise<void> {
-    await mkdir(dirname(this.options.storagePath), { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(dirname(this.options.storagePath));
     state.audit = state.audit.slice(-2_000);
     const temp = `${this.options.storagePath}.${randomUUID()}.tmp`;
-    await writeFile(temp, JSON.stringify(state), { mode: 0o600, flag: "wx" });
-    await chmod(temp, 0o600);
+    const handle = await open(temp, "wx", 0o600);
+    try {
+      await ensurePrivateFile(temp);
+      await handle.writeFile(JSON.stringify(state), "utf8");
+      await handle.sync();
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await unlink(temp).catch(() => undefined);
+      throw error;
+    } finally { await handle.close().catch(() => undefined); }
     await rename(temp, this.options.storagePath);
-    await chmod(this.options.storagePath, 0o600);
+    await ensurePrivateFile(this.options.storagePath);
   }
   private authBridge(state: HubState, bridgeId: string, token?: string, source?: BridgeSource): BridgeRecord {
     const bridge = state.bridges.find((candidate) => candidate.id === bridgeId);
@@ -372,9 +385,11 @@ async function readLockOwner(lockPath: string): Promise<HubLockOwner | null> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+  if (!info.isFile() || info.isSymbolicLink()) {
     throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
   }
+  try { await assertPrivateFile(lockPath); }
+  catch { throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath); }
   let contents: string;
   try { contents = await readFile(lockPath, "utf8"); }
   catch (error) {

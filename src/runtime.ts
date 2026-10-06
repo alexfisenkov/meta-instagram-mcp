@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createCompanionSourceProvider } from "./companion-source-provider.js";
@@ -22,11 +22,12 @@ import { MutationSafety } from "./action-safety.js";
 import { createUiApprovalAuthority, type UiApprovalAuthority } from "./ui-approval.js";
 import { createMutationExecutors } from "./mutation-executors.js";
 import { createMutationToolHandlers } from "./mutation-tools.js";
-import { copyFile, chmod } from "node:fs/promises";
+import { copyFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { registerMutationTools, type MutationToolHandlers } from "./mutation-tools.js";
 import type { MutationExecutor } from "./action-safety.js";
 import { FileActionReadbackStore } from "./action-readback.js";
+import { assertOutsideDirectory, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
 
 export interface RuntimeOptions {
   config?: MetaInstagramConfig;
@@ -137,7 +138,12 @@ function configuredOAuth(config: MetaInstagramConfig): { service: OAuthCallbackS
     stateStore: createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` }), binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
-    backupToken: async () => { const backup = `${config.tokenStorePath}.backup-${Date.now()}-${randomBytes(6).toString("hex")}`; await copyFile(config.tokenStorePath, backup); await chmod(backup, 0o600); },
+    backupToken: async () => {
+      await ensurePrivateDirectory(dirname(config.tokenStorePath));
+      const backup = `${config.tokenStorePath}.backup-${Date.now()}-${randomBytes(6).toString("hex")}`;
+      await copyFile(config.tokenStorePath, backup);
+      await ensurePrivateFile(backup);
+    },
     saveToken: (token) => saveStoredToken(config.tokenStorePath, token)
   });
   return { service, redirectUri: config.redirectUri };
@@ -157,6 +163,5 @@ function configuredWebhook(config: MetaInstagramConfig): { receiver: WebhookRece
 function assertPrivatePath(path: string): void {
   if (!isAbsolute(path)) throw new Error("Webhook journal path must be absolute.");
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const rel = relative(root, resolve(path));
-  if (rel === ".." || !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) throw new Error("Private runtime state must be outside the project directory.");
+  assertOutsideDirectory(root, resolve(path), "Private runtime state must be outside the project directory.");
 }

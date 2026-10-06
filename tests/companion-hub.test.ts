@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompanionHub } from "../src/companion-hub.js";
 import { createUiApprovalAuthority } from "../src/ui-approval.js";
+import { assertPrivateFile, ensurePrivateFile } from "../src/private-fs.js";
 import { createHash } from "node:crypto";
 
 const roots: string[] = [];
@@ -149,6 +150,7 @@ describe("CompanionHub", () => {
     const { bridgeId, bridgeToken } = await hub.register(registration);
     const lockPath = `${join(roots.at(-1)!, "hub.json")}.lock`;
     await writeFile(lockPath, "ambiguous lock", { mode: 0o600 });
+    await ensurePrivateFile(lockPath);
     await expect(hub.poll(bridgeId, 1, bridgeToken)).rejects.toThrow(/owner data is corrupt/);
     expect(await readFile(lockPath, "utf8")).toBe("ambiguous lock");
   });
@@ -180,7 +182,8 @@ describe("CompanionHub", () => {
     await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "private body" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     await hub.heartbeat({ bridgeId, bridgeToken, status: { online: true } });
     const path = join(roots.at(-1)!, "hub.json");
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await expect(assertPrivateFile(path)).resolves.toBeUndefined();
+    if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
     const persisted = JSON.parse(await readFile(path, "utf8")) as { audit: unknown[] };
     expect(JSON.stringify(persisted.audit)).not.toContain("private body");
   });
