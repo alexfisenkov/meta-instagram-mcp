@@ -20,7 +20,7 @@ const COMMENT_FIELDS = "id,text,timestamp,from,like_count,hidden,replies_count";
 export async function listCommentsWithContext(ctx: ApiAccountContext, target: TargetRef, q: CommentsQuery = {}) {
   ensureScope(ctx, COMMENT_SCOPE[ctx.authMode]);
   ensureTarget(target, ctx);
-  const page = await messagingClient(ctx).get(`/${encodeURIComponent(requireId(target.nativeId, "media"))}/comments`, {
+  const page = await commentReadClient(ctx).get(`/${encodeURIComponent(requireId(target.nativeId, "media"))}/comments`, {
     fields: COMMENT_FIELDS, limit: boundedLimit(q.limit), after: q.cursor
   });
   return makeObservation(ctx, `comments:${target.nativeId}`, page, boundedLimit(q.limit));
@@ -29,10 +29,17 @@ export async function listCommentsWithContext(ctx: ApiAccountContext, target: Ta
 export async function listRepliesWithContext(ctx: ApiAccountContext, target: TargetRef, q: CommentsQuery = {}) {
   ensureScope(ctx, COMMENT_SCOPE[ctx.authMode]);
   ensureTarget(target, ctx);
-  const page = await messagingClient(ctx).get(`/${encodeURIComponent(requireId(target.nativeId, "comment"))}/replies`, {
+  const page = await commentReadClient(ctx).get(`/${encodeURIComponent(requireId(target.nativeId, "comment"))}/replies`, {
     fields: COMMENT_FIELDS, limit: boundedLimit(q.limit), after: q.cursor
   });
   return makeObservation(ctx, `comment-replies:${target.nativeId}`, page, boundedLimit(q.limit));
+}
+
+function commentReadClient(ctx: ApiAccountContext) {
+  // Meta's Facebook Login collection uses a user access token and the
+  // instagram_manage_comments permission for API calls. Keep writes Page-bound.
+  if (ctx.authMode === "facebook" && !ctx.pageClient) return ctx.userClient;
+  return messagingClient(ctx);
 }
 
 export function createCommentsDomain(resolveContext: AccountContextResolver, now: () => Date = () => new Date()): CommentsDomain {

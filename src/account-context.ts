@@ -16,6 +16,8 @@ export interface ApiAccountContext {
   confirmedScopes?: string[];
   scopeStatus: "confirmed" | "unknown";
   userClient: MetaClient;
+  /** Safe readiness metadata; never includes the Page lookup error or any credential. */
+  pageResolutionStatus?: "resolved" | "unavailable";
   /** Present only for Facebook Login with a resolved Page; its access token stays private in MetaClient. */
   pageClient?: FacebookPageClient["client"];
   pageTasks?: string[];
@@ -50,13 +52,20 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
     const userClient = makeClient(accessToken, authMode);
     let pageClient: MetaClient | undefined;
     let pageTasks: string[] | undefined;
+    let pageResolutionStatus: ApiAccountContext["pageResolutionStatus"];
     if (authMode === "facebook" && facebookPageId) {
-      const page = await userClient.forFacebookPage(facebookPageId);
-      if (page.instagramUserId && page.instagramUserId !== instagramUserId) {
-        throw new Error("Resolved Facebook Page belongs to a different Instagram account.");
+      try {
+        const page = await userClient.forFacebookPage(facebookPageId);
+        if (page.instagramUserId && page.instagramUserId !== instagramUserId) {
+          throw new Error("Resolved Facebook Page belongs to a different Instagram account.");
+        }
+        pageClient = page.client;
+        pageTasks = page.tasks;
+        pageResolutionStatus = "resolved";
+      } catch (error) {
+        if (!isOptionalPageUnavailable(error)) throw error;
+        pageResolutionStatus = "unavailable";
       }
-      pageClient = page.client;
-      pageTasks = page.tasks;
     }
     let confirmedScopes = !useEnvironmentToken && Array.isArray(stored?.permissions)
       ? stored.permissions.filter((item): item is string => typeof item === "string")
@@ -69,14 +78,25 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
       authMode,
       accountBinding: `instagram:${instagramUserId}`,
       instagramUserId,
-      ...(facebookPageId ? { facebookPageId } : {}),
+      ...(pageClient && facebookPageId ? { facebookPageId } : {}),
       requestedScopes: [...(options.config.defaultScopes ?? defaultScopesForAuthMode(authMode))],
       ...(confirmedScopes ? { confirmedScopes } : {}),
       scopeStatus: confirmedScopes ? "confirmed" : "unknown",
       userClient,
+      ...(pageResolutionStatus ? { pageResolutionStatus } : {}),
       ...(pageClient ? { pageClient, pageTasks } : {})
     };
   };
+}
+
+function isOptionalPageUnavailable(error: unknown): boolean {
+  // An empty /me/accounts result and a Page with no usable Page token do not
+  // invalidate the separately resolved Instagram user identity. Keep other
+  // failures (including expired/revoked credentials) fail-closed.
+  return error instanceof Error && (
+    error.message === "The requested Facebook Page was not found in the available Pages." ||
+    error.message === "The requested Facebook Page has no usable Page access token."
+  );
 }
 
 async function readGrantedPermissions(client: MetaClient): Promise<string[] | undefined> {

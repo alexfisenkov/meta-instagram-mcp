@@ -58,6 +58,59 @@ describe("API account context", () => {
     expect(context.scopeStatus).toBe("confirmed");
   });
 
+  it("keeps fresh user grants when an optional saved Page is no longer resolvable", async () => {
+    const userClient = {
+      get: vi.fn().mockResolvedValue({ data: [
+        { permission: "instagram_manage_insights", status: "granted" },
+        { permission: "instagram_manage_comments", status: "granted" },
+        { permission: "instagram_manage_messages", status: "declined" }
+      ] }),
+      post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockRejectedValue(new Error("The requested Facebook Page was not found in the available Pages."))
+    };
+    const resolve = createAccountContextResolver({
+      config,
+      tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => userClient as never
+    });
+
+    const context = await resolve();
+
+    expect(context).toMatchObject({
+      accountBinding: "instagram:ig-account-7", instagramUserId: "ig-account-7",
+      confirmedScopes: ["instagram_manage_insights", "instagram_manage_comments"],
+      scopeStatus: "confirmed", pageResolutionStatus: "unavailable"
+    });
+    expect(context.facebookPageId).toBeUndefined();
+    expect(context.pageClient).toBeUndefined();
+    expect(JSON.stringify(context)).not.toContain("user-secret");
+    expect(userClient.get).toHaveBeenCalledWith("/me/permissions");
+  });
+
+  it("does not soften an expired-token or account-mismatch Page lookup failure", async () => {
+    const expiredClient = {
+      get: vi.fn(), post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockRejectedValue(new Error("OAuth access token has expired."))
+    };
+    const expiredResolver = createAccountContextResolver({
+      config, tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => expiredClient as never
+    });
+    await expect(expiredResolver()).rejects.toThrow(/expired/i);
+    expect(expiredClient.get).not.toHaveBeenCalled();
+
+    const mismatchClient = {
+      get: vi.fn(), post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockResolvedValue({ client: {}, pageId: "page-9", instagramUserId: "different-ig", tasks: [] })
+    };
+    const mismatchResolver = createAccountContextResolver({
+      config, tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => mismatchClient as never
+    });
+    await expect(mismatchResolver()).rejects.toThrow(/different Instagram account/i);
+    expect(mismatchClient.get).not.toHaveBeenCalled();
+  });
+
   it("keeps grant status unknown when Facebook permission discovery fails", async () => {
     const userClient = {
       get: vi.fn().mockRejectedValue(new Error("offline")),

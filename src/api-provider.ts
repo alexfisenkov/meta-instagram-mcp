@@ -61,7 +61,7 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
         };
         const messageClientReady = ctx.authMode !== "facebook" || Boolean(ctx.pageClient && ctx.pageTasks?.includes("MESSAGING"));
         const directAvailability = availabilityFor(MSG_SCOPES[ctx.authMode], messageClientReady);
-        const commentsAvailability = availabilityFor([COMMENTS_SCOPE[ctx.authMode]], ctx.authMode !== "facebook" || Boolean(ctx.pageClient));
+        const commentsAvailability = availabilityFor([COMMENTS_SCOPE[ctx.authMode]]);
         const insightsAvailability = availabilityFor([INSIGHTS_SCOPE[ctx.authMode]]);
         const capabilityAvailability = {
           "account.inspect": "unsupported" as const,
@@ -81,7 +81,9 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
             "comment.like:unsupported", "comment.unlike:unsupported"
           ],
           ...(available === "permission_blocked" ? { reason: "The granted permissions could not be confirmed from the verified OAuth response or Meta permission endpoint." }
-            : available === "missing_scope" ? { reason: "The connected account is missing a permission or Page task required for this operation." } : {}),
+            : available === "missing_scope" ? { reason: (!operation || operation === "inbox.list" || operation === "conversation.read") && ctx.authMode === "facebook" && !ctx.pageClient
+              ? "Facebook Page access is unavailable; Facebook Login Direct requires a resolved Page token and MESSAGING task."
+              : "The connected account is missing a permission or Page task required for this operation." } : {}),
           scopes: { requested: ctx.requestedScopes, ...(ctx.confirmedScopes ? { confirmed: ctx.confirmedScopes } : {}), status: ctx.scopeStatus }
         };
       } catch (error) {

@@ -43,6 +43,49 @@ describe("official API provider", () => {
     expect(status.scopes).toMatchObject({ requested: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"], status: "unknown" });
   });
 
+  it("uses confirmed Facebook user access for read-only comments and insights when the saved Page is unavailable", async () => {
+    const { ctx, pageClient, userClient } = makeContext([
+      "instagram_basic", "instagram_manage_comments", "instagram_manage_insights", "pages_manage_metadata", "instagram_manage_messages"
+    ]);
+    ctx.pageClient = undefined;
+    ctx.pageTasks = undefined;
+    ctx.pageResolutionStatus = "unavailable";
+    userClient.get.mockImplementation(async (path: string) => path === "/ig-17/insights"
+      ? { data: [{ name: "reach", values: [] }] }
+      : { data: [{ id: "comment-3", timestamp: "2026-10-06T10:00:00Z", text: "Fixture only" }] });
+    const provider = createApiProvider({ resolveContext: async () => ctx });
+
+    const commentStatus = await provider.status("comments.list");
+    const directStatus = await provider.status("inbox.list");
+    const comments = await provider.read({ operation: "comments.list", target: { accountBinding: ctx.accountBinding, nativeId: "media-2" }, limit: 1 });
+    const insights = await provider.read({ operation: "insights.read" });
+    const sendIntent = { source: "api", accountBinding: ctx.accountBinding, action: "message.send", payload: { kind: "message.send", text: "No send" }, target: { accountBinding: ctx.accountBinding, nativeId: "thread-2" }, contextHash: "ctx" } as const;
+
+    expect(commentStatus.availability).toBe("ready");
+    expect(directStatus.availability).toBe("missing_scope");
+    expect(directStatus.reason).toMatch(/Page access is unavailable/i);
+    expect(comments).toMatchObject({ availability: "ready", accountBinding: ctx.accountBinding });
+    expect(insights).toMatchObject({ availability: "ready", accountBinding: ctx.accountBinding });
+    expect(userClient.get).toHaveBeenCalledWith("/media-2/comments", expect.any(Object));
+    expect(userClient.get).toHaveBeenCalledWith("/ig-17/insights", expect.any(Object));
+    await expect(provider.refreshContext(sendIntent as never)).rejects.toThrow(/MESSAGING task/i);
+    expect(pageClient.postJson).not.toHaveBeenCalled();
+  });
+
+  it("keeps user-only reads blocked when granted scopes remain unknown", async () => {
+    const { ctx, userClient } = makeContext();
+    ctx.pageClient = undefined;
+    ctx.pageResolutionStatus = "unavailable";
+    const provider = createApiProvider({ resolveContext: async () => ctx });
+
+    const status = await provider.status("insights.read");
+    const observation = await provider.read({ operation: "insights.read" });
+
+    expect(status.availability).toBe("permission_blocked");
+    expect(observation.availability).toBe("permission_blocked");
+    expect(userClient.get).not.toHaveBeenCalled();
+  });
+
   it("advertises Facebook message reactions as unsupported and never dispatches them", async () => {
     const { ctx, pageClient } = makeContext(["instagram_basic", "pages_manage_metadata", "instagram_manage_messages"]);
     pageClient.get.mockResolvedValue({ data: [{ id: "msg-11", from: { id: "peer-5" }, message: "Question", created_time: "2026-10-06T10:00:00.000Z" }] });
