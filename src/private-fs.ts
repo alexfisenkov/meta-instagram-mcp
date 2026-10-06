@@ -175,9 +175,15 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
       },
     });
   } catch (error) {
-    const stderr = (error as NodeJS.ErrnoException & { stderr?: Buffer }).stderr?.toString("utf8") ?? "";
+    const processError = error as NodeJS.ErrnoException & { stderr?: Buffer; status?: number; signal?: string };
+    const stderr = processError.stderr?.toString("utf8") ?? "";
     const diagnostic = stderr.match(/MCP_PRIVATE_FS\|([A-Za-z]+)\|([A-Za-z]+)\|([A-Z_]+)/);
-    const details = diagnostic ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}` : "PROCESS_FAILURE";
+    const knownCodes = new Set(["EACCES", "ENOENT", "EPERM", "ETIMEDOUT", "UNKNOWN"]);
+    const code = knownCodes.has(processError.code ?? "") ? processError.code : "OTHER";
+    const status = Number.isInteger(processError.status) ? String(processError.status) : "NONE";
+    const details = diagnostic
+      ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}`
+      : `PROCESS_FAILURE/${code}/${status}`;
     throw new Error(`Windows private filesystem ACL could not be verified (${details}).`);
   }
 }
