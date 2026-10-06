@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MutationSafety } from "../src/action-safety.js";
 import { createApiProvider } from "../src/api-provider.js";
 import type { ApiAccountContext } from "../src/account-context.js";
+import { createSourceRouter, type SourceProvider } from "../src/source-router.js";
 
 const dirs: string[] = [];
 afterEach(async () => Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))));
@@ -139,5 +140,46 @@ describe("official API provider", () => {
     expect(evidence.ownerSenderIds).toEqual(["ig-17", "page-4"]);
     expect(evidence.observation).toMatchObject({ source: "api", accountBinding: ctx.accountBinding, nativeRef: "conversation:thread-2",
       data: { messages: [{ id: "sent-9", direction: "outbound", text: "Exact reply" }] } });
+  });
+
+  it("uses the existing unanswered classifiers only for explicit layered triage reads", async () => {
+    const { ctx, pageClient } = makeContext(["instagram_basic", "instagram_manage_messages", "pages_manage_metadata", "instagram_manage_comments"]);
+    pageClient.get.mockImplementation(async (path: string) => {
+      if (path.endsWith("/conversations")) return { data: [{ id: "thread-1" }] };
+      if (path === "/thread-1/messages") return { data: [{ id: "m-1", from: { id: "peer-1" }, message: "Question", created_time: "2026-10-06T10:00:00Z" }] };
+      if (path === "/media-1/comments") return { data: [{ id: "comment-1", text: "Question", timestamp: "2026-10-06T10:00:00Z", from: { id: "peer-1" }, replies_count: 0 }] };
+      return { data: [] };
+    });
+    const provider = createApiProvider({ resolveContext: async () => ctx });
+
+    const direct = await provider.read({ operation: "inbox.list", limit: 5, triage: true });
+    const comments = await provider.read({ operation: "comments.list", target: { accountBinding: ctx.accountBinding, nativeId: "media-1" }, limit: 5, triage: true });
+    const rawInbox = await provider.read({ operation: "inbox.list", limit: 5 });
+
+    expect(direct.data).toMatchObject({ items: [{ conversationId: "thread-1", unanswered: true, unread: "unknown" }] });
+    expect(direct.coverage).toBe("partial");
+    expect(comments.data).toMatchObject({ items: [{ commentId: "comment-1", unanswered: true, unread: "unknown" }] });
+    expect(rawInbox.data).toMatchObject({ items: [{ id: "thread-1", unanswered: "unknown" }] });
+    expect(rawInbox.coverage).toBe("unknown");
+  });
+
+  it("asks a ready browser source to complement API comment triage with unknown author identity", async () => {
+    const { ctx, pageClient } = makeContext(["instagram_manage_comments"]);
+    pageClient.get.mockResolvedValue({ data: [{ id: "comment-no-author", timestamp: "2026-10-05T10:00:00Z", replies_count: 0 }] });
+    const api = createApiProvider({ resolveContext: async () => ctx });
+    const browser: SourceProvider = {
+      source: "browser",
+      status: async () => ({ source: "browser", availability: "ready", capabilities: ["comments.list"] }),
+      read: vi.fn(async () => ({ source: "browser" as const, nativeRef: "comments:media-1", accountBinding: ctx.accountBinding,
+        capturedAt: "2026-10-06T12:00:00Z", availability: "ready" as const, coverage: "complete" as const, historyCompleteness: "complete" as const,
+        data: { comments: [{ id: "comment-no-author", unanswered: "unknown" }] }, errors: [] }))
+    };
+    const router = createSourceRouter({ providers: [api, browser] });
+
+    const result = await router.read({ operation: "comments.list", target: { accountBinding: ctx.accountBinding, nativeId: "media-1" }, triage: true });
+
+    expect(result.triedSources).toEqual(["api", "browser"]);
+    expect(browser.read).toHaveBeenCalledOnce();
+    expect(result.observations[0]).toMatchObject({ source: "api", coverage: "partial", data: { items: [{ unanswered: "unknown" }] } });
   });
 });

@@ -40,7 +40,17 @@ describe("shared MCP factory", () => {
       expect(names).toContain("meta_analyze_inbox");
       const result = await client.callTool({ name: "meta_triage_inbox", arguments: { source: "auto", limit: 5 } });
       const content = (result as { content?: Array<{ text?: string }> }).content;
-      expect(JSON.parse(content?.[0]?.text ?? "{}")).toMatchObject({ items: [], coverage: "unknown", truncated: true });
+      expect(JSON.parse(content?.[0]?.text ?? "{}")).toMatchObject({ items: [], channelCounts: { direct: 0, comments: 0, unknownAnswerStatus: 0 }, coverage: "unknown", truncated: true });
+
+      const commentTargetResult = await client.callTool({ name: "meta_triage_inbox", arguments: {
+        source: "auto", limit: 5, commentTargets: [{ accountBinding: "instagram:42", nativeId: "media-1" }]
+      } });
+      const commentTargetContent = (commentTargetResult as { content?: Array<{ text?: string }> }).content;
+      expect(JSON.parse(commentTargetContent?.[0]?.text ?? "{}")).toMatchObject({ channelCounts: { direct: 0, comments: 0 } });
+      const invalidCommentTarget = await client.callTool({ name: "meta_triage_inbox", arguments: {
+        source: "auto", limit: 5, commentTargets: [{ accountBinding: "instagram:42" }]
+      } });
+      expect(invalidCommentTarget.isError).toBe(true);
     } finally { await client.close(); await server.close(); }
   });
 });

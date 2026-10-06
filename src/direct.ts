@@ -93,7 +93,7 @@ export function createDirectDomain(resolveContext: AccountContextResolver, now: 
           : isRecord(latest) && latest.direction === "outbound" && parsed.complete === true ? false : "unknown";
         items.push({ conversationId: raw.id, unread: "unknown", unanswered, latestMessage: latest });
       }
-      return { ...list, data: { items, nextCursor: isRecord(list.data) ? list.data.nextCursor : undefined } };
+      return { ...list, coverage: "partial", data: { items, nextCursor: isRecord(list.data) ? list.data.nextCursor : undefined } };
     },
     async prepareSend(target, text) {
       const ctx = await context();
@@ -146,9 +146,10 @@ export function normalizeMessagePage(items: Record<string, unknown>[], ctx: ApiA
       : fromId ? "inbound" : "unknown";
     return { id: stringValue(item.id), from, to: item.to, text: stringValue(item.message), createdAt: stringValue(item.created_time), direction };
   });
-  const timestampsKnown = messages.every((message) => Boolean(message.createdAt && Number.isFinite(Date.parse(message.createdAt))));
-  const ordered = timestampsKnown && messages.every((message, index) => index === 0 || Date.parse(messages[index - 1].createdAt!) >= Date.parse(message.createdAt!));
-  return { messages, complete: timestampsKnown && ordered && messages.every((message) => message.direction !== "unknown") };
+  const timestampsKnown = messages.length > 0 && messages.every((message) => Boolean(message.createdAt && Number.isFinite(Date.parse(message.createdAt))));
+  const ordered = timestampsKnown && messages.every((message, index) => index === 0 || Date.parse(messages[index - 1].createdAt!) > Date.parse(message.createdAt!));
+  const nativeIdsKnown = messages.every((message) => Boolean(message.id && message.id.trim() === message.id && !/[/?#]/.test(message.id)));
+  return { messages, complete: timestampsKnown && ordered && nativeIdsKnown && messages.every((message) => message.direction !== "unknown") };
 }
 
 export function messagingClient(ctx: ApiAccountContext): MetaClient {

@@ -7,6 +7,7 @@ export interface ReviewQueueItem {
   threadRef?: TargetRef;
   commentRef?: TargetRef;
   source: SourceId;
+  sourceRefs?: Array<{ source: SourceId; nativeRef: string }>;
   coverage: Coverage;
   latestInbound?: { nativeId: string; capturedAt?: string; direction: "inbound" | "unknown"; text?: string };
   unread: Truth;
@@ -16,6 +17,8 @@ export interface ReviewQueueItem {
 }
 export interface ReviewQueue {
   items: ReviewQueueItem[];
+  channelCounts: { direct: number; comments: number; unknownAnswerStatus: number };
+  channelCoverage: { direct: Coverage; comments: Coverage };
   triedSources: SourceId[];
   truncated: boolean;
   coverage: Coverage;
@@ -41,8 +44,8 @@ export interface HostAnalysisPort { analyze(input: AnalysisInput): Promise<Analy
 export interface LayeredToolHandlers {
   capabilities(): Promise<CapabilityReport>;
   readSource(input: ReadRequest): Promise<RoutedRead>;
-  triageInbox(input: { source: "auto"; limit: number; cursor?: string }): Promise<ReviewQueue>;
-  readInbox(input: { source: "auto"; limit: number; cursor?: string }): Promise<ReviewQueue>;
+  triageInbox(input: { source: "auto"; limit: number; cursor?: string; commentTargets?: TargetRef[] }): Promise<ReviewQueue>;
+  readInbox(input: { source: "auto"; limit: number; cursor?: string; commentTargets?: TargetRef[] }): Promise<ReviewQueue>;
   analyzeInbox(input: AnalysisInput): Promise<AnalysisOutput>;
 }
 export interface CapabilityReport {
@@ -55,15 +58,33 @@ export interface LayeredToolOptions { router: SourceRouter; hostAnalysis?: HostA
 
 const READ_OPERATIONS: ReadRequest["operation"][] = ["account.inspect", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"];
 const LIMIT_MAX = 100;
+const COMMENT_TARGETS_MAX = 20;
 
 export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredToolHandlers {
   const now = options.now ?? (() => new Date());
-  async function queue(input: { source: "auto"; limit: number; cursor?: string }): Promise<ReviewQueue> {
+  async function queue(input: { source: "auto"; limit: number; cursor?: string; commentTargets?: TargetRef[] }): Promise<ReviewQueue> {
     const limit = boundedLimit(input.limit);
-    const request: ReadRequest = { operation: "inbox.list", limit, ...(input.cursor ? { cursor: input.cursor } : {}) };
-    const routed = await options.router.read(request);
-    const allItems = routed.observations.flatMap(observationToItems);
-    const items = await Promise.all(allItems.slice(0, limit).map(async (item) => {
+    const targets = input.commentTargets ?? [];
+    if (targets.length > COMMENT_TARGETS_MAX) throw new Error(`At most ${COMMENT_TARGETS_MAX} explicit comment media targets may be scanned per request.`);
+    const accountBindings = new Set(targets.map((target) => target.accountBinding));
+    if (accountBindings.size > 1) throw new Error("Comment targets must belong to one selected Instagram account.");
+    if (targets.some((target) => !target.accountBinding || !(target.nativeId || target.explicitOwnerRef || target.instagramUrl))) {
+      throw new Error("Each comment target requires an account binding and one exact native id, Instagram URL, or explicit owner reference.");
+    }
+
+    const directRoute = await options.router.read({ operation: "inbox.list", limit,
+      ...(input.cursor ? { cursor: input.cursor } : {}), triage: true });
+    const directItems = mergeVerifiedItems(directRoute.observations.flatMap((observation) => observationToItems(observation, "direct")));
+    const perMediaLimit = targets.length ? Math.min(20, Math.max(1, Math.floor(limit / targets.length))) : limit;
+    const commentRoutes: RoutedRead[] = [];
+    for (let index = 0; index < targets.length; index += 3) {
+      const batch = await Promise.all(targets.slice(index, index + 3).map((target) => options.router.read({ operation: "comments.list", target,
+        limit: perMediaLimit, triage: true })));
+      commentRoutes.push(...batch);
+    }
+    const commentItems = mergeVerifiedItems(commentRoutes.flatMap((route) => route.observations.flatMap((observation) => observationToItems(observation, "comments"))));
+    const allItems = [...directItems.slice(0, limit), ...commentItems.slice(0, limit)];
+    const items = await Promise.all(allItems.map(async (item) => {
       const target = item.threadRef ?? item.commentRef;
       if (!target || !options.actionReadbacks || item.source === "user_supplied") return item;
       const last = await options.actionReadbacks.latestFor(item.source, target).catch(() => undefined);
@@ -72,11 +93,20 @@ export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredT
         dispatchStatus: last.dispatchStatus === "ACK" ? "ACK" as const : "OUTCOME_UNKNOWN" as const,
         responseState: last.responseState ?? "unknown", attemptedAt: last.attemptedAt, ...(last.observedAt ? { observedAt: last.observedAt } : {}) } };
     }));
-    const limitations = [...routed.skippedSources.map((item) => `${item.source}: ${item.reason}`),
-      ...routed.errors.map((item) => `${item.source}: ${item.message}`)];
-    if (routed.coverage !== "complete" && !limitations.length) limitations.push("Source coverage is incomplete; remaining items may be unknown.");
-    return { items, triedSources: [...routed.triedSources], truncated: allItems.length > limit || routed.coverage !== "complete",
-      coverage: routed.coverage, limitations: [...new Set(limitations)].slice(0, 24) };
+    const routes = [directRoute, ...commentRoutes];
+    const limitations = routes.flatMap((route) => [...route.skippedSources.map((item) => `${item.source}: ${item.reason}`),
+      ...route.errors.map((item) => `${item.source}: ${item.message}`)]);
+    if (!targets.length) limitations.push("Comments were not scanned; pass explicit commentTargets for media you want reviewed.");
+    if (routes.some((route) => route.coverage !== "complete") && !limitations.some((item) => /coverage|unknown/i.test(item))) {
+      limitations.push("Source coverage is incomplete; remaining items may be unknown.");
+    }
+    return { items, channelCounts: { direct: directItems.length, comments: commentItems.length,
+      unknownAnswerStatus: [...directItems, ...commentItems].filter((item) => item.unanswered === "unknown").length },
+      channelCoverage: { direct: directRoute.coverage,
+        comments: targets.length ? combineRoutedCoverage(commentRoutes.map((route) => route.coverage)) : "unknown" },
+      triedSources: [...new Set(routes.flatMap((route) => route.triedSources))],
+      truncated: directItems.length > limit || commentItems.length > limit || routes.some((route) => route.coverage !== "complete"),
+      coverage: combineRoutedCoverage(routes.map((route) => route.coverage)), limitations: [...new Set(limitations)].slice(0, 24) };
   }
   return {
     async readSource(input) {
@@ -109,19 +139,20 @@ export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredT
   };
 }
 
-function observationToItems(observation: Observation<unknown>): ReviewQueueItem[] {
+function observationToItems(observation: Observation<unknown>, kind: "direct" | "comments" = "direct"): ReviewQueueItem[] {
   const data = isRecord(observation.data) ? observation.data : {};
   const rows = Array.isArray(data.items) ? data.items
     : Array.isArray(data.conversations) ? data.conversations
-      : Array.isArray(data.threads) ? data.threads : [];
+      : Array.isArray(data.threads) ? data.threads
+        : kind === "comments" && Array.isArray(data.comments) ? data.comments : [];
   const output: ReviewQueueItem[] = [];
   for (const raw of rows) {
     if (!isRecord(raw)) continue;
     const nestedTarget = isRecord(raw.target) ? raw.target : undefined;
-    const id = firstString(raw.id, raw.threadId, raw.conversationId, raw.commentId,
+    const isComment = kind === "comments" || typeof raw.commentId === "string";
+    const id = firstString(raw.commentId, raw.id, raw.threadId, raw.conversationId,
       typeof nestedTarget?.nativeId === "string" ? nestedTarget.nativeId : undefined);
     const target = id ? { accountBinding: observation.accountBinding, nativeId: id } : undefined;
-    const isComment = typeof raw.commentId === "string";
     const latestRaw = firstRecord(raw.latestInbound, raw.latestMessage, raw.latestComment, latestMessage(raw.messages));
     const direction = latestRaw?.direction === "inbound" ? "inbound" : "unknown";
     const latestInbound = latestRaw && direction === "inbound" && typeof latestRaw.id === "string"
@@ -131,6 +162,7 @@ function observationToItems(observation: Observation<unknown>): ReviewQueueItem[
     const explicitUnanswered = truth(raw.unanswered);
     const unanswered: Truth = explicitUnanswered ?? deriveUnanswered(latestRaw, observation.historyCompleteness);
     output.push({ ...(target ? isComment ? { commentRef: target } : { threadRef: target } : {}), source: observation.source,
+      sourceRefs: [{ source: observation.source, nativeRef: observation.nativeRef }],
       coverage: observation.coverage, ...(latestInbound ? { latestInbound } : {}), unread: truth(raw.unread) ?? "unknown", unanswered,
       state: unanswered === true ? "needs_review" : unanswered === false ? "answered" : "unknown" });
   }
@@ -144,10 +176,71 @@ function deriveUnanswered(latest: Record<string, unknown> | undefined, completen
   return "unknown";
 }
 
+function mergeVerifiedItems(items: ReviewQueueItem[]): ReviewQueueItem[] {
+  const merged = new Map<string, ReviewQueueItem>();
+  for (const item of items) {
+    const target = item.threadRef ?? item.commentRef;
+    const kind = item.commentRef ? "comment" : "direct";
+    const identity = target?.nativeId;
+    if (!target || !identity) {
+      merged.set(`unbound:${merged.size}`, item);
+      continue;
+    }
+    const key = `${kind}\0${target.accountBinding}\0${identity}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, item);
+      continue;
+    }
+    const sourceRefs = [...(existing.sourceRefs ?? []), ...(item.sourceRefs ?? [])]
+      .filter((ref, index, refs) => refs.findIndex((candidate) => candidate.source === ref.source && candidate.nativeRef === ref.nativeRef) === index);
+    const unanswered = mergeTruth(existing.unanswered, item.unanswered);
+    const unread = mergeTruth(existing.unread, item.unread);
+    const latestInbound = newestInbound(existing.latestInbound, item.latestInbound);
+    merged.set(key, { ...existing, sourceRefs, coverage: existing.coverage === "complete" || item.coverage === "complete" ? "complete"
+      : existing.coverage === "partial" || item.coverage === "partial" ? "partial" : "unknown",
+      ...(latestInbound ? { latestInbound } : {}), unread, unanswered,
+      state: unanswered === true ? "needs_review" : unanswered === false ? "answered" : "unknown" });
+  }
+  return [...merged.values()];
+}
+
+function mergeTruth(left: Truth, right: Truth): Truth {
+  if (left === "unknown") return right;
+  if (right === "unknown") return left;
+  return left === right ? left : "unknown";
+}
+
+function newestInbound(left: ReviewQueueItem["latestInbound"], right: ReviewQueueItem["latestInbound"]): ReviewQueueItem["latestInbound"] {
+  if (!left) return right;
+  if (!right) return left;
+  const leftAt = dateValue(left.capturedAt);
+  const rightAt = dateValue(right.capturedAt);
+  return rightAt > leftAt ? right : left;
+}
+
 function deterministicStats(observations: Observation<unknown>[], now: Date): AnalysisOutput["stats"] {
   const rows = observations.flatMap((observation) => {
     const data = isRecord(observation.data) ? observation.data : {};
-    return (Array.isArray(data.items) ? data.items : Array.isArray(data.messages) ? data.messages : []).filter(isRecord).map((row) => ({ observation, row }));
+    const candidates: Array<{ kind: "thread" | "message" | "comment" | "reply"; row: Record<string, unknown> }> = [];
+    for (const row of recordRows(data.items)) candidates.push({
+      kind: observation.nativeRef.startsWith("comment-replies:") ? "reply"
+        : observation.nativeRef.startsWith("comments:") || "commentId" in row ? "comment" : "thread", row
+    });
+    for (const row of recordRows(data.threads)) candidates.push({ kind: "thread", row });
+    for (const row of recordRows(data.messages)) candidates.push({ kind: "message", row });
+    for (const row of recordRows(data.comments)) candidates.push({ kind: "comment", row });
+    for (const row of recordRows(data.replies)) candidates.push({ kind: "reply", row });
+    for (const comment of recordRows(data.comments)) {
+      if (isRecord(comment.replies)) for (const row of recordRows(comment.replies.items)) candidates.push({ kind: "reply", row });
+    }
+    if (observation.nativeRef.startsWith("conversation:") && Array.isArray(data.messages)) {
+      const latest = latestMessage(data.messages);
+      candidates.push({ kind: "thread", row: { unanswered: data.complete === true && latest?.direction === "inbound" ? true
+        : data.complete === true && latest?.direction === "outbound" ? false : "unknown",
+        unread: "unknown", ...(latest?.createdAt ? { createdAt: latest.createdAt } : {}) } });
+    }
+    return candidates.map(({ kind, row }) => ({ observation, row, kind }));
   });
   const countKnown = (key: string): number | "unknown" => {
     const values = rows.map(({ row }) => truth(row[key]));
@@ -155,21 +248,35 @@ function deterministicStats(observations: Observation<unknown>[], now: Date): An
   };
   const timestamps = observations.flatMap((observation) => {
     const data = isRecord(observation.data) ? observation.data : {};
-    const candidates = [...(Array.isArray(data.items) ? data.items : []), ...(Array.isArray(data.messages) ? data.messages : [])];
-    return candidates.filter(isRecord).map((row) => firstString(row.createdAt, row.timestamp, row.updatedAt)).map((value) => value ? Date.parse(value) : Number.NaN).filter(Number.isFinite);
+    return [...recordRows(data.items), ...recordRows(data.threads), ...recordRows(data.messages), ...recordRows(data.comments), ...recordRows(data.replies)]
+      .map((row) => firstString(row.createdAt, row.timestamp, row.updatedAt)).map((value) => value ? Date.parse(value) : Number.NaN).filter(Number.isFinite);
   });
-  const directions = rows.map(({ row }) => row.direction);
+  const directDirections = rows.filter(({ kind }) => kind === "message" || kind === "thread").map(({ row }) => row.direction);
+  const hasCommentsObservation = observations.some((observation) => observation.nativeRef.startsWith("comments:") ||
+    isRecord(observation.data) && Array.isArray(observation.data.comments));
+  const hasRepliesObservation = observations.some((observation) => observation.nativeRef.startsWith("comment-replies:") ||
+    isRecord(observation.data) && Array.isArray(observation.data.replies));
   const counts: Record<string, number | "unknown"> = {
     observations: observations.length,
-    threads: rows.length,
+    threads: rows.filter(({ kind }) => kind === "thread").length,
+    messages: rows.filter(({ kind }) => kind === "message").length,
+    comments: hasCommentsObservation ? rows.filter(({ kind }) => kind === "comment").length : "unknown",
+    replies: hasRepliesObservation ? rows.filter(({ kind }) => kind === "reply").length : "unknown",
     unread: countKnown("unread"),
     unanswered: countKnown("unanswered"),
-    inbound: directions.some((value) => value === "inbound" || value === "outbound") ? directions.filter((value) => value === "inbound").length : "unknown",
-    outbound: directions.some((value) => value === "inbound" || value === "outbound") ? directions.filter((value) => value === "outbound").length : "unknown"
+    unknownAnswerStatus: rows.filter(({ kind, row }) => (kind === "thread" || kind === "comment") && (truth(row.unanswered) === undefined || row.unanswered === "unknown")).length,
+    inbound: directDirections.some((value) => value === "inbound" || value === "outbound") ? directDirections.filter((value) => value === "inbound").length : "unknown",
+    outbound: directDirections.some((value) => value === "inbound" || value === "outbound") ? directDirections.filter((value) => value === "outbound").length : "unknown"
   };
-  const messageDirectionKnown = directions.some((value) => value === "inbound" || value === "outbound");
-  const ownerReplies: Record<string, number | "unknown"> = { outboundMessages: messageDirectionKnown ? directions.filter((value) => value === "outbound").length : "unknown" };
-  const commentRows = rows.filter(({ row }) => "like_count" in row || "hidden" in row);
+  const messageDirectionKnown = directDirections.some((value) => value === "inbound" || value === "outbound");
+  const commentReplies = rows.filter(({ kind }) => kind === "reply");
+  const ownerReplyCommentRows = commentReplies.filter(({ row }) => row.isOwnerReply === true || row.direction === "outbound");
+  const ownerReplies: Record<string, number | "unknown"> = {
+    outboundMessages: messageDirectionKnown ? directDirections.filter((value) => value === "outbound").length : "unknown",
+    commentReplies: commentReplies.some(({ row }) => typeof row.isOwnerReply === "boolean" || row.direction === "inbound" || row.direction === "outbound")
+      ? ownerReplyCommentRows.length : "unknown"
+  };
+  const commentRows = rows.filter(({ kind }) => kind === "comment");
   const commentLikesHidden: Record<string, number | "unknown"> = {
     likes: commentRows.some(({ row }) => typeof row.like_count === "number") ? sumNumeric(commentRows.map(({ row }) => row.like_count)) : "unknown",
     hidden: commentRows.some(({ row }) => typeof row.hidden === "boolean") ? commentRows.filter(({ row }) => row.hidden === true).length : "unknown"
@@ -230,11 +337,13 @@ function targetHasIdentity(target: TargetRef): boolean {
 }
 function targetIsSelected(observation: Observation<unknown>, target: TargetRef): boolean {
   if (target.nativeId && target.nativeId === observation.nativeRef) return true;
+  if (target.nativeId && ["conversation:", "comments:", "comment-replies:"].some((prefix) => observation.nativeRef === `${prefix}${target.nativeId}`)) return true;
   if (target.explicitOwnerRef && target.explicitOwnerRef === observation.nativeRef) return true;
   if (!isRecord(observation.data)) return false;
   const data = observation.data;
   const rows = [...(Array.isArray(data.items) ? data.items : []), ...(Array.isArray(data.messages) ? data.messages : []),
-    ...(Array.isArray(data.comments) ? data.comments : []), ...(Array.isArray(data.conversations) ? data.conversations : [])];
+    ...(Array.isArray(data.comments) ? data.comments : []), ...(Array.isArray(data.conversations) ? data.conversations : []),
+    ...(Array.isArray(data.threads) ? data.threads : []), ...(Array.isArray(data.replies) ? data.replies : [])];
   return rows.some((row) => isRecord(row) && ((target.nativeId && [row.id, row.nativeId, row.threadId, row.conversationId, row.commentId].includes(target.nativeId)) ||
     (target.explicitOwnerRef && Array.isArray(row.ownerRefs) && row.ownerRefs.includes(target.explicitOwnerRef)) ||
     (target.instagramUrl && row.instagramUrl === target.instagramUrl)));
@@ -249,3 +358,9 @@ function stringArray(value: unknown, max: number): value is string[] { return Ar
 function sumNumeric(values: unknown[]): number { return values.reduce<number>((sum, value) => sum + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0); }
 function boundedLimit(value: number): number { return Number.isInteger(value) && value > 0 ? Math.min(LIMIT_MAX, value) : 20; }
 function combineCoverage(left: Coverage | undefined, right: Coverage): Coverage { return left === "complete" || right === "complete" ? "complete" : left === "partial" || right === "partial" ? "partial" : "unknown"; }
+function combineRoutedCoverage(values: Coverage[]): Coverage {
+  if (!values.length || values.every((value) => value === "unknown")) return "unknown";
+  if (values.every((value) => value === "complete")) return "complete";
+  return "partial";
+}
+function recordRows(value: unknown): Record<string, unknown>[] { return Array.isArray(value) ? value.filter(isRecord) : []; }

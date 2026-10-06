@@ -67,11 +67,33 @@ export function createCommentsDomain(resolveContext: AccountContextResolver, now
         const authorId = stringValue(from?.id);
         const ownerKnown = authorId ? [ctx.instagramUserId, ctx.facebookPageId].includes(authorId) : undefined;
         const repliesCount = numberValue(comment.replies_count);
-        const unanswered = ownerKnown === true ? false : ownerKnown === false && repliesCount === 0 ? true : "unknown";
-        items.push({ id: comment.id, timestamp: comment.timestamp, unread: "unknown", unanswered,
+        let ownerReplied = false;
+        let repliesComplete = repliesCount === 0;
+        if (ownerKnown === false && repliesCount !== undefined && repliesCount > 0 && typeof comment.id === "string") {
+          try {
+            const replies = await listRepliesWithContext(ctx, { accountBinding: ctx.accountBinding, nativeId: comment.id },
+              { limit: Math.min(100, Math.max(1, repliesCount + 1)) });
+            const replyRows = pageItems(replies.data);
+            ownerReplied = replyRows.some((reply) => {
+              const replyFrom = isRecord(reply.from) ? reply.from : undefined;
+              const replyAuthorId = stringValue(replyFrom?.id);
+              return Boolean(replyAuthorId && [ctx.instagramUserId, ctx.facebookPageId].includes(replyAuthorId));
+            });
+            const nextCursor = isRecord(replies.data) ? stringValue(replies.data.nextCursor) : undefined;
+            repliesComplete = replies.coverage === "complete" && !nextCursor && replyRows.length >= repliesCount;
+          } catch {
+            repliesComplete = false;
+          }
+        }
+        const unanswered = ownerKnown === true ? false : ownerKnown === false && ownerReplied ? false
+          : ownerKnown === false && repliesComplete ? true : "unknown";
+        const commentDirection = ownerKnown === undefined ? "unknown" : ownerKnown ? "outbound" : "inbound";
+        items.push({ id: comment.id, commentId: comment.id, timestamp: comment.timestamp, unread: "unknown", unanswered,
+          latestComment: { id: comment.id, createdAt: comment.timestamp, direction: commentDirection, text: stringValue(comment.text) },
           visibility: typeof comment.hidden === "boolean" ? (comment.hidden ? "hidden" : "visible") : "unknown" });
       }
-      return { ...result, data: { items, nextCursor: isRecord(result.data) ? result.data.nextCursor : undefined } };
+      return { ...result, coverage: items.some((item) => item.unanswered === "unknown") ? "partial" : result.coverage,
+        data: { items, nextCursor: isRecord(result.data) ? result.data.nextCursor : undefined } };
     },
     async prepareReply(target, text, privateReply = false) {
       const ctx = await context();
@@ -134,7 +156,11 @@ function makeObservation(ctx: ApiAccountContext, nativeRef: string, value: unkno
     historyCompleteness: "limited" as const, data: { items, nextCursor, orderedBy: "api" },
     errors: complete ? [] : [{ code: "timestamp_unknown", message: "Comment timestamps are incomplete." }] };
 }
-function pageItems(value: unknown): Record<string, unknown>[] { if (!isRecord(value) || !isRecord(value.data) || !Array.isArray(value.data.items)) return []; return value.data.items.filter(isRecord); }
+function pageItems(value: unknown): Record<string, unknown>[] {
+  if (!isRecord(value)) return [];
+  const data = isRecord(value.data) ? value.data : value;
+  return Array.isArray(data.items) ? data.items.filter(isRecord) : [];
+}
 function ensureTarget(target: TargetRef, ctx: ApiAccountContext): void { if (target.accountBinding !== ctx.accountBinding) throw new Error("Target belongs to a different Instagram account."); }
 function requireId(value: string | undefined, kind: string): string { if (!value || /[/?#]/.test(value)) throw new Error(`A valid ${kind} id is required.`); return value; }
 function boundedLimit(value: unknown): number { return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.min(100, Math.floor(value))) : 25; }

@@ -77,4 +77,67 @@ describe("Comments API domain", () => {
     await expect(domain.prepareReply({ ...target, nativeId: "comment-5" }, "Reply")).rejects.toThrow(/granted permissions are unknown/i);
     expect(get).not.toHaveBeenCalled();
   });
+
+  it("marks a comment pending only when a complete known reply set contains no owner reply", async () => {
+    const ctx = makeContext();
+    const get = vi.fn(async (path: string) => path === "/media-3/comments"
+      ? { data: [{ id: "comment-pending", text: "Question", timestamp: "2026-10-05T10:00:00Z", from: { id: "peer-1" }, replies_count: 1 }] }
+      : { data: [{ id: "reply-1", timestamp: "2026-10-05T11:00:00Z", from: { id: "peer-2" }, text: "Peer reply" }] });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createCommentsDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ accountBinding: ctx.accountBinding, nativeId: "media-3" });
+
+    expect(get).toHaveBeenCalledWith("/comment-pending/replies", expect.any(Object));
+    expect(result.data).toMatchObject({ items: [{ commentId: "comment-pending", unread: "unknown", unanswered: true }] });
+  });
+
+  it("recognizes a verified owner reply and keeps incomplete reply evidence unknown", async () => {
+    const ctx = makeContext();
+    const get = vi.fn(async (path: string) => {
+      if (path === "/media-3/comments") return { data: [
+        { id: "comment-answered", timestamp: "2026-10-05T10:00:00Z", from: { id: "peer-1" }, replies_count: 1 },
+        { id: "comment-incomplete", timestamp: "2026-10-05T10:00:00Z", from: { id: "peer-2" }, replies_count: 2 }
+      ] };
+      if (path === "/comment-answered/replies") return { data: [{ id: "reply-owner", timestamp: "2026-10-05T11:00:00Z", from: { id: "page-4" } }] };
+      return { data: [{ id: "reply-unknown", timestamp: "2026-10-05T11:00:00Z", from: { id: "peer-3" } }] };
+    });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createCommentsDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ accountBinding: ctx.accountBinding, nativeId: "media-3" });
+
+    expect(result.data).toMatchObject({ items: [
+      { commentId: "comment-answered", unanswered: false },
+      { commentId: "comment-incomplete", unanswered: "unknown" }
+    ] });
+  });
+
+  it("keeps comment status unknown when reply pagination has a next page without an after cursor", async () => {
+    const ctx = makeContext();
+    const get = vi.fn(async (path: string) => path === "/media-3/comments"
+      ? { data: [{ id: "comment-paged", timestamp: "2026-10-05T10:00:00Z", from: { id: "peer-1" }, replies_count: 1 }] }
+      : { data: [{ id: "reply-peer", timestamp: "2026-10-05T11:00:00Z", from: { id: "peer-2" } }], paging: { next: "https://graph.facebook.com/next" } });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createCommentsDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ accountBinding: ctx.accountBinding, nativeId: "media-3" });
+
+    expect(result.data).toMatchObject({ items: [{ commentId: "comment-paged", unanswered: "unknown" }] });
+  });
+
+  it("marks triage coverage partial for a timestamped comment without author identity but preserves raw-list coverage", async () => {
+    const ctx = makeContext();
+    const get = vi.fn().mockResolvedValue({ data: [{ id: "comment-no-author", timestamp: "2026-10-05T10:00:00Z", replies_count: 0 }] });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createCommentsDomain(async () => ctx);
+    const target = { accountBinding: ctx.accountBinding, nativeId: "media-3" };
+
+    const raw = await domain.listComments(target);
+    const triage = await domain.listUnanswered(target);
+
+    expect(raw.coverage).toBe("complete");
+    expect(triage.data).toMatchObject({ items: [{ commentId: "comment-no-author", unanswered: "unknown" }] });
+    expect(triage.coverage).toBe("partial");
+  });
 });

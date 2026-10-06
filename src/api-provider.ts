@@ -7,9 +7,10 @@ import type { ActionReadbackEvidence } from "./action-readback.js";
 
 export type ApiReadRequest =
   | { operation: "account.inspect" }
-  | { operation: "inbox.list"; limit?: number; cursor?: string }
+  | { operation: "inbox.list"; limit?: number; cursor?: string; triage?: boolean }
   | { operation: "conversation.read"; target: TargetRef; olderCursor?: string; limit?: number }
-  | { operation: "comments.list" | "comments.replies"; target: TargetRef; cursor?: string; limit?: number }
+  | { operation: "comments.list"; target: TargetRef; cursor?: string; limit?: number; triage?: boolean }
+  | { operation: "comments.replies"; target: TargetRef; cursor?: string; limit?: number }
   | { operation: "insights.read"; target?: TargetRef; period?: string };
 
 export interface ApiProviderOptions {
@@ -98,9 +99,13 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
           return failureObservation(ctx, request.operation, "unsupported", new Error("Browser history cursors are scoped to the browser companion."));
         }
         if (request.operation === "account.inspect") return failureObservation(ctx, request.operation, "unsupported", new Error("Account inspection is supplied by a verified local companion."));
-        if (request.operation === "inbox.list") return await listConversationsWithContext(ctx, request);
+        if (request.operation === "inbox.list") return request.triage
+          ? await direct.listUnanswered(request)
+          : await listConversationsWithContext(ctx, request);
         if (request.operation === "conversation.read") return await readConversationWithContext(ctx, request.target, { limit: request.limit, olderCursor: request.olderCursor });
-        if (request.operation === "comments.list") return await listCommentsWithContext(ctx, request.target, request);
+        if (request.operation === "comments.list") return request.triage
+          ? await comments.listUnanswered(request.target, request)
+          : await listCommentsWithContext(ctx, request.target, request);
         if (request.operation === "comments.replies") return await listRepliesWithContext(ctx, request.target, request);
         if (request.operation !== "insights.read") throw new Error("Unsupported API read operation.");
         ensureScope(ctx, INSIGHTS_SCOPE[ctx.authMode]);

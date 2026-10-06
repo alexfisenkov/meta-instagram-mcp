@@ -77,6 +77,82 @@ describe("layered tools", () => {
     expect(output.sourceRefs).toEqual([{ source: "api", nativeRef: "api:inbox", coverage: "partial" }]);
   });
 
+  it("triages Direct plus only explicitly selected media comments through the existing source operations", async () => {
+    const calls: unknown[] = [];
+    const api: SourceProvider = {
+      source: "api",
+      status: async (operation) => ({ source: "api", availability: "ready", capabilities: [operation ?? "all"] }),
+      read: async (request) => {
+        calls.push(request);
+        return request.operation === "inbox.list"
+          ? observation("api", { items: [{ conversationId: "thread-1", unread: true, unanswered: true,
+            latestMessage: { id: "message-1", direction: "inbound", createdAt: "2026-10-06T11:00:00Z" } }] }, "complete")
+          : { ...observation("api", { items: [{ id: "comment-1", unanswered: false, unread: "unknown" }] }, "complete"), nativeRef: "comments:media-1" };
+      }
+    };
+    const tools = createLayeredToolHandlers({ router: createSourceRouter({ providers: [api] }) });
+
+    const queue = await tools.triageInbox({ source: "auto", limit: 20,
+      commentTargets: [{ accountBinding: "instagram:42", nativeId: "media-1" }] });
+
+    expect(calls).toEqual([
+      { operation: "inbox.list", limit: 20, triage: true },
+      { operation: "comments.list", target: { accountBinding: "instagram:42", nativeId: "media-1" }, limit: 20, triage: true }
+    ]);
+    expect(queue.items).toMatchObject([
+      { threadRef: { nativeId: "thread-1" }, source: "api", unread: true, unanswered: true, state: "needs_review" },
+      { commentRef: { nativeId: "comment-1" }, source: "api", unread: "unknown", unanswered: false, state: "answered" }
+    ]);
+    expect(queue.channelCounts).toEqual({ direct: 1, comments: 1, unknownAnswerStatus: 0 });
+    expect(queue.channelCoverage).toEqual({ direct: "complete", comments: "complete" });
+  });
+
+  it("normalizes browser comments and counts comment/reply observations in analysis with provenance", async () => {
+    const browser = observation("browser", { comments: [{ id: "comment-b", unread: false, unanswered: "unknown", like_count: 2, hidden: false }] }, "partial");
+    browser.nativeRef = "comments:media-b";
+    const phone = observation("phone", { replies: [{ id: "reply-p", direction: "outbound", createdAt: "2026-10-06T09:00:00Z" }] }, "complete");
+    phone.nativeRef = "comment-replies:comment-p";
+    const tools = createLayeredToolHandlers({ router: createSourceRouter({ providers: [provider("browser", browser)] }) });
+
+    const queue = await tools.triageInbox({ source: "auto", limit: 10, commentTargets: [{ accountBinding: "instagram:42", nativeId: "media-b" }] });
+    const output = await tools.analyzeInbox({ selectedObservations: [browser, phone], promptVersion: "v1" });
+
+    expect(queue.items).toMatchObject([{ commentRef: { nativeId: "comment-b" }, source: "browser", unanswered: "unknown", unread: false }]);
+    expect(output.stats.counts).toMatchObject({ comments: 1, replies: 1, unknownAnswerStatus: 1 });
+    expect(output.stats.inboundOutbound).toEqual({ inbound: "unknown", outbound: "unknown" });
+    expect(output.stats.ownerReplies).toMatchObject({ outboundMessages: "unknown", commentReplies: 1 });
+    expect(output.stats.commentLikesHidden).toEqual({ likes: 2, hidden: 0 });
+    expect(output.sourceRefs).toEqual([
+      { source: "browser", nativeRef: "comments:media-b", coverage: "partial" },
+      { source: "phone", nativeRef: "comment-replies:comment-p", coverage: "complete" }
+    ]);
+  });
+
+  it("deduplicates only the same native target on the same account and preserves per-source provenance", async () => {
+    const api = observation("api", { items: [{ id: "thread-same", unanswered: true, unread: "unknown" }] });
+    const browser = observation("browser", { threads: [{ id: "thread-same", unanswered: true, unread: false }] }, "complete");
+    const tools = createLayeredToolHandlers({ router: createSourceRouter({ providers: [provider("api", api), provider("browser", browser)] }) });
+
+    const queue = await tools.triageInbox({ source: "auto", limit: 10 });
+
+    expect(queue.items).toHaveLength(1);
+    expect(queue.items[0]).toMatchObject({ source: "api", unanswered: true, unread: false,
+      sourceRefs: [{ source: "api", nativeRef: "api:inbox" }, { source: "browser", nativeRef: "browser:inbox" }] });
+  });
+
+  it("rejects unbounded or cross-account comment targets before reading any source", async () => {
+    const read = vi.fn();
+    const api: SourceProvider = { source: "api", status: async () => ({ source: "api", availability: "ready", capabilities: [] }), read };
+    const tools = createLayeredToolHandlers({ router: createSourceRouter({ providers: [api] }) });
+
+    await expect(tools.triageInbox({ source: "auto", limit: 10, commentTargets: Array.from({ length: 21 }, (_, index) => ({ accountBinding: "instagram:42", nativeId: `media-${index}` })) }))
+      .rejects.toThrow(/At most 20/);
+    await expect(tools.triageInbox({ source: "auto", limit: 10, commentTargets: [
+      { accountBinding: "instagram:42", nativeId: "media-1" }, { accountBinding: "instagram:other", nativeId: "media-2" }
+    ] })).rejects.toThrow(/one selected Instagram account/);
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("rejects host drafts that point outside the selected observation's native records", async () => {
     const selected = observation("browser", { items: [{ id: "thread-selected" }] });
     const router = createSourceRouter({ providers: [provider("browser", selected)], timeoutMs: 100 });

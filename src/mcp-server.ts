@@ -309,10 +309,14 @@ function registerLayeredTools(server: McpServer, handlers: LayeredToolHandlers):
     description: "Report current per-source readiness and read-operation status; runtime status does not prove live UI verification.",
     inputSchema: z.object({}), annotations: { readOnlyHint: true }
   }, async () => jsonToolResult(await handlers.capabilities()));
-  const inboxInput = z.object({ source: z.literal("auto").default("auto"), limit: z.number().int().min(1).max(100).default(20), cursor: z.string().optional() });
+  const targetRefInput = z.object({ accountBinding: z.string().min(1).max(128), nativeId: z.string().max(512).optional(),
+    instagramUrl: z.string().max(2048).optional(), explicitOwnerRef: z.string().max(512).optional() })
+    .refine((target) => Boolean(target.nativeId || target.instagramUrl || target.explicitOwnerRef), "A selected target needs one exact native id, Instagram URL, or explicit owner reference.");
+  const inboxInput = z.object({ source: z.literal("auto").default("auto"), limit: z.number().int().min(1).max(100).default(20),
+    cursor: z.string().optional(), commentTargets: z.array(targetRefInput).max(20).optional() });
   server.registerTool("meta_triage_inbox", {
     title: "Triage Instagram Inbox",
-    description: "Return a bounded review queue with source coverage and separate unread/unanswered state.",
+    description: "Return a bounded Direct review queue and, when explicit commentTargets are supplied, review comments on those exact media targets. Unread and unanswered are separate; omitted targets never trigger an account-wide comment scan.",
     inputSchema: inboxInput, annotations: { readOnlyHint: true }
   }, async (args) => jsonToolResult(await handlers.triageInbox(args)));
   server.registerTool("meta_read_source", {

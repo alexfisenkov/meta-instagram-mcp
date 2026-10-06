@@ -80,4 +80,47 @@ describe("Direct API domain", () => {
     expect(result.data).toMatchObject({ messages: [{ direction: "unknown", createdAt: undefined }], complete: false });
     expect(result.errors[0]?.code).toBe("direction_or_time_unknown");
   });
+
+  it("classifies latest inbound, owner outbound, and ambiguous direction through the unanswered domain", async () => {
+    const ctx = context();
+    const get = vi.fn(async (path: string) => {
+      if (path.endsWith("/conversations")) return { data: [{ id: "thread-in" }, { id: "thread-owner" }, { id: "thread-unknown" }] };
+      if (path.endsWith("/thread-in/messages")) return { data: [{ id: "m-in", from: { id: "peer" }, created_time: "2026-10-06T10:00:00Z" }] };
+      if (path.endsWith("/thread-owner/messages")) return { data: [{ id: "m-out", from: { id: "page-4" }, created_time: "2026-10-06T10:00:00Z" }] };
+      return { data: [{ id: "m-unknown", from: { username: "peer" }, message: "Unclear sender", created_time: "2026-10-06T10:00:00Z" }] };
+    });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createDirectDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ limit: 3 });
+
+    expect(result.data).toMatchObject({ items: [
+      { conversationId: "thread-in", unanswered: true },
+      { conversationId: "thread-owner", unanswered: false },
+      { conversationId: "thread-unknown", unanswered: "unknown" }
+    ] });
+    expect((result.data as { items: Array<{ unread: unknown }> }).items.every((item) => item.unread === "unknown")).toBe(true);
+  });
+
+  it("keeps unanswered unknown when native message IDs are absent or equal timestamps make ordering ambiguous", async () => {
+    const ctx = context();
+    const get = vi.fn(async (path: string) => {
+      if (path.endsWith("/conversations")) return { data: [{ id: "thread-missing-id" }, { id: "thread-equal-time" }] };
+      if (path.endsWith("/thread-missing-id/messages")) return { data: [{ from: { id: "peer-1" }, created_time: "2026-10-06T10:00:00Z" }] };
+      return { data: [
+        { id: "message-in", from: { id: "peer-1" }, created_time: "2026-10-06T10:00:00Z" },
+        { id: "message-out", from: { id: "page-4" }, created_time: "2026-10-06T10:00:00Z" }
+      ] };
+    });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createDirectDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ limit: 2 });
+
+    expect(result.data).toMatchObject({ items: [
+      { conversationId: "thread-missing-id", unanswered: "unknown" },
+      { conversationId: "thread-equal-time", unanswered: "unknown" }
+    ] });
+    expect(result.coverage).toBe("partial");
+  });
 });
