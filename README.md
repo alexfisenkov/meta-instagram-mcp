@@ -1,8 +1,8 @@
-# Meta Instagram MCP
+# meta-instagram-mcp
 
-Локальный MCP-сервер для официального Meta Instagram API. Сервер дает read-only инструменты для авторизации, проверки токена, чтения account info, списка media, комментариев, user insights, media insights, быстрого рейтинга контента и безопасного raw GET по разрешенным Graph endpoints. Отдельно от них стоят два инструмента публикации - они закрыты двумя предохранителями и описаны ниже, в разделе «Публикация».
+MCP для работы с собственным Instagram-аккаунтом через официальные Meta API и подключённые оператором browser/phone companions. Общая runtime factory обслуживает stdio и Streamable HTTP, сохраняет legacy API tools и добавляет source-aware чтение, inbox triage/analysis и подтверждаемые actions. Доступность зависит от Meta permissions и runtime readiness каждого источника; подключение companion и live authorization проверяются отдельно.
 
-Проект рассчитан на персональное использование: секреты, токены, live-логи, скриншоты и реальные аналитические отчеты остаются локально и не публикуются в git.
+Секреты, token-store, OAuth state, browser session и сырые UI-evidence хранятся локально у оператора. MCP не содержит внутренней AI-модели: когда клиент подключён к MCP, анализ и черновики выполняет выбранный пользователем AI-клиент.
 
 ## Что важно про доступ Meta
 
@@ -12,63 +12,26 @@
 - Long-lived токены действуют около 60 дней и должны обновляться до истечения срока.
 - Официального "полного бесконечного доступа ко всему Instagram" нет. Этот MCP расширяемо читает то, что разрешают Meta permissions и текущий аккаунт.
 
-## Быстрый старт
+## Установка
+
+Инсталлятор принимает полный commit SHA из опубликованного release, собирает кандидат до переключения и оставляет отдельную резервную копию при обновлении. Версия `0.2.0` предварительная, пока release не опубликован. Сначала прочитайте [установку, обновление и rollback](docs/install.md), затем [матрицу готовности](docs/capabilities.md).
+
+Для разработки из чистого checkout:
 
 ```bash
-git clone <repo-url>
-cd meta-instagram-mcp
-npm install
-cp .env.example .env
-```
-
-Заполните `.env`:
-
-```env
-META_AUTH_MODE=facebook
-META_INSTAGRAM_APP_ID=<meta-app-id>
-META_INSTAGRAM_APP_SECRET=<meta-app-secret>
-META_INSTAGRAM_REDIRECT_URI=http://localhost:8787/callback
-```
-
-Подробная установка: [docs/install.md](docs/install.md).
-
-Сборка:
-
-```bash
+npm ci
+npm run typecheck
+npm test
 npm run build
+npm run test:installer
+npm run test:native-registration
 ```
 
-OAuth через локальный callback:
+Локальный запуск и `npm run meta:callback` читают приватный внешний config; инструкции для первичной настройки — в [docs/install.md](docs/install.md).
 
-```bash
-npm run meta:callback
-```
+## Базовые API tools
 
-Команда напечатает login URL. После consent Meta вернет браузер на `META_INSTAGRAM_REDIRECT_URI`, а сервер сохранит long-lived token вне репозитория, если задан `META_INSTAGRAM_APP_SECRET`.
-
-После OAuth сохраните IG user id в token-store:
-
-```bash
-# Page-linked path, если pages_show_list выдан:
-# meta_resolve_instagram_account {}
-
-# Direct path, если Meta выдала Instagram access, но declined Page scopes:
-# meta_resolve_instagram_account {"userId":"<IG_USER_ID>"}
-```
-
-Запуск MCP:
-
-```bash
-npm run dev
-```
-
-Подключение к Codex после сборки:
-
-```bash
-codex mcp add meta-instagram-local -- node /absolute/path/to/meta-instagram-mcp/dist/server.js
-```
-
-## MCP Tools
+Ниже перечислена существующая legacy API surface. Точный текущий набор tools проверяется через MCP client/doctor; permissions и per-source readiness ограничивают доступность функций.
 
 - `meta_auth_status` - проверяет конфиг и redacted token metadata.
 - `meta_scope_presets` - показывает поддерживаемые OAuth scope presets.
@@ -89,7 +52,11 @@ codex mcp add meta-instagram-local -- node /absolute/path/to/meta-instagram-mcp/
 - `meta_create_media_container` - создает контейнер публикации по публичной ссылке на медиа и читает его `status_code`. Ничего не публикует.
 - `meta_publish_media` - публикует готовый контейнер. Требует `confirm: true` и `META_INSTAGRAM_WRITE=true`.
 
-Локальные CLI/MCP процессы автоматически читают `.env` из корня проекта. Секреты и токены не коммитятся. По умолчанию token-store находится вне репозитория: `~/.config/meta-instagram-mcp/token.json`.
+Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
+
+Из приватного внешнего `.env` wrapper принимает только поддерживаемые `META_*` и `INSTAGRAM_MCP_*` имена; неизвестные ключи, включая `META_MCP_CONFIG_DIR`, завершают запуск с безопасным кодом ошибки. Значения читаются как текст без shell substitution. Переменные окружения процесса имеют приоритет над файлом. HTTP включается через `INSTAGRAM_MCP_TRANSPORT=http`; listener требует bearer secret и настраивается через `INSTAGRAM_MCP_HTTP_*`. API, browser и phone write gates независимы: `META_INSTAGRAM_WRITE`, `INSTAGRAM_MCP_BROWSER_WRITES` и `INSTAGRAM_MCP_PHONE_WRITES`. Подробнее — [runtime-параметры](docs/install.md#runtime-параметры-и-transports).
+
+Layered tools включают `meta_capabilities`, `meta_read_source`, `meta_triage_inbox`, `meta_read_inbox`, `meta_analyze_inbox`, `meta_begin_oauth`, `meta_prepare_action`, `meta_execute_action` и read-only `meta_reconcile_action` (27 MCP tools всего: 18 legacy и 9 layered/mutation). `meta_triage_inbox` по умолчанию проверяет Direct; для комментариев передайте ограниченный список точных `commentTargets` публикаций. `meta_capabilities` сообщает runtime status; он не подтверждает Meta access, пользовательский Chrome login, физическую готовность телефона или production release. Смотрите [матрицу возможностей](docs/capabilities.md).
 
 ## Публикация
 
@@ -123,7 +90,13 @@ codex mcp add meta-instagram-local -- node /absolute/path/to/meta-instagram-mcp/
 
 ## Документация
 
-- [docs/install.md](docs/install.md) - установка с нуля.
+- [docs/install.md](docs/install.md) - portable install, client setup, OAuth, update, rollback и uninstall.
+- [docs/capabilities.md](docs/capabilities.md) - доступные и gated источники/профили.
+- [docs/roadmap.md](docs/roadmap.md) - оставшиеся release gates.
+- [docs/troubleshooting.md](docs/troubleshooting.md) - диагностика установки, OAuth и companions.
+- [docs/operator-guide.md](docs/operator-guide.md) - безопасная работа с профилями и actions.
+- [CONTRIBUTING.md](CONTRIBUTING.md) - локальные checks и вклад.
+- [CHANGELOG.md](CHANGELOG.md) - изменения по версиям.
 - [docs/file-map.md](docs/file-map.md) - карта проекта: что где смотреть.
 - [docs/operations-runbook.md](docs/operations-runbook.md) - команды и процедуры.
 - [docs/security-notes.md](docs/security-notes.md) - правила секретов, токенов и ротации.

@@ -16,6 +16,9 @@ export interface MetaInstagramConfig {
   tokenStorePath: string;
   /** Предохранитель записи: без него инструменты публикации отказывают. */
   writeEnabled?: boolean;
+  browserWriteEnabled?: boolean;
+  phoneWriteEnabled?: boolean;
+  deleteEnabled?: boolean;
   /**
    * Журнал публикаций: по строке JSON на каждую попытку. loadConfig — его
    * единственный источник (он же вычисляет путь по умолчанию, если
@@ -46,6 +49,9 @@ export function loadConfig(env: Env = process.env): MetaInstagramConfig {
     // Строгое «true» и ничего кроме: «1», «yes» и пустая строка не считаются
     // разрешением. Опечатка в юните не должна открывать публикацию.
     writeEnabled: blankToUndefined(effectiveEnv.META_INSTAGRAM_WRITE)?.toLowerCase() === "true",
+    browserWriteEnabled: blankToUndefined(effectiveEnv.INSTAGRAM_MCP_BROWSER_WRITES)?.toLowerCase() === "true",
+    phoneWriteEnabled: blankToUndefined(effectiveEnv.INSTAGRAM_MCP_PHONE_WRITES)?.toLowerCase() === "true",
+    deleteEnabled: blankToUndefined(effectiveEnv.META_INSTAGRAM_DELETE)?.toLowerCase() === "true",
     publishLogPath: blankToUndefined(effectiveEnv.META_INSTAGRAM_PUBLISH_LOG)
       ?? join(dirname(tokenStorePath), "publish-log.jsonl")
   };

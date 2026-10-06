@@ -84,16 +84,23 @@ describe("MetaClient host allow-list for absolute paths", () => {
     }
   );
 
-  it.each(["//evil.example/steal", "file:///etc/passwd", "ftp://evil.example/steal"])(
-    "keeps %s on the Graph host instead of following it",
+  it.each(["ftp://graph.instagram.com/me", "http://graph.instagram.com/me"])(
+    "rejects non-HTTPS absolute URL %s before sending credentials",
     async (path) => {
-      httpMock.mockResolvedValueOnce(jsonHttpResponse({ id: "1" }));
-
-      await client().get(path);
-
-      expect(httpMock.mock.calls[0][0].hostname).toBe("graph.instagram.com");
+      await expect(client().get(path)).rejects.toThrow(/HTTPS/);
+      expect(httpMock).not.toHaveBeenCalled();
     }
   );
+
+  it("rejects file URLs before any request is sent", async () => {
+    await expect(client().get("file:///etc/passwd")).rejects.toThrow();
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects scheme-relative hosts instead of treating them as Graph-relative paths", async () => {
+    await expect(client().get("//evil.example/steal")).rejects.toThrow(/not a Meta Graph host/);
+    expect(httpMock).not.toHaveBeenCalled();
+  });
 
   it("matches the host allow-list case-insensitively", async () => {
     await expect(client().get("HTTPS://Evil.Example/steal")).rejects.toThrow(/is not a Meta Graph host/);
@@ -124,7 +131,7 @@ describe("MetaClient redacts the access token in error messages", () => {
   });
 
   it("replaces an echoed token with a placeholder", async () => {
-    const token = "EAA-super-secret-token-value";
+    const token = "FAKE_OAUTH_TOKEN_6f31";
     httpMock.mockResolvedValue(
       metaErrorResponse(`Invalid OAuth access token ${token} for this app`)
     );
@@ -144,6 +151,18 @@ describe("MetaClient redacts the access token in error messages", () => {
 
     expect(message).not.toContain(token);
     expect(message).toContain("[redacted-token]");
+  });
+
+  it("removes secret assignments and secret query values from an API error", async () => {
+    httpMock.mockResolvedValueOnce(metaErrorResponse(
+      "failed client_secret=FAKE_ERROR_SECRET; Authorization: Bearer FAKE_BEARER_SECRET; see https://graph.facebook.com/v25.0/me?access_token=FAKE_QUERY_SECRET"
+    ));
+    const error = await client().get("/me").catch((value: unknown) => value);
+    const message = (error as Error).message;
+    expect(message).not.toContain("FAKE_ERROR_SECRET");
+    expect(message).not.toContain("FAKE_BEARER_SECRET");
+    expect(message).not.toContain("FAKE_QUERY_SECRET");
+    expect(message).toContain("[redacted-secret]");
   });
 });
 
@@ -192,5 +211,85 @@ describe("MetaClient POST keeps the read-path guards", () => {
 
     await expect(client().post("/ig/media_publish", { creation_id: "c-1" }))
       .rejects.toThrow(/\[redacted-token\]/);
+  });
+});
+
+describe("MetaClient validates its configured base URL before attaching a token", () => {
+  beforeEach(() => httpMock.mockReset());
+
+  it.each([
+    "http://graph.facebook.com",
+    "https://graph.facebook.com:8443",
+    "https://user:pass@graph.facebook.com",
+    "https://graph.facebook.com/?access_token=other",
+    "https://graph.facebook.com/v25.0"
+  ])("rejects unsafe base URL %s", (baseUrl) => {
+    expect(() => new MetaClient({ accessToken: "FAKE_BASE_TOKEN", apiVersion: "v25.0", baseUrl })).toThrow();
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("MetaClient sanitizes successful Graph responses recursively", () => {
+  beforeEach(() => httpMock.mockReset());
+
+  it("redacts secret fields and token echoes in nested arrays and paging URLs while preserving useful data", async () => {
+    const token = "FAKE_nested_token_6d2b";
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({
+      id: "safe-id",
+      caption: "ordinary text including tokenization",
+      access_token: token,
+      profile: { accessToken: token, app_secret: "FAKE_APP_SECRET", client_secret: "FAKE_CLIENT_SECRET", Authorization: "Bearer hidden" },
+      data: [{ message: "keep this ordinary user text", count: 3 }, { note: `echo ${encodeURIComponent(token)}` }],
+      paging: {
+        next: `https://graph.facebook.com/v25.0/me?access_token=${encodeURIComponent(token)}&limit=4`,
+        previous: "https://graph.facebook.com/v25.0/me?%61ccess_token=FAKE_FOREIGN_TOKEN&app_secret=FAKE_URL_SECRET",
+        cursors: { after: "SAFE_CURSOR" }
+      }
+    }));
+
+    const result = await new MetaClient({ accessToken: token, apiVersion: "v25.0", baseUrl: "https://graph.facebook.com" }).get("/me");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain(encodeURIComponent(token));
+    expect(result).toMatchObject({
+      id: "safe-id",
+      caption: "ordinary text including tokenization",
+      access_token: "[redacted-secret]",
+      profile: {
+        accessToken: "[redacted-secret]",
+        app_secret: "[redacted-secret]",
+        client_secret: "[redacted-secret]",
+        Authorization: "[redacted-secret]"
+      },
+      data: [{ message: "keep this ordinary user text", count: 3 }, { note: "echo [redacted-token]" }],
+      paging: {
+        next: expect.stringContaining("access_token=%5Bredacted-secret%5D"),
+        previous: expect.not.stringContaining("FAKE_FOREIGN_TOKEN"),
+        cursors: { after: "SAFE_CURSOR" }
+      }
+    });
+  });
+
+  it("sanitizes a rejected transport error before throwing", async () => {
+    const token = "FAKE_transport_token_91ab";
+    httpMock.mockRejectedValueOnce(new Error(`network failed for ${token} and ${encodeURIComponent(token)}`));
+    const instance = new MetaClient({ accessToken: token, apiVersion: "v25.0", baseUrl: "https://graph.instagram.com" });
+    const error = await instance.get("/me").catch((value: unknown) => value);
+    expect((error as Error).message).not.toContain(token);
+    expect((error as Error).message).toContain("[redacted-token]");
+  });
+});
+
+describe("MetaClient rejects reserved keys in form and JSON bodies", () => {
+  beforeEach(() => httpMock.mockReset());
+
+  it.each(["method", "_method", "access_token", "ＭＥＴＨＯＤ", "​access_token"])("rejects normalized JSON key %s", async (key) => {
+    await expect(client().postJson("/me/messages", { message: { [key]: "value" } })).rejects.toThrow(/Reserved JSON key/);
+    expect(httpMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a reserved legacy form key before calling the transport", async () => {
+    await expect(client().post("/me/media", { "ｍｅｔｈｏｄ": "delete" })).rejects.toThrow(/Reserved query key/);
+    expect(httpMock).not.toHaveBeenCalled();
   });
 });

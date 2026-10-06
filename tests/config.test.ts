@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 import { loadConfig, redactToken } from "../src/config.js";
 
 describe("config", () => {
@@ -17,7 +18,7 @@ describe("config", () => {
     expect(config.redirectUri).toBe("http://localhost:8787/callback");
     expect(config.defaultScopes).toEqual(["instagram_business_basic", "instagram_business_manage_insights"]);
     expect(config.graphApiVersion).toBe("v25.0");
-    expect(config.tokenStorePath).toBe("/tmp/home/.config/meta-instagram-mcp/token.json");
+    expect(config.tokenStorePath).toBe(join("/tmp/home", ".config", "meta-instagram-mcp", "token.json"));
   });
 
   it("supports the Facebook Login auth mode and connected page id", () => {

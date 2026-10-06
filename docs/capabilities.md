@@ -1,0 +1,33 @@
+# Возможности и границы готовности
+
+Runtime factory сохраняет legacy API tools и регистрирует общие layered read/triage/analysis и guarded action tools для stdio и Streamable HTTP. Capability report показывает runtime status, а не доказательство входа в аккаунт или production readiness. Fake tests и наличие исходников не подтверждают live Meta/browser/phone доступ.
+
+| Источник/профиль | Что делает | Статус в текущем checkout |
+|---|---|---|
+| Официальный Meta Graph API | Legacy account/media/comments/insights tools и API Direct/comments/insights domains | Реализация подключена в общей factory. Доступность каждой операции зависит от свежего OAuth permission status, выбранного account/Page и поведения Meta. Старшая Direct history ограничена API; API comment likes и Facebook-mode message reactions не поддерживаются. |
+| Общий layered runtime | Source read, inbox triage/read, анализ выбранных observations и guarded actions | Shared factory обслуживает stdio и Streamable HTTP и сохраняет legacy tools. Capability report помечен `runtime_status_only`; он не доказывает live auth или доставку. |
+| API over Streamable HTTP и CompanionHub | Bearer-protected server transport, durable companion tasks, OAuth callback/webhook routes при настроенной конфигурации | Кодовые пути подключены, но это не подтверждает deployment, публичный HTTPS gateway, Meta app setup, callback consent или webhook delivery. HTTP требует собственных безопасных параметров. |
+| Server + browser companion | Browser observations и allowlisted semantic actions из постоянного Chrome профиля узла | Runtime path и per-user host registration helper доступны в checkout. Их запуск, extension installation, stable extension ID/path, авторизованный server Chrome profile и live UI QA не подтверждены; readiness остаётся gated до этих шагов. |
+| External desktop browser | Browser companion на собственной машине, подключённый к выбранному core | Runtime поддерживает companion path; для конкретной машины требуются host/extension registration, bridge config, account binding и readiness read-back. Live readiness не подтверждена. |
+| Connected phone | Phone observations/actions через локальный Appium companion; iOS требует Mac, Android — настроенный UiAutomator2 host | Runtime path и semantic providers подключены. Live WDA/Appium, Android host и реальные экраны не подтверждены. Phone older-history scrolling не поддерживается. |
+| Анализ через подключённый AI host | Хост анализирует только выбранные observations; deterministic statistics считаются отдельно | MCP не запускает внутреннюю модель. `user_supplied` observations подходят для анализа, но не дают source identity/свежести для новых write actions. Черновики не отправляются автоматически. |
+
+## Чтение, coverage и история
+
+Каждое observation сохраняет source, coverage и полноту истории. API/браузер/телефон не объединяются по похожему имени или тексту: связать данные можно только по проверенному native ID либо явной ссылке владельца. `unread` означает состояние уведомления, `unanswered` — отсутствие ответа; одно не подменяет другое. Если направление, identity или история не подтверждены, статус остаётся `unknown`/`partial`.
+
+`meta_triage_inbox` применяет API Direct unanswered-классификатор к ограниченному inbox page. Комментарии проверяются только для явно переданных `commentTargets` (не больше 20 точных media references); API использует подтверждённые sender IDs и bounded replies, а неполный ответный набор остаётся `unknown`. Browser/phone triage использует прежние semantic `inbox.list`/`comments.list` операции и сохраняет их source/nativeRef. Одинаковый объект сводится между источниками только при совпадении account binding, канала и точного native ID; строка сохраняет все `sourceRefs`, а противоречащие статусы становятся `unknown`. Аналитика выбранных observations отдельно считает threads, messages, comments, replies и unknown answer status.
+
+Graph API имеет ограничения доступа и окна чтения. API provider отдельно отображает scope/permission gates для inbox, conversation, comments/replies и insights. Ответы показывают per-source coverage; не считайте историю полной из-за одного успешного вызова. Browser поддерживает текущие semantic inbox/thread/comments/replies snapshots и bounded older-scroll operation; coverage зависит от распознаваемой страницы. Verified browser insights controls не обещаны. Phone поддерживает snapshots для inbox/thread/comments/replies/insights; older-history scrolling не реализован. UI conversation read может пометить диалог просмотренным, что отражается в side effects.
+
+Для автоматического чтения router пробует API → browser → phone с общим ограниченным бюджетом и сообщает tried/skipped sources, provenance, coverage, completeness и ошибки. При `OUTCOME_UNKNOWN` запись не повторяется и source не меняется; сверяется тот же target тем же источником.
+
+## Записи и подтверждения
+
+MCP сначала готовит preview с точной source/account/target/context, fingerprint и request ID. Выполнение требует подтверждения, совпадающего preview и source-specific local gate. UI write дополнительно требует свежий signed grant от Hub, выданный после отдельного server-side approval. Browser allowlist содержит message send/react/unreact, comment reply/private reply и comment like/unlike при известном аккаунте и контексте; phone write controls ограничены message send/react/unreact, comment reply/private reply и comment like/unlike. API comment like/unlike unsupported, а Graph API reactions зависят от auth mode и могут быть unsupported. Hide/show/delete для comments не объявляются поддержанными текущим runtime. UI account/context checks и gates не означают Meta Access/permission или live UI pass. Timeout/неизвестный результат возвращает `OUTCOME_UNKNOWN`: автоматически не повторять и не менять источник; выполнить read-back того же target тем же source. `ACK`, read-back и доставка — разные доказательства.
+
+Media publishing остаётся отдельной legacy API операцией и использует `META_INSTAGRAM_WRITE=true` вместе с `confirm:true`; подробности — в разделе [Публикация](../README.md#публикация).
+
+## Установка
+
+Все четыре профиля, их prerequisites и текущие ограничения собраны в [инструкции установки](install.md). Для machine-readable локальной проверки используйте `node tools/doctor.mjs`; doctor выполняет только MCP initialize/listTools/status read, не отправляет Meta data write и не подтверждает live browser/phone readiness.

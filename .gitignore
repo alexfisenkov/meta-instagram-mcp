@@ -42,3 +42,6 @@ scripts/*
 # Python-мусор.
 __pycache__/
 *.pyc
+
+.autopilot/
+.autopilot/serve.*

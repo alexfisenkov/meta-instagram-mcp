@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Companion",
+  "version": "0.1.0",
+  "description": "Fixed semantic reads from an explicitly selected Instagram tab.",
+  "permissions": ["nativeMessaging"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://instagram.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.instagram.com/*",
+        "https://instagram.com/*"
+      ],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
