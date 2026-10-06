@@ -146,7 +146,10 @@ async function verifyCompiledPortableWrapper() {
       const closed = new Promise((resolve) => httpChild.once("close", (code, signal) => resolve({ code, signal })));
       httpChild.kill("SIGTERM");
       const result = await closed;
-      if (process.platform === "win32") assert.equal(result.code, 143, "the portable wrapper must preserve SIGTERM as its Windows exit status");
+      if (process.platform === "win32") {
+        assert.equal(result.code, null, "Windows terminates the wrapper process directly instead of reporting a POSIX exit code");
+        assert.equal(result.signal, "SIGTERM", "the Windows child-process close event must identify the requested termination signal");
+      }
       else assert.equal(result.signal, "SIGTERM", "the portable wrapper must preserve child termination signals");
     }
   }
