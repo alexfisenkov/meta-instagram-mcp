@@ -27,11 +27,13 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "dev": "node dist/server.js",
+    "dev": "node tools/run.mjs",
     "test": "vitest run",
+    "test:installer": "node tools/test-installer.mjs",
+    "doctor": "node tools/doctor.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "meta:auth-url": "node dist/cli/auth-url.js",
-    "meta:callback": "node dist/cli/callback.js"
+    "meta:auth-url": "node tools/cli.mjs auth-url",
+    "meta:callback": "node tools/cli.mjs callback"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -39,6 +41,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "happy-dom": "20.14.5",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14"

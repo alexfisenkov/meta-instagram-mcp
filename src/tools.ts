@@ -1,4 +1,6 @@
 import { redactToken, type MetaInstagramConfig } from "./config.js";
+import { createAccountContextResolver } from "./account-context.js";
+import { createApiProvider } from "./api-provider.js";
 import { MetaClient, type GraphQuery } from "./meta-client.js";
 import {
   buildAuthUrl,
@@ -56,6 +58,13 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     apiVersion: dependencies.config.graphApiVersion,
     baseUrl: graphBaseUrl(authMode)
   }));
+  const apiProvider = createApiProvider({
+    resolveContext: createAccountContextResolver({
+      config: dependencies.config,
+      tokenStore: { load: () => store.load() },
+      clientFactory: makeClient
+    })
+  });
 
   async function resolveToken(explicitToken?: string): Promise<ResolvedToken> {
     if (explicitToken) return { accessToken: explicitToken, authMode: dependencies.config.authMode };
@@ -91,6 +100,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
   });
 
   return {
+    apiProvider,
     createMediaContainer: publish.createMediaContainer,
     publishMedia: publish.publishMedia,
 
@@ -134,13 +144,21 @@ export function createToolHandlers(dependencies: ToolDependencies) {
               ? "Facebook Login minimum for listing connected Pages and Instagram account identity."
               : "Profile, media list, and account/media insights."
           },
+          inbox: {
+            scopes: presets.inbox,
+            purpose: "Official API Direct read and messaging permission for per-item, approved replies."
+          },
+          comments: {
+            scopes: presets.comments,
+            purpose: "Official API comment reading, replies, private replies, and moderation permissions."
+          },
           analytics: {
             scopes: presets.analytics,
             purpose: "Read-only analytics plus comment reading for media-level review."
           },
           fullStandard: {
             scopes: presets.fullStandard,
-            purpose: "Maximum standard scopes for the selected auth mode. Includes future publish/messages scopes, but this MCP exposes no write tools yet."
+            purpose: "Maximum standard scopes for the selected auth mode, including insights, comments, messaging, and publishing."
           }
         }
       };
@@ -378,7 +396,7 @@ function requireConfig<T>(value: T | undefined, name: string): asserts value is 
   if (!value) throw new Error(`Missing required config: ${name}`);
 }
 
-function resolveScopes(scopes: string[] | undefined, scopePreset: "readOnly" | "analytics" | "fullStandard" | undefined, configuredScopes: string[] | undefined, authMode: AuthMode = "instagram"): string[] {
+function resolveScopes(scopes: string[] | undefined, scopePreset: "readOnly" | "inbox" | "comments" | "analytics" | "fullStandard" | undefined, configuredScopes: string[] | undefined, authMode: AuthMode = "instagram"): string[] {
   if (scopes?.length) return scopes;
   if (scopePreset) return [...getScopePresets(authMode)[scopePreset]];
   if (configuredScopes?.length) return configuredScopes;

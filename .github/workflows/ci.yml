@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:installer
+      - name: Check shell installer syntax
+        if: runner.os != 'Windows'
+        run: bash -n install.sh uninstall.sh tools/rollback.sh
+      - name: Check PowerShell script syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('install.ps1', 'uninstall.ps1', 'tools/rollback.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "PowerShell parse failed: $path" }
+          }
+
+  windows-native-host:
+    name: Windows Native Messaging host
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build the Windows Native Messaging host
+        shell: pwsh
+        run: |
+          $project = 'native-host/windows/InstagramNativeHost.csproj'
+          if (-not (Test-Path -LiteralPath $project -PathType Leaf)) { throw "Required Windows Native Messaging host project is missing: $project" }
+          dotnet publish $project --configuration Release --runtime win-x64 --self-contained true -o artifacts/native-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath 'artifacts/native-host/InstagramNativeHost.exe' -PathType Leaf)) {
+            throw 'Windows Native Messaging host publish did not produce InstagramNativeHost.exe.'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instagram-native-host-win-x64
+          path: artifacts/native-host/**
+          if-no-files-found: error
+          retention-days: 14

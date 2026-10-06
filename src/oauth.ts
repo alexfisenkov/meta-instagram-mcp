@@ -16,10 +16,14 @@ export function defaultScopesForAuthMode(authMode: AuthMode): string[] {
   return [...getScopePresets(authMode).analytics];
 }
 
-export function getScopePresets(authMode: AuthMode): Record<"readOnly" | "analytics" | "fullStandard", string[]> {
+export type ScopePreset = "readOnly" | "inbox" | "comments" | "analytics" | "fullStandard";
+
+export function getScopePresets(authMode: AuthMode): Record<ScopePreset, string[]> {
   if (authMode === "facebook") {
     return {
       readOnly: ["instagram_basic", "pages_show_list", "pages_read_engagement"],
+      inbox: ["instagram_basic", "pages_show_list", "pages_manage_metadata", "instagram_manage_messages"],
+      comments: ["instagram_basic", "instagram_manage_comments"],
       analytics: [
         "instagram_basic",
         "pages_show_list",
@@ -33,6 +37,7 @@ export function getScopePresets(authMode: AuthMode): Record<"readOnly" | "analyt
         "pages_read_engagement",
         "instagram_manage_insights",
         "instagram_manage_comments",
+        "pages_manage_metadata",
         "instagram_content_publish",
         "instagram_manage_messages"
       ]
@@ -40,6 +45,8 @@ export function getScopePresets(authMode: AuthMode): Record<"readOnly" | "analyt
   }
   return {
     readOnly: ["instagram_business_basic"],
+    inbox: ["instagram_business_basic", "instagram_business_manage_messages"],
+    comments: ["instagram_business_basic", "instagram_business_manage_comments"],
     analytics: [
       "instagram_business_basic",
       "instagram_business_manage_insights",
