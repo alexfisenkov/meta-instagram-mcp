@@ -24,13 +24,15 @@ trap {
 Write-Stage 'START'
 $path = $env:INSTAGRAM_MCP_PRIVATE_FS_PATH
 if ([string]::IsNullOrWhiteSpace($path)) { throw 'Private path is unavailable.' }
+Write-Stage 'GET_ITEM'
 $item = Get-Item -LiteralPath $path -Force
 Write-Stage 'ITEM'
+Write-Stage 'IDENTITY'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $administrators = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $allowed = @($identity.Value, $system.Value, $administrators.Value)
-Write-Stage 'IDENTITY'
+Write-Stage 'IDENTITY_READY'
 
 if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
   if ($item.PSIsContainer) {
@@ -56,9 +58,11 @@ if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
   Write-Stage 'SET_DONE'
 }
 
-$actual = Get-Acl -LiteralPath $path
 Write-Stage 'GET_ACL'
+$actual = Get-Acl -LiteralPath $path
+Write-Stage 'ACL_READ'
 $rules = $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+Write-Stage 'RULES_READ'
 $allowedAllows = @{}
 foreach ($rule in $rules) {
   if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
