@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,8 @@ try {
   const launcherText = await readFile(paths.hostPath, "utf8");
   assert.match(launcherText, /INSTAGRAM_MCP_BRIDGE_CONFIG=/);
   assert.equal(paths.hostScript.endsWith(join("dist", "companion", "browser-native-host.js")), true);
-  assert.equal(launcherText.includes(paths.hostScript), true);
+  const registeredHostScript = join(await realpath(installRoot), "dist", "companion", "browser-native-host.js");
+  assert.equal(launcherText.includes(registeredHostScript), true);
   assert.equal(launcherText.includes(secretCanary), false);
   if (process.platform !== "win32") {
     assert.equal((await (await import("node:fs/promises")).stat(paths.hostPath)).mode & 0o777, 0o700);
