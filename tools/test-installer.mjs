@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, chmod } from "node:fs/promises";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -46,6 +49,107 @@ function runMaintenance(kind, backupPath) {
     "-Confirmation", "REMOVE-APP", "-Target", target], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return execFileSync("bash", [uninstallShell, "--confirm", "REMOVE-APP", "--target", target],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+async function freePort() {
+  const server = createNetServer();
+  await new Promise((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return port;
+}
+
+function isolatedEnvironment(home, config) {
+  const env = {};
+  for (const name of ["PATH", "USERPROFILE", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TMP", "TEMP"]) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  env.HOME = home;
+  env.USERPROFILE = home;
+  env.META_MCP_CONFIG_DIR = config;
+  return env;
+}
+
+async function waitForHealth(url, child) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (child.exitCode !== null) throw new Error("PORTABLE_WRAPPER_EXITED_BEFORE_LISTENER");
+    try {
+      const response = await fetch(`${url}/health`);
+      if (response.status === 200) return;
+    } catch { /* The listener is still starting. */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("PORTABLE_WRAPPER_LISTENER_TIMEOUT");
+}
+
+async function assertRuntimeTools(client, transport) {
+  await client.connect(transport);
+  const listed = await client.listTools();
+  assert.equal(listed.tools.length, 27, "the portable wrapper must start the compiled server with all runtime tools");
+  const capabilities = await client.callTool({ name: "meta_capabilities", arguments: {} });
+  const capabilityPayload = JSON.parse(capabilities.content?.filter((item) => item.type === "text").map((item) => item.text).join("\n") ?? "{}");
+  assert.equal(capabilityPayload.sources?.length, 3, "runtime capabilities must report API, browser, and phone independently");
+  const triage = await client.callTool({ name: "meta_triage_inbox", arguments: { source: "auto", limit: 3 } });
+  const triagePayload = JSON.parse(triage.content?.filter((item) => item.type === "text").map((item) => item.text).join("\n") ?? "{}");
+  assert.ok(Array.isArray(triagePayload.triedSources));
+  assert.ok(Array.isArray(triagePayload.items));
+}
+
+async function verifyCompiledPortableWrapper() {
+  const realRuntime = join(work, "compiled runtime");
+  const home = join(realRuntime, "home");
+  const stdioConfig = join(realRuntime, "stdio config");
+  const httpConfig = join(realRuntime, "http config");
+  await Promise.all([mkdir(home, { recursive: true }), mkdir(stdioConfig, { recursive: true }), mkdir(httpConfig, { recursive: true })]);
+  const minimalConfig = "META_AUTH_MODE=facebook\nMETA_INSTAGRAM_REDIRECT_URI=http://localhost:8787/callback\n";
+  await writeFile(join(stdioConfig, ".env"), minimalConfig, { mode: 0o600 });
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const bearer = `test-${randomBytes(32).toString("base64url")}`;
+  await writeFile(join(httpConfig, ".env"), `${minimalConfig}INSTAGRAM_MCP_TRANSPORT=http\nINSTAGRAM_MCP_HTTP_HOST=127.0.0.1\nINSTAGRAM_MCP_HTTP_PORT=${port}\nINSTAGRAM_MCP_HTTP_BEARER_TOKEN=${bearer}\nINSTAGRAM_MCP_HTTP_ALLOWED_HOSTS=127.0.0.1:${port}\nINSTAGRAM_MCP_HTTP_ALLOWED_ORIGINS=${baseUrl}\n`, { mode: 0o600 });
+
+  const wrapperPath = join(projectRoot, "tools", "run.mjs");
+  const common = { command: process.execPath, args: [wrapperPath], cwd: projectRoot };
+  const stdioClient = new Client({ name: "portable-wrapper-stdio-fixture", version: "1" });
+  const stdioTransport = new StdioClientTransport({ ...common, env: isolatedEnvironment(home, stdioConfig) });
+  try {
+    await assertRuntimeTools(stdioClient, stdioTransport);
+  } finally {
+    await stdioClient.close().catch(() => undefined);
+  }
+
+  const httpChild = spawn(process.execPath, [wrapperPath], {
+    cwd: projectRoot,
+    env: isolatedEnvironment(home, httpConfig),
+    stdio: ["ignore", "ignore", "pipe"]
+  });
+  try {
+    await waitForHealth(baseUrl, httpChild);
+    const health = await fetch(`${baseUrl}/health`);
+    assert.deepEqual(await health.json(), { status: "ok" });
+    assert.equal((await fetch(`${baseUrl}/health`, { headers: { origin: "http://invalid.example" } })).status, 403);
+    assert.equal((await fetch(`${baseUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
+    assert.equal((await fetch(`${baseUrl}/oauth/callback`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/webhook`)).status, 404);
+
+    const httpClient = new Client({ name: "portable-wrapper-http-fixture", version: "1" });
+    const httpTransport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${bearer}` } }
+    });
+    try {
+      await assertRuntimeTools(httpClient, httpTransport);
+    } finally {
+      await httpClient.close().catch(() => undefined);
+    }
+  } finally {
+    if (httpChild.exitCode === null) {
+      const closed = new Promise((resolve) => httpChild.once("close", (code, signal) => resolve({ code, signal })));
+      httpChild.kill("SIGTERM");
+      const result = await closed;
+      if (process.platform === "win32") assert.equal(result.code, 143, "the portable wrapper must preserve SIGTERM as its Windows exit status");
+      else assert.equal(result.signal, "SIGTERM", "the portable wrapper must preserve child termination signals");
+    }
+  }
 }
 
 async function commitFixture(label, failBuild = false) {
@@ -196,6 +300,8 @@ try {
   assert.equal(JSON.parse(await readFile(join(archivedPath, ".meta-instagram-mcp-install.json"), "utf8")).revision, first);
   assert.equal(await readFile(envPath, "utf8"), envBeforeUpdate);
   assert.deepEqual(JSON.parse(await readFile(tokenPath, "utf8")), { accessToken: "fixture-token-value", userId: "fixture-account" });
+
+  await verifyCompiledPortableWrapper();
   process.stdout.write("installer fixture: PASS (pin, external env/doctor redaction, config link containment, update preservation, failed-build safety, rollback, uninstall archive)\n");
 } finally {
   await rm(work, { recursive: true, force: true });

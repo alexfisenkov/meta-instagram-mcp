@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -73,12 +74,36 @@ async function startServer() {
     applyExternalConfig(configDirectory);
     const serverPath = join(packageRoot, "dist", "server.js");
     if (!existsSync(serverPath)) throw new Error("BUILD_MISSING");
-    await import(pathToFileURL(serverPath).href);
+    await runServerProcess(serverPath);
   } catch (error) {
     const code = error instanceof Error && /^[A-Z0-9_]+$/.test(error.message) ? error.message : "START_FAILED";
     process.stderr.write(`meta-instagram-mcp: ${code}\n`);
     process.exitCode = 1;
   }
+}
+
+async function runServerProcess(serverPath) {
+  const child = spawn(process.execPath, [serverPath], { cwd: packageRoot, env: process.env, stdio: "inherit" });
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  let receivedSignal;
+  const handlers = new Map(signals.map((signal) => [signal, () => {
+    receivedSignal = signal;
+    if (child.exitCode === null) child.kill(signal);
+  }]));
+  for (const [signal, handler] of handlers) process.on(signal, handler);
+  let spawnFailed = false;
+  child.once("error", () => {
+    spawnFailed = true;
+    process.stderr.write("meta-instagram-mcp: START_FAILED\n");
+  });
+  const result = await new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+  for (const [signal, handler] of handlers) process.off(signal, handler);
+  if (spawnFailed) process.exitCode = 1;
+  else if (receivedSignal && process.platform !== "win32") process.kill(process.pid, receivedSignal);
+  else if (receivedSignal) process.exitCode = ({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })[receivedSignal] ?? 1;
+  else if (result.signal && process.platform !== "win32") process.kill(process.pid, result.signal);
+  else if (result.signal) process.exitCode = ({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })[result.signal] ?? 1;
+  else process.exitCode = result.code ?? 1;
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
