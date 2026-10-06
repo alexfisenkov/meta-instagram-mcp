@@ -14,7 +14,7 @@ export interface CompanionSourceProviderOptions {
 
 /** Reads through the durable authenticated companion task queue; it never exposes writes. */
 export function createCompanionSourceProvider(options: CompanionSourceProviderOptions): SourceProvider {
-  const waitMs = options.waitMs ?? 4_000;
+  const waitMs = options.waitMs ?? (process.platform === "win32" ? 30_000 : 4_000);
   const pollMs = options.pollMs ?? 50;
   const now = options.now ?? Date.now;
   const browserCursors = new Map<string, { accountBinding: string; targetKey: string; pageBudget: number; expiresAt: number }>();

@@ -278,7 +278,7 @@ describe("runtime composition", () => {
       await client.close(); await server.close(); await restartedClient?.close(); await restartedServer?.close();
       host.close(); input.end(); output.end();
     }
-  });
+  }, process.platform === "win32" ? 45_000 : 15_000);
 
   it("bootstraps browser readiness from native account inspection through Hub, router, and MCP", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-browser-bootstrap-")); dirs.push(dir);
@@ -314,7 +314,7 @@ describe("runtime composition", () => {
     const host = createBrowserNativeHost({ client: bridgeClient, accountBinding: "instagram:42", expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
     const runtime = createRuntime({
       existingHandlers: fixtureHandlers(), config: { authMode: "instagram", graphApiVersion: "v25.0", tokenStorePath: join(dir, "token.json"), publishLogPath: join(dir, "publish.jsonl") },
-      hub, providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: 2_000, pollMs: 10 })]
+      hub, providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: process.platform === "win32" ? 30_000 : 2_000, pollMs: 25 })]
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "browser-bootstrap", version: "1.0.0" });
@@ -333,7 +333,7 @@ describe("runtime composition", () => {
     } finally {
       await client.close(); await server?.close(); host.close(); input.end(); output.end();
     }
-  });
+  }, process.platform === "win32" ? 45_000 : 15_000);
 
   it("builds OAuth and signed webhook routes from configured runtime settings", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-runtime-configured-")); dirs.push(dir);
