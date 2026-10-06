@@ -5,6 +5,9 @@ import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "no
 
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+function Write-Stage([string]$Name) {
+  [Console]::Error.WriteLine("MCP_PRIVATE_FS_STAGE|$Name")
+}
 trap {
   $category = [string]$_.CategoryInfo.Category
   $exceptionType = $_.Exception.GetType().Name
@@ -18,13 +21,16 @@ trap {
   [Console]::Error.WriteLine("MCP_PRIVATE_FS|$exceptionType|$category|$errorCode")
   exit 42
 }
+Write-Stage 'START'
 $path = $env:INSTAGRAM_MCP_PRIVATE_FS_PATH
 if ([string]::IsNullOrWhiteSpace($path)) { throw 'Private path is unavailable.' }
 $item = Get-Item -LiteralPath $path -Force
+Write-Stage 'ITEM'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $administrators = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $allowed = @($identity.Value, $system.Value, $administrators.Value)
+Write-Stage 'IDENTITY'
 
 if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
   if ($item.PSIsContainer) {
@@ -45,10 +51,13 @@ if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
     )
     [void]$acl.AddAccessRule($rule)
   }
+  Write-Stage 'SET_ACL'
   Set-Acl -LiteralPath $path -AclObject $acl
+  Write-Stage 'SET_DONE'
 }
 
 $actual = Get-Acl -LiteralPath $path
+Write-Stage 'GET_ACL'
 $rules = $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
 $allowedAllows = @{}
 foreach ($rule in $rules) {
@@ -61,6 +70,7 @@ foreach ($rule in $rules) {
 foreach ($sid in $allowed) {
   if (-not $allowedAllows.ContainsKey($sid)) { throw 'Private path is missing a required access rule.' }
 }
+Write-Stage 'COMPLETE'
 `;
 
 /** Windows mode bits do not represent owner/group/other privacy; use a protected NTFS DACL. */
@@ -178,12 +188,14 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
     const processError = error as NodeJS.ErrnoException & { stderr?: Buffer; status?: number; signal?: string };
     const stderr = processError.stderr?.toString("utf8") ?? "";
     const diagnostic = stderr.match(/MCP_PRIVATE_FS\|([A-Za-z]+)\|([A-Za-z]+)\|([A-Z_]+)/);
+    const stageMatches = [...stderr.matchAll(/MCP_PRIVATE_FS_STAGE\|([A-Z_]+)/g)];
+    const lastStage = stageMatches.at(-1)?.[1] ?? "NO_STAGE";
     const knownCodes = new Set(["EACCES", "ENOENT", "EPERM", "ETIMEDOUT", "UNKNOWN"]);
     const code = knownCodes.has(processError.code ?? "") ? processError.code : "OTHER";
     const status = Number.isInteger(processError.status) ? String(processError.status) : "NONE";
     const details = diagnostic
       ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}`
-      : `PROCESS_FAILURE/${code}/${status}`;
+      : `PROCESS_FAILURE/${code}/${status}/${lastStage}`;
     throw new Error(`Windows private filesystem ACL could not be verified (${details}).`);
   }
 }

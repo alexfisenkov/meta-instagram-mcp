@@ -25,6 +25,9 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
+      - name: Diagnose Windows private filesystem before the full suite
+        if: runner.os == 'Windows'
+        run: npx vitest run tests/private-fs.test.ts --testTimeout=15000
       - run: npm test
       - run: npm run build
       - run: npm run test:installer
