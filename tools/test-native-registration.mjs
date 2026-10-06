@@ -43,7 +43,8 @@ try {
   assert.equal(manifestText.includes(secretCanary), false);
   const launcherText = await readFile(paths.hostPath, "utf8");
   assert.match(launcherText, /INSTAGRAM_MCP_BRIDGE_CONFIG=/);
-  assert.match(launcherText, /dist\/companion\/browser-native-host\.js/);
+  assert.equal(paths.hostScript.endsWith(join("dist", "companion", "browser-native-host.js")), true);
+  assert.equal(launcherText.includes(paths.hostScript), true);
   assert.equal(launcherText.includes(secretCanary), false);
   if (process.platform !== "win32") {
     assert.equal((await (await import("node:fs/promises")).stat(paths.hostPath)).mode & 0o777, 0o700);
