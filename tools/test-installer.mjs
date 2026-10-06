@@ -82,6 +82,24 @@ async function waitForHealth(url, child) {
   throw new Error("PORTABLE_WRAPPER_LISTENER_TIMEOUT");
 }
 
+async function assertHealthListenerStops(url) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(250) });
+      await response.body?.cancel();
+      throw new Error("PORTABLE_WRAPPER_CHILD_REMAINS_LIVE");
+    } catch (error) {
+      if (error instanceof Error && error.message === "PORTABLE_WRAPPER_CHILD_REMAINS_LIVE") throw error;
+      const code = error && typeof error === "object" ? error.cause?.code : undefined;
+      if (code === "ECONNREFUSED" || code === "ECONNRESET") return;
+      if (!(error instanceof Error) || !["AbortError", "TimeoutError"].includes(error.name)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("PORTABLE_WRAPPER_CHILD_SHUTDOWN_TIMEOUT");
+}
+
 async function assertRuntimeTools(client, transport) {
   await client.connect(transport);
   const listed = await client.listTools();
@@ -152,6 +170,7 @@ async function verifyCompiledPortableWrapper() {
       }
       else assert.equal(result.signal, "SIGTERM", "the portable wrapper must preserve child termination signals");
     }
+    await assertHealthListenerStops(baseUrl);
   }
 }
 
