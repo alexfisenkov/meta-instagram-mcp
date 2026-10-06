@@ -84,4 +84,17 @@ describe("official API provider", () => {
     });
     expect(result).toMatchObject({ status: "ACK", receiptId: "sent-9" });
   });
+
+  it("reads a post-action Direct target only from the configured API account and exposes verified owner ids", async () => {
+    const { ctx, pageClient } = makeContext(["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"]);
+    pageClient.get.mockResolvedValue({ data: [{ id: "sent-9", from: { id: "page-4" }, message: "Exact reply", created_time: "2026-10-06T12:00:01.000Z" }] });
+    const provider = createApiProvider({ resolveContext: async () => ctx });
+
+    const evidence = await provider.readForAction({ operation: "conversation.read", target: { accountBinding: ctx.accountBinding, nativeId: "thread-2" }, limit: 20 });
+
+    expect(pageClient.get).toHaveBeenCalledWith("/thread-2/messages", expect.objectContaining({ limit: 20 }));
+    expect(evidence.ownerSenderIds).toEqual(["ig-17", "page-4"]);
+    expect(evidence.observation).toMatchObject({ source: "api", accountBinding: ctx.accountBinding, nativeRef: "conversation:thread-2",
+      data: { messages: [{ id: "sent-9", direction: "outbound", text: "Exact reply" }] } });
+  });
 });

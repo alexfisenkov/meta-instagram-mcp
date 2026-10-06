@@ -1,6 +1,6 @@
 # meta-instagram-mcp
 
-MCP для работы с собственным Instagram-аккаунтом через официальные Meta API и подключённые оператором companions. Возможности зависят от разрешений Meta, доступных источников и готовности конкретного companion. Browser и phone profiles — целевые режимы; их нельзя считать доступными до интеграции и проверок в опубликованной версии.
+MCP для работы с собственным Instagram-аккаунтом через официальные Meta API и подключённые оператором browser/phone companions. Общая runtime factory обслуживает stdio и Streamable HTTP, сохраняет legacy API tools и добавляет source-aware чтение, inbox triage/analysis и подтверждаемые actions. Доступность зависит от Meta permissions и runtime readiness каждого источника; подключение companion и live authorization проверяются отдельно.
 
 Секреты, token-store, OAuth state, browser session и сырые UI-evidence хранятся локально у оператора. MCP не содержит внутренней AI-модели: когда клиент подключён к MCP, анализ и черновики выполняет выбранный пользователем AI-клиент.
 
@@ -24,6 +24,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:installer
+npm run test:native-registration
 ```
 
 Локальный запуск и `npm run meta:callback` читают приватный внешний config; инструкции для первичной настройки — в [docs/install.md](docs/install.md).
@@ -52,6 +53,10 @@ npm run test:installer
 - `meta_publish_media` - публикует готовый контейнер. Требует `confirm: true` и `META_INSTAGRAM_WRITE=true`.
 
 Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
+
+Из приватного внешнего `.env` wrapper принимает только поддерживаемые `META_*` и `INSTAGRAM_MCP_*` имена; неизвестные ключи, включая `META_MCP_CONFIG_DIR`, завершают запуск с безопасным кодом ошибки. Значения читаются как текст без shell substitution. Переменные окружения процесса имеют приоритет над файлом. HTTP включается через `INSTAGRAM_MCP_TRANSPORT=http`; listener требует bearer secret и настраивается через `INSTAGRAM_MCP_HTTP_*`. API, browser и phone write gates независимы: `META_INSTAGRAM_WRITE`, `INSTAGRAM_MCP_BROWSER_WRITES` и `INSTAGRAM_MCP_PHONE_WRITES`. Подробнее — [runtime-параметры](docs/install.md#runtime-параметры-и-transports).
+
+Layered tools включают `meta_capabilities`, `meta_read_source`, `meta_triage_inbox`, `meta_read_inbox`, `meta_analyze_inbox`, `meta_begin_oauth`, `meta_prepare_action`, `meta_execute_action` и read-only `meta_reconcile_action` (27 MCP tools всего: 18 legacy и 9 layered/mutation). `meta_capabilities` сообщает runtime status; он не подтверждает Meta access, пользовательский Chrome login, физическую готовность телефона или production release. Смотрите [матрицу возможностей](docs/capabilities.md).
 
 ## Публикация
 

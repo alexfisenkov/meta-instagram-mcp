@@ -14,6 +14,7 @@ export interface BridgeClientConfig {
   capabilities: string[];
   bridgeId?: string;
   bridgeToken?: string;
+  trustedApprovalPublicKey?: string;
   allowLoopbackHttpForTests?: boolean;
 }
 export interface BridgeClientOptions extends BridgeClientConfig {
@@ -25,23 +26,34 @@ export interface BridgeClientOptions extends BridgeClientConfig {
 export class OutboundBridgeClient {
   private bridgeId?: string;
   private bridgeToken?: string;
+  private trustedApprovalPublicKey?: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly options: BridgeClientOptions) {
     validateConfig(options);
     this.bridgeId = options.bridgeId;
     this.bridgeToken = options.bridgeToken;
+    this.trustedApprovalPublicKey = options.trustedApprovalPublicKey;
     this.fetchImpl = createNoRedirectFetch(options.fetchImpl ?? fetch);
   }
 
-  async register(): Promise<{ bridgeId: string }> {
-    const result = await this.request<{ bridgeId: string; bridgeToken: string }>("/bridge/register", {
-      method: "POST", body: { mode: this.options.mode, source: this.options.source, accountBinding: this.options.accountBinding, capabilities: this.options.capabilities }
+  get approvalPublicKey(): string | undefined { return this.trustedApprovalPublicKey; }
+
+  async register(capabilities: readonly string[] = this.options.capabilities): Promise<{ bridgeId: string; approvalPublicKey?: string }> {
+    if (!Array.isArray(capabilities) || capabilities.length > 64 || capabilities.some((item) => !this.options.capabilities.includes(item))) {
+      throw new Error("registered runtime capabilities must be a subset of the configured allowlist");
+    }
+    const result = await this.request<{ bridgeId: string; bridgeToken: string; approvalPublicKey?: string }>("/bridge/register", {
+      method: "POST", body: { mode: this.options.mode, source: this.options.source, accountBinding: this.options.accountBinding, capabilities: [...new Set(capabilities)] }
     });
+    if (result.approvalPublicKey !== undefined && !validPublicKey(result.approvalPublicKey)) throw new Error("bridge returned an invalid approval public key");
+    if (this.trustedApprovalPublicKey && result.approvalPublicKey && this.trustedApprovalPublicKey !== result.approvalPublicKey) throw new Error("bridge approval key changed; explicit re-pinning is required");
+    this.trustedApprovalPublicKey ??= result.approvalPublicKey;
     this.bridgeId = result.bridgeId;
     this.bridgeToken = result.bridgeToken;
-    await saveBridgeCredentials(this.options.credentialsPath, { bridgeId: result.bridgeId, bridgeToken: result.bridgeToken });
-    return { bridgeId: result.bridgeId };
+    await saveBridgeCredentials(this.options.credentialsPath, { bridgeId: result.bridgeId, bridgeToken: result.bridgeToken,
+      ...(this.trustedApprovalPublicKey ? { trustedApprovalPublicKey: this.trustedApprovalPublicKey } : {}) });
+    return { bridgeId: result.bridgeId, ...(this.trustedApprovalPublicKey ? { approvalPublicKey: this.trustedApprovalPublicKey } : {}) };
   }
 
   async heartbeat(bridgeId = this.requiredBridgeId(), status: unknown = { online: true }): Promise<void> {
@@ -100,7 +112,7 @@ export async function loadBridgeClientConfig(path: string): Promise<BridgeClient
   return value;
 }
 
-export async function saveBridgeCredentials(path: string, credentials: { bridgeId: string; bridgeToken: string }): Promise<void> {
+export async function saveBridgeCredentials(path: string, credentials: { bridgeId: string; bridgeToken: string; trustedApprovalPublicKey?: string }): Promise<void> {
   assertExternalConfigPath(path);
   let config: BridgeClientConfig;
   try { config = JSON.parse(await readFile(path, "utf8")) as BridgeClientConfig; }
@@ -113,6 +125,8 @@ export async function saveBridgeCredentials(path: string, credentials: { bridgeI
   await rename(temp, path);
   await chmod(path, 0o600);
 }
+
+function validPublicKey(value: string): boolean { return value.length <= 4_096 && value.startsWith("-----BEGIN PUBLIC KEY-----") && value.includes("-----END PUBLIC KEY-----"); }
 
 function validateConfig(config: BridgeClientConfig): void {
   let url: URL;

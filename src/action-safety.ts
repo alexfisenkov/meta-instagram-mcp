@@ -6,17 +6,23 @@ import type {
   MutationIntent, MutationOptions, MutationPreview, MutationResult, MutationSource,
   TargetRef
 } from "./domain-types.js";
+import type { ActionReadbackEvidence, ActionReadbackRecord } from "./action-readback.js";
 
 export interface MutationExecutor {
   readonly source: MutationSource;
-  refreshContext(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string }>;
-  execute(intent: MutationIntent, requestId: string, contextHash: string): Promise<MutationResult>;
+  bindIntent?(intent: MutationIntent): Promise<MutationIntent>;
+  refreshContext(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string; sideEffects?: Array<"may_mark_seen"> }>;
+  execute(intent: MutationIntent, requestId: string, contextHash: string, attempt?: MutationAttemptProof): Promise<MutationResult>;
+  readback?(record: ActionReadbackRecord): Promise<ActionReadbackEvidence>;
 }
+
+export interface MutationAttemptProof { durableAttempt: true; requestId: string; fingerprint: string }
 
 export interface MutationSafetyOptions {
   executors: readonly MutationExecutor[];
   auditPath: string;
   writeEnabled?: boolean;
+  sourceWriteEnabled?: Partial<Record<MutationSource, boolean>>;
 }
 
 interface AuditRow {
@@ -43,7 +49,7 @@ const ACTIONS = new Set<MutationIntent["action"]>([
 export class MutationSafety {
   readonly #executors = new Map<MutationSource, MutationExecutor>();
   readonly #auditPath: string;
-  readonly #writeEnabled: boolean;
+  readonly #writeEnabled: Readonly<Record<MutationSource, boolean>>;
   readonly #previews = new Map<string, string>();
   #queue: Promise<void> = Promise.resolve();
 
@@ -54,7 +60,11 @@ export class MutationSafety {
       this.#executors.set(executor.source, executor);
     }
     this.#auditPath = resolve(options.auditPath);
-    this.#writeEnabled = options.writeEnabled === true;
+    this.#writeEnabled = {
+      api: options.sourceWriteEnabled?.api ?? options.writeEnabled === true,
+      browser: options.sourceWriteEnabled?.browser ?? options.writeEnabled === true,
+      phone: options.sourceWriteEnabled?.phone ?? options.writeEnabled === true
+    };
   }
 
   handle(intent: MutationIntent): Promise<MutationPreview>;
@@ -82,12 +92,13 @@ export class MutationSafety {
       while (this.#previews.size > 256) this.#previews.delete(this.#previews.keys().next().value as string);
       return {
         source: intent.source, accountBinding: intent.accountBinding, action: intent.action,
+        ...(intent.bridgeId ? { bridgeId: intent.bridgeId } : {}),
         target: intent.target, payload: intent.payload, contextHash: intent.contextHash,
         fingerprint, requestId, requiresConfirmation: true
       };
     }
 
-    if (!this.#writeEnabled) return failed("Write environment is disabled.");
+    if (!this.#writeEnabled[intent.source]) return failed("Write environment is disabled for this source.");
     const requestId = options.requestId;
     const previewFingerprint = requestId ? this.#previews.get(requestId) : undefined;
     if (options.confirm !== true || !requestId || !isRequestId(requestId) ||
@@ -128,7 +139,7 @@ export class MutationSafety {
 
     let outcome: MutationResult;
     try {
-      const result = await executor.execute(intent, requestId, intent.contextHash);
+      const result = await executor.execute(intent, requestId, intent.contextHash, { durableAttempt: true, requestId, fingerprint });
       outcome = isMutationResult(result) ? result : unknown("Executor returned an invalid result; no retry was made.");
     } catch (error) {
       outcome = isProvenRejection(error)

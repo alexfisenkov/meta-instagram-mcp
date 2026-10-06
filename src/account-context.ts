@@ -58,9 +58,13 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
       pageClient = page.client;
       pageTasks = page.tasks;
     }
-    const confirmedScopes = !useEnvironmentToken && Array.isArray(stored?.permissions)
+    let confirmedScopes = !useEnvironmentToken && Array.isArray(stored?.permissions)
       ? stored.permissions.filter((item): item is string => typeof item === "string")
       : undefined;
+    if (!confirmedScopes && authMode === "facebook") {
+      try { confirmedScopes = await readGrantedPermissions(userClient); }
+      catch { confirmedScopes = undefined; }
+    }
     return {
       authMode,
       accountBinding: `instagram:${instagramUserId}`,
@@ -74,3 +78,15 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
     };
   };
 }
+
+async function readGrantedPermissions(client: MetaClient): Promise<string[] | undefined> {
+  const response: unknown = await client.get("/me/permissions");
+  if (!isRecord(response) || !Array.isArray(response.data)) return undefined;
+  const rows = response.data;
+  if (!rows.length || rows.some((item) => !isRecord(item) || typeof item.permission !== "string" ||
+      !["granted", "declined", "expired"].includes(String(item.status)))) return undefined;
+  return rows.filter((item): item is Record<string, unknown> => isRecord(item) && item.status === "granted")
+    .map((item) => item.permission as string);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

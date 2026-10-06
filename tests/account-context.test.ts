@@ -35,4 +35,44 @@ describe("API account context", () => {
     expect(JSON.stringify(context)).not.toContain("page-secret");
     expect(userClient.forFacebookPage).toHaveBeenCalledWith("page-9");
   });
+
+  it("discovers actual Facebook permission grants when no verified OAuth grant was saved", async () => {
+    const userClient = {
+      get: vi.fn().mockResolvedValue({ data: [
+        { permission: "instagram_manage_messages", status: "granted" },
+        { permission: "instagram_manage_comments", status: "declined" }
+      ] }),
+      post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockResolvedValue({ client: {}, pageId: "page-9", instagramUserId: "ig-account-7", tasks: [] })
+    };
+    const resolve = createAccountContextResolver({
+      config,
+      tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => userClient as never
+    });
+
+    const context = await resolve();
+
+    expect(userClient.get).toHaveBeenCalledWith("/me/permissions");
+    expect(context.confirmedScopes).toEqual(["instagram_manage_messages"]);
+    expect(context.scopeStatus).toBe("confirmed");
+  });
+
+  it("keeps grant status unknown when Facebook permission discovery fails", async () => {
+    const userClient = {
+      get: vi.fn().mockRejectedValue(new Error("offline")),
+      post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockResolvedValue({ client: {}, pageId: "page-9", instagramUserId: "ig-account-7", tasks: [] })
+    };
+    const resolve = createAccountContextResolver({
+      config,
+      tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => userClient as never
+    });
+
+    const context = await resolve();
+
+    expect(context.confirmedScopes).toBeUndefined();
+    expect(context.scopeStatus).toBe("unknown");
+  });
 });

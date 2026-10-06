@@ -1,6 +1,6 @@
 # Карта проекта
 
-Обновлено: 2026-05-30.
+Обновлено: 2026-10-06.
 
 ## Как читать репозиторий
 
@@ -21,7 +21,7 @@
 | Путь | Назначение | Когда смотреть |
 |---|---|---|
 | `README.md` | Пользовательский обзор, быстрый старт, список tools, public/private boundaries. | Объяснить проект или онбордить оператора. |
-| `.env.example` | Безопасный шаблон локального config. | Добавить или изменить config keys без раскрытия секретов. |
+| `.env.example` | Публичный шаблон OAuth, transport, Hub, companion, webhook и Graph tuning keys. External wrapper принимает только явный whitelist. | Добавить или изменить config keys без раскрытия секретов. |
 | `.env` | Реальный локальный config с app id/secret и runtime settings. Игнорируется git. | Только для локальной auth/config диагностики; значения не печатать. |
 | `app secret.md.rtf` | Локальный secret file. Игнорируется git. | Не использовать без явной задачи на ротацию или восстановление config. Никогда не печатать. |
 | `.gitignore` | Не пускает secrets, local reports, screenshots, `node_modules` и `dist` в git. | Добавляются новые локальные артефакты. |
@@ -61,14 +61,17 @@
 | `src/callback-server.ts` | Local OAuth helper | Стартует localhost callback, обрабатывает Meta redirect, меняет `code`, сохраняет token. |
 | `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | правка сетевого слоя, отладка отказов DNS |
 | `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token. |
-| `src/tools.ts` | MCP use cases | Реализует handlers: auth status, login URL, exchange/refresh, account/media/comments/insights, page list, account resolver, raw GET. |
-| `src/server.ts` | MCP transport | Регистрирует MCP tools со schemas/annotations и запускает stdio transport. |
+| `src/tools.ts` | Legacy API use cases | Реализует auth, account/media/comments/insights, page list, resolver, raw GET и legacy publish handlers. |
+| `src/api-provider.ts`, `src/direct.ts`, `src/comments.ts` | API provider/domain | Per-operation Meta permission status, Direct conversations/messages and comment/reply operations. |
+| `src/source-router.ts`, `src/layered-tools.ts` | Layered reads and analysis | Bounded API → browser → phone routing, coverage/provenance, inbox triage/read and selected-observation host analysis. |
+| `src/runtime.ts`, `src/mcp-server.ts`, `src/server.ts` | Runtime composition and transports | Shared runtime factory for legacy + layered + mutation tools; stdio or Streamable HTTP selected by config. |
+| `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Presence in checkout does not prove registered/live devices. |
 | `src/cli/auth-url.ts` | CLI helper | Печатает текущий OAuth login URL из local config. |
 | `src/cli/callback.ts` | CLI helper | Запускает localhost OAuth callback server. |
 
 ## Tool surface
 
-MCP exposes 16 tools:
+Legacy API tools remain available alongside layered and mutation tools from the shared runtime factory. Exact names are listed from the running server/doctor because availability is separate from per-source readiness.
 
 | Tool | Назначение |
 |---|---|
@@ -88,6 +91,10 @@ MCP exposes 16 tools:
 | `meta_list_comments` | Читает comments для media object. |
 | `meta_get_comment_replies` | Читает replies для comment. |
 | `meta_raw_get` | Read-only Graph GET для relative paths. |
+| `meta_create_media_container`, `meta_publish_media` | Legacy two-step media publishing; publishing has a separate confirmation and environment gate. |
+| `meta_capabilities`, `meta_read_source`, `meta_triage_inbox`, `meta_read_inbox`, `meta_analyze_inbox` | Runtime capability status, bounded source reads, inbox review and selected-observation analysis. |
+| `meta_begin_oauth` | Prepares configured OAuth authorization using the runtime's state-bound flow. |
+| `meta_prepare_action`, `meta_execute_action` | Source-bound preview and confirmed one-shot action flow; UI actions additionally require Hub-signed grant. |
 
 ## Tests
 
@@ -99,14 +106,21 @@ MCP exposes 16 tools:
 | `tests/meta-client.test.ts` | Graph URL construction and token-safe error normalization. |
 | `tests/callback-server.test.ts` | Callback parsing and redacted callback HTML rendering. |
 | `tests/tools.test.ts` | Tool handlers, Facebook Login URL, account resolver, safe defaults, ranking. |
+| `tests/source-router.test.ts`, `tests/layered-tools.test.ts`, `tests/runtime-integration.test.ts` | Bounded source fallback, coverage/analysis contracts and shared runtime wiring. |
+| `tools/test-installer.mjs` | Portable install/update/rollback fixture and external config wrapper smoke. |
+| `tools/test-native-registration.mjs` | Native Messaging manifest, launcher and registry staging fixtures without changing the user's browser registration. |
 
-Текущее ограничение: Vitest и `tsc --noEmit` зависали в этой локальной среде. Не сообщать, что они проходят, пока они не будут запущены заново и не завершатся успешно.
+Состояние проверок зависит от текущего run. Перед отчетом запускайте существующие package scripts; scoped fixture PASS не доказывает полный suite/build, live Meta access или companion readiness.
 
 ## Scripts и generated files
 
 | Путь | Назначение |
 |---|---|
 | `scripts/build.mjs` | esbuild-based build for `src/**/*.ts` into `dist/`. |
+| `tools/run.mjs` | Portable MCP wrapper. Loads a private external `.env`, applies explicit variable allowlist and starts the shared runtime. |
+| `tools/test-installer.mjs` | Portable install/update/rollback fixture, wrapper config handoff and doctor redaction checks. |
+| `tools/register-native-host.mjs` | Per-user Chrome Native Messaging manifest/launcher registration with exact-origin and existing-owner conflict guards. |
+| `tools/test-native-registration.mjs` | Isolated macOS/Linux/Windows registration staging fixtures. |
 | `dist/` | Generated runtime output used by `meta-instagram-local`. Ignored by git. |
 | `node_modules/` | Installed npm dependencies. Ignored by git. |
 

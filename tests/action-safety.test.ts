@@ -50,15 +50,20 @@ describe("MutationSafety", () => {
 
   it("executes once after matching a fresh preview and journals no payload text", async () => {
     const { dir, intent, execute, safety } = await fixture({ writeEnabled: true });
+    let journalAtExecute = "";
+    vi.mocked(execute).mockImplementation(async () => {
+      journalAtExecute = await readFile(join(dir, "audit.jsonl"), "utf8");
+      return { status: "ACK", receiptId: "receipt-1" };
+    });
     const preview = await safety.handle(intent);
     const result = await safety.handle(intent, {
       dryRun: false, confirm: true, expectedFingerprint: preview.fingerprint, requestId: preview.requestId
     });
-    const { readFile } = await import("node:fs/promises");
     const journal = await readFile(join(dir, "audit.jsonl"), "utf8");
     expect(result).toMatchObject({ status: "ACK" });
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(execute).toHaveBeenCalledWith(intent, preview.requestId, "ctx-current");
+    expect(execute).toHaveBeenCalledWith(intent, preview.requestId, "ctx-current", { durableAttempt: true, requestId: preview.requestId, fingerprint: preview.fingerprint });
+    expect(journalAtExecute).toContain('"status":"ATTEMPT"');
     expect(journal).toContain('"status":"ATTEMPT"');
     expect(journal).toContain('"status":"ACK"');
     expect(journal).not.toContain("Привет");

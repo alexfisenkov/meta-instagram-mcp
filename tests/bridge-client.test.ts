@@ -1,5 +1,8 @@
 import { createServer } from "node:http";
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { OutboundBridgeClient } from "../src/bridge-client.js";
 
 const base = {
@@ -15,6 +18,9 @@ const base = {
 };
 
 describe("OutboundBridgeClient", () => {
+  const roots: string[] = [];
+  afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+
   it("requires HTTPS except explicit loopback test mode", () => {
     expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://hub.example.test" })).toThrow(/HTTPS/);
     expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://127.0.0.1", allowLoopbackHttpForTests: true })).not.toThrow();
@@ -31,6 +37,29 @@ describe("OutboundBridgeClient", () => {
     expect(new Headers(init.headers).get("x-bridge-source")).toBe("phone");
     expect(new Headers(init.headers).get("authorization")).toBe(`Bearer ${base.bearerToken}`);
     expect(init.redirect).toBe("error");
+  });
+
+  it("registers only live capability subsets and pins the approval key returned over HTTPS", async () => {
+    const root = await mkdtemp(join(tmpdir(), "instagram-bridge-client-"));
+    roots.push(root);
+    const configPath = join(root, "config.json");
+    await writeFile(configPath, JSON.stringify({ ...base, credentialsPath: undefined }), { mode: 0o600 });
+    const publicKey = "-----BEGIN PUBLIC KEY-----\nfixture-key\n-----END PUBLIC KEY-----";
+    let registration: Record<string, unknown> | undefined;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      registration = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ bridgeId: "bridge-1", bridgeToken: "c".repeat(40), approvalPublicKey: publicKey }), { status: 201 });
+    });
+    const client = new OutboundBridgeClient({ ...base, credentialsPath: configPath, fetchImpl });
+
+    await client.register(["inbox.list"]);
+
+    expect(registration?.capabilities).toEqual(["inbox.list"]);
+    expect(client.approvalPublicKey).toBe(publicKey);
+    expect(JSON.parse(await readFile(configPath, "utf8"))).toMatchObject({
+      bridgeId: "bridge-1", trustedApprovalPublicKey: publicKey
+    });
+    await expect(client.register(["shell.exec"])).rejects.toThrow(/subset/);
   });
 
   it("refuses a cross-origin 307 before the redirect destination receives bridge credentials", async () => {

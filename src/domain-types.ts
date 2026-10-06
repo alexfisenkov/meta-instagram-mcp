@@ -22,6 +22,7 @@ export interface Observation<T> {
   historyCompleteness: HistoryCompleteness;
   limits?: { maxMessagesPerConversation?: 20; requestsInactiveDays?: 30 };
   sideEffects?: Array<"may_mark_seen">;
+  pagination?: { olderCursor?: string; hasOlder?: boolean; pageBudget?: number };
   data?: T;
   errors: Array<{ code?: string; message: string }>;
 }
@@ -56,6 +57,7 @@ export interface MutationOptions {
 
 export interface MutationPreview {
   source: MutationSource;
+  bridgeId?: string;
   accountBinding: string;
   action: MutationAction;
   target: TargetRef;
@@ -64,10 +66,11 @@ export interface MutationPreview {
   fingerprint: string;
   requestId: string;
   requiresConfirmation: true;
+  sideEffects?: Array<"may_mark_seen">;
 }
 
 export type MutationResult =
   | { status: "ACK"; receiptId?: string }
-  | { status: "OBSERVED"; receiptId?: string }
-  | { status: "OUTCOME_UNKNOWN"; reason: string }
+  | { status: "OBSERVED"; receiptId?: string; responseState?: "answered" | "unknown"; dispatchStatus?: "ACK" | "OUTCOME_UNKNOWN" }
+  | { status: "OUTCOME_UNKNOWN"; reason: string; responseState?: "unknown"; dispatchStatus?: "ACK" | "OUTCOME_UNKNOWN" }
   | { status: "FAILED"; reason: string };

@@ -4,7 +4,7 @@
 
 ## Локальная проверка
 
-Требуется Node.js 20+:
+Минимальная поддерживаемая версия — Node.js 22; рекомендуется Node.js 24 LTS:
 
 ```bash
 npm ci --no-audit --no-fund
@@ -12,11 +12,14 @@ npm run typecheck
 npm test
 npm run build
 npm run test:installer
+npm run test:native-registration
 ```
 
-`npm run test:installer` проверяет pinned source SHA, безопасный перенос внешнего env в fixture, redacted doctor handshake/listTools, сохранение configuration/token-store при update, отсутствие переключения после failed build, rollback и archive-only uninstall. Fixture использует синтетические маркеры, не подключается к Meta и не проверяет owner account.
+`npm run test:installer` проверяет pinned source SHA, безопасный перенос внешнего env в fixture, private-config wrapper path для HTTP/Hub/write gates, literal dotenv parsing и отказ для `META_MCP_CONFIG_DIR`, redacted doctor handshake/listTools, сохранение configuration/token-store при update, отсутствие переключения после failed build, rollback и archive-only uninstall. Fixture использует синтетические маркеры, не подключается к Meta и не проверяет owner account.
 
-CI запускает эти проверки на Node.js 20 для Linux, macOS и Windows. Отдельный Windows job обязательно собирает `native-host/windows/InstagramNativeHost.csproj` и сохраняет `InstagramNativeHost.exe` вместе с publish output как artifact; отсутствие проекта или exe завершает job ошибкой.
+`npm run test:native-registration` stages exact-origin manifests and launchers in temporary directories; Windows registry access is replaced with a fake adapter. It does not modify the current user's Chrome registration.
+
+CI запускает эти проверки на Node.js 22 и 24 для Linux, macOS и Windows, включая изолированные Native Messaging registration fixtures. Отдельный Windows job собирает `native-host/windows/InstagramNativeHost.csproj` и сохраняет `InstagramNativeHost.exe` вместе с publish output как 14-дневный artifact; это не GitHub Release asset.
 
 ## Требования к PR
 

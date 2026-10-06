@@ -2,7 +2,7 @@
 
 ## Установщик
 
-- `Node.js 20 or newer is required`: установите поддерживаемый Node.js у себя как обычный пользователь и повторите проверку `node --version`; установщик Node не скачивает и не запускает с повышенными правами.
+- Установите поддерживаемый Node.js 22+ (рекомендуется Node.js 24 LTS). Установщик проекта не скачивает и не запускает Node.js с повышенными правами.
 - `Source HEAD does not match --revision`: переключите отдельный source checkout на тот же полный commit SHA, который передан установщику.
 - `Source checkout has local changes`: сохраните свою работу в другом checkout и запускайте installer из чистого release commit.
 - `Installer path guard`: выберите непересекающиеся target и config пути. Установщик проверяет существующие ссылки и существующие части ещё не созданного пути; если ссылку нельзя безопасно разрешить, он остановится до создания staging/backup или изменения config.
@@ -12,7 +12,7 @@
 
 ## Config и token-store
 
-- Если doctor пишет `configReadable: false`, проверьте syntax только `KEY=value`, отсутствие не-META переменных и права файла `.env`. На macOS/Linux примените `chmod 600 <config-dir>/.env`.
+- Если doctor пишет `configReadable: false`, проверьте `KEY=value`, что каждое имя есть в поддерживаемом списке из [.env.example](../.env.example), нет `META_MCP_CONFIG_DIR` и повторов ключей, а права файла допустимы. Значения не интерпретируются как shell-код. На macOS/Linux примените `chmod 600 <config-dir>/.env`.
 - Если `hasAppId`, `hasAppSecret` или `accessTokenPresent` ложны, заполните приватную внешнюю `.env` либо задайте соответствующую переменную окружения для процесса клиента. Doctor не покажет значение.
 - Старый token-store не удаляется при update/uninstall. При нестандартном `META_TOKEN_STORE_PATH` проверьте путь локально; doctor покажет только true/false.
 - Не вставляйте в issue/log полный callback URL, OAuth `code`, token, cookies, `username`, account/Page ID или сырые server/client output.
@@ -32,7 +32,7 @@
 
 ## Browser и телефон
 
-- `browser: not_connected`/`offline`: проверьте extension и Native Host installation, совпадение 32-character host ID, Chrome profile выбранного узла и его сеть. First login выполняется владельцем в browser profile узла; не копируйте cookies с другой машины.
+- `browser: not_connected`/`offline`: проверьте extension и Native Host registration, точный 32-character extension ID в `allowed_origins`, стабильный host path, Chrome profile выбранного узла и его сеть. First login выполняется владельцем в browser profile узла; не копируйте cookies с другой машины.
 - Если server не имеет desktop session или разрешённого owner login, оставьте browser gated. Документированный profile не создаёт display server и не подтверждает Instagram UI.
 - `phone: offline`/`needs_selection`: телефонный bridge и выбранное устройство — отдельная readiness condition. iOS требует Mac с Xcode/WDA/Appium; Android нужен отдельно настроенный UiAutomator2.
 - Локальный fake UI тест не доказывает live app compatibility. Не называйте UI capability `ready`, пока не выполнены соответствующие live checks.

@@ -4,12 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompanionHub } from "../src/companion-hub.js";
+import { createUiApprovalAuthority } from "../src/ui-approval.js";
+import { createHash } from "node:crypto";
 
 const roots: string[] = [];
+const authorities = new WeakMap<CompanionHub, Awaited<ReturnType<typeof createUiApprovalAuthority>>>();
 async function makeHub() {
   const root = await mkdtemp(join(tmpdir(), "instagram-hub-"));
   roots.push(root);
-  return new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: 1_000 });
+  const authority = await createUiApprovalAuthority({ privateKeyPath: join(root, "approval.json"), projectRoot: process.cwd() });
+  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: 1_000, approvalPublicKey: authority.publicKey });
+  authorities.set(hub, authority);
+  return hub;
+}
+
+function enqueueWrite(hub: CompanionHub, input: Omit<Parameters<CompanionHub["enqueueApprovedWrite"]>[0], "kind" | "requestId" | "fingerprint">) {
+  const authority = authorities.get(hub)!;
+  return hub.enqueueApprovedWrite({ ...input, kind: "write", requestId: "req-0123456789abcdef", fingerprint: createHash("sha256").update(JSON.stringify(input.payload)).digest("hex") }, (task) => authority.sign(task));
 }
 
 const registration = {
@@ -33,10 +44,24 @@ describe("CompanionHub", () => {
     expect(await hub.result(task.id)).toMatchObject({ status: "complete", result: { items: [] } });
   });
 
+  it("publishes the verifier key and requires an account-bound Instagram surface before reporting readiness", async () => {
+    const hub = await makeHub();
+    const phoneRegistration = { mode: "phone_standalone" as const, source: "phone" as const, accountBinding: "acct:one", capabilities: ["inbox.list", "comment.like"] };
+    const { bridgeId, bridgeToken, approvalPublicKey } = await hub.register(phoneRegistration);
+    expect(approvalPublicKey).toContain("BEGIN PUBLIC KEY");
+    expect(await hub.sourceStatus("phone", "acct:one")).toMatchObject({ availability: "offline", capabilities: [] });
+    await hub.heartbeat({ bridgeId, bridgeToken, source: "phone", status: { availability: "ready", capabilities: ["inbox.list"] } });
+    expect(await hub.sourceStatus("phone", "acct:one")).toMatchObject({ availability: "offline", capabilities: [] });
+    await hub.heartbeat({ bridgeId, bridgeToken, source: "phone", status: { availability: "ready", accountBinding: "acct:one", accountHandle: "fixture", surface: "instagram", capabilities: ["inbox.list", "comment.like", "shell.exec"] } });
+    expect(await hub.sourceStatus("phone", "acct:one")).toMatchObject({
+      availability: "ready", capabilities: ["inbox.list", "comment.like"], accountBinding: "acct:one"
+    });
+  });
+
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     const hub = await makeHub();
     const { bridgeId, bridgeToken } = await hub.register(registration);
-    const task = await hub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "approved" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    const task = await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "approved" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     expect(await hub.poll(bridgeId, 1, bridgeToken)).toHaveLength(1);
     expect(await hub.poll(bridgeId, 1, bridgeToken)).toHaveLength(0);
     await expect(hub.submit(bridgeId, task.id, { status: "ACK" }, "fedcba9876543210", bridgeToken)).rejects.toThrow();
@@ -47,10 +72,17 @@ describe("CompanionHub", () => {
     await expect(hub.submit(bridgeId, expired.id, { items: [] }, undefined, bridgeToken)).rejects.toThrow();
   });
 
+  it("rejects a public unapproved write enqueue", async () => {
+    const hub = await makeHub();
+    await hub.register(registration);
+    await expect(hub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "arbitrary" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef", requestId: "req-0123456789abcdef", fingerprint: "a".repeat(64) }))
+      .rejects.toThrow(/internal signed-approval/);
+  });
+
   it("allows only one poller across two hub instances to lease a mutation", async () => {
     const firstHub = await makeHub();
     const { bridgeId, bridgeToken } = await firstHub.register(registration);
-    const task = await firstHub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "one shot" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    const task = await enqueueWrite(firstHub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "one shot" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     const secondHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 1_000 });
     const [first, second] = await Promise.all([
       firstHub.poll(bridgeId, 1, bridgeToken),
@@ -62,27 +94,40 @@ describe("CompanionHub", () => {
   it("allows only one child process to poll a dispatched mutation", async () => {
     const hub = await makeHub();
     const { bridgeId, bridgeToken } = await hub.register(registration);
-    const task = await hub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "cross process" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    const task = await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "cross process" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     const root = roots.at(-1)!;
-    const gatePath = join(root, "start-gate");
-    const script = `import { existsSync } from 'node:fs'; import { CompanionHub } from './src/companion-hub.ts'; while (!existsSync(process.env.HUB_GATE)) await new Promise(r => setTimeout(r, 5)); const hub = new CompanionHub({ storagePath: process.env.HUB_STATE, lockTimeoutMs: 3000 }); const tasks = await hub.poll(process.env.HUB_BRIDGE_ID, 1, process.env.HUB_BRIDGE_TOKEN); process.stdout.write(JSON.stringify(tasks.map(task => task.id)));`;
-    const childPoll = () => new Promise<string>((resolve, reject) => {
+    const script = `import { CompanionHub } from './src/companion-hub.ts'; const hub = new CompanionHub({ storagePath: process.env.HUB_STATE, lockTimeoutMs: 3000 }); process.stdout.write('READY\\n'); await new Promise(resolve => process.stdin.once('data', resolve)); const tasks = await hub.poll(process.env.HUB_BRIDGE_ID, 1, process.env.HUB_BRIDGE_TOKEN); process.stdout.write(JSON.stringify(tasks.map(task => task.id)));`;
+    const childPoll = () => {
       const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
         cwd: process.cwd(),
-        env: { ...process.env, HUB_STATE: join(root, "hub.json"), HUB_GATE: gatePath, HUB_BRIDGE_ID: bridgeId, HUB_BRIDGE_TOKEN: bridgeToken },
-        stdio: ["ignore", "pipe", "pipe"]
+        env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, HOME: root, TMPDIR: root, TEMP: root, TMP: root, HUB_STATE: join(root, "hub.json"), HUB_BRIDGE_ID: bridgeId, HUB_BRIDGE_TOKEN: bridgeToken },
+        stdio: ["pipe", "pipe", "pipe"]
       });
-      let stdout = ""; let stderr = "";
-      child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+      let stdout = ""; let stderr = ""; let readyResolve!: () => void; let readyReject!: (error: Error) => void;
+      const ready = new Promise<void>((resolveReady, rejectReady) => { readyResolve = resolveReady; readyReject = rejectReady; });
+      let resultResolve!: (value: string) => void; let resultReject!: (error: Error) => void;
+      const result = new Promise<string>((resolveResult, rejectResult) => { resultResolve = resolveResult; resultReject = rejectResult; });
+      child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; if (stdout.includes("READY\n")) readyResolve(); });
       child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-      child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolve(stdout) : reject(new Error(`poll child exited ${code}: ${stderr}`)));
-    });
-    const first = childPoll();
-    const second = childPoll();
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    await writeFile(gatePath, "go", { mode: 0o600 });
-    const results = await Promise.all([first, second]);
+      child.once("error", (error) => { readyReject(error); resultReject(error); });
+      child.once("exit", (code) => {
+        if (code !== 0) { const error = new Error(`poll child exited ${code}: ${stderr}`); readyReject(error); resultReject(error); }
+        else resultResolve(stdout.replace("READY\n", ""));
+      });
+      const timeout = setTimeout(() => { const error = new Error("poll child did not reach the startup barrier"); child.kill(); readyReject(error); resultReject(error); }, 10_000);
+      void ready.then(() => clearTimeout(timeout), () => clearTimeout(timeout));
+      return { result, ready, releaseGate: () => child.stdin.end("go"), kill: () => child.kill() };
+    };
+    const children = [childPoll(), childPoll()];
+    try {
+      await Promise.all(children.map((child) => child.ready));
+      children.forEach((child) => child.releaseGate());
+    } catch (error) {
+      children.forEach((child) => { child.releaseGate(); child.kill(); });
+      await Promise.allSettled(children.map((child) => child.result));
+      throw error;
+    }
+    const results = await Promise.all(children.map((child) => child.result));
     const delivered = results.flatMap((value) => JSON.parse(value) as string[]);
     expect(delivered.filter((id) => id === task.id)).toHaveLength(1);
   });
@@ -91,7 +136,7 @@ describe("CompanionHub", () => {
     const firstHub = await makeHub();
     const firstBridge = await firstHub.register(registration);
     const secondBridge = await firstHub.register(registration);
-    const task = await firstHub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "bound" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    const task = await enqueueWrite(firstHub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "bound" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     expect(await firstHub.poll(firstBridge.bridgeId, 1, firstBridge.bridgeToken)).toHaveLength(1);
     const restartedHub = new CompanionHub({ storagePath: join(roots.at(-1)!, "hub.json"), leaseMs: 1_000 });
     expect(await restartedHub.poll(firstBridge.bridgeId, 1, firstBridge.bridgeToken)).toHaveLength(0);
@@ -132,7 +177,7 @@ describe("CompanionHub", () => {
   it("persists private state with restrictive permissions and excludes payload text from audit", async () => {
     const hub = await makeHub();
     const { bridgeId, bridgeToken } = await hub.register(registration);
-    await hub.enqueue({ kind: "write", source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "private body" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "private body" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
     await hub.heartbeat({ bridgeId, bridgeToken, status: { online: true } });
     const path = join(roots.at(-1)!, "hub.json");
     expect((await stat(path)).mode & 0o777).toBe(0o600);

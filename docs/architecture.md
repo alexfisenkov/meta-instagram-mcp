@@ -2,21 +2,11 @@
 
 ## Source Of Truth
 
-Канон проекта: официальный Meta OAuth, Instagram Graph API и MCP TypeScript SDK. Скрейпинг, парольный логин и обход браузерного UI не входят в архитектуру.
+Канон проекта: официальный Meta OAuth и Instagram Graph API — основной программный источник. Для явно подключённого и авторизованного Chrome companion разрешены ограниченное semantic DOM-чтение Instagram UI и bounded scrolling через фиксированные операции; это отдельный источник API → browser → phone. Архитектура не использует парольный вход, перенос cookies/session, произвольные selectors, raw click/tap или arbitrary page script.
 
-## Цель MVP
+## Runtime
 
-Сделать персональный локальный MCP-сервер для доступа к официальному Instagram API. Чтение свободно, запись - только публикация и только за предохранителями (см. docs/security-notes.md):
-
-- собрать account info;
-- получить media list;
-- получить user insights;
-- получить post/media insights;
-- получить комментарии и ответы для анализа реакции аудитории;
-- быстро ранжировать последние media по вовлечению;
-- дать raw read-only GET для разрешенных Meta endpoints;
-- опубликовать пост или Reels по публичной ссылке на медиа: контейнер отдельным инструментом, публикация отдельным, с `META_INSTAGRAM_WRITE=true` и `confirm: true`;
-- не хранить секреты в коде и не выводить токены в ответы MCP.
+Одна factory сохраняет 18 legacy API tools и добавляет per-source reads, inbox triage/analysis и guarded action flow. Источники читаются API → browser → phone с ограниченным бюджетом и явным coverage/provenance. API auth/permission status, companion readiness и live account checks остаются отдельными доказательствами. Legacy media publish живёт отдельно от Direct/comments/phone/browser actions.
 
 ## OAuth modes
 
@@ -37,15 +27,18 @@
   если системный DNS не отвечает (SNI и проверка сертификата сохраняются).
 - `src/meta-client.ts` выполняет GET-запросы к выбранному Graph API base URL, ограничивает
   недоверенные path и query и нормализует ошибки Meta, вычищая из них access token.
-- `src/tools.ts` содержит обработчики MCP tools без transport-логики.
-- `src/server.ts` регистрирует MCP tools и запускает stdio transport.
+- `src/tools.ts` содержит legacy API handlers без transport-логики; `src/api-provider.ts` подключает API Direct/comments/insights.
+- `src/source-router.ts` маршрутизирует bounded reads API → browser → phone с per-source coverage/provenance; `src/layered-tools.ts` добавляет triage и host analysis.
+- `src/runtime.ts` собирает legacy, layered and guarded mutation handlers один раз для stdio и Streamable HTTP; `src/server.ts` выбирает transport по `INSTAGRAM_MCP_TRANSPORT`.
+- `src/companion-hub.ts` хранит durable browser/phone tasks и подписанный approval key; `src/companion/` содержит browser Native Host и phone companion adapters.
 - `src/cli/auth-url.ts` печатает login URL для ручной авторизации.
 
 ## Безопасность
 
-- Скрейпинг, парольный логин и обход UI Instagram не используются.
+- API использует официальный Graph API; browser companion извлекает только поля фиксированных semantic operations из текущей авторизованной страницы и сообщает coverage/side effects. Это не гарантирует полноту UI, стабильность Instagram DOM или доступность непредоставленных Meta permissions.
+- Парольный вход, перенос cookies/session, caller-supplied selectors, raw click/tap и произвольный page script запрещены.
 - Токены не печатаются в MCP-ответах.
-- Write-инструментов нет в MVP, даже если OAuth scope preset может запросить будущие publish/messages permissions.
+- Mutation tools используют source-specific gates, точный target/context, однократный audit attempt и per-request confirmation. UI writes дополнительно требуют свежий Hub-signed grant. Это кодовый guard, не доказательство live access или отправки.
 - `meta_raw_get` не превращает сервер в произвольный HTTP-клиент: абсолютный URL принимается
   только для хостов `graph.facebook.com` и `graph.instagram.com`, любой другой отклоняется;
   зарезервированные query-параметры (`method`, `_method`, `access_token`) отклоняются независимо

@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const work = await mkdtemp(join(tmpdir(), "meta-instagram-installer-"));
 const source = join(work, "source");
 const target = join(work, "user data", "meta-instagram-mcp", "app");
 const config = join(work, "user config", "meta-instagram-mcp");
+const expectedHubPath = join(work, "private runtime", "hub-state.json");
 const installShell = join(projectRoot, "install.sh");
 const installPowerShell = join(projectRoot, "install.ps1");
 const uninstallShell = join(projectRoot, "uninstall.sh");
@@ -61,7 +64,7 @@ async function makeFixture() {
   await writeFile(join(source, "package.json"), JSON.stringify({ name: "installer-fixture", version: "0.0.1", type: "module", scripts: { build: "node tools/build.mjs" } }, null, 2) + "\n");
   await writeFile(join(source, "tools", "run.mjs"), await readFile(join(projectRoot, "tools", "run.mjs")));
   await writeFile(join(source, "tools", "guard-install-paths.mjs"), await readFile(join(projectRoot, "tools", "guard-install-paths.mjs")));
-  await writeFile(join(source, "fixture-server.mjs"), `import readline from "node:readline";\nconst rl=readline.createInterface({input:process.stdin,crlfDelay:Infinity});\nfor await (const line of rl) { let m; try { m=JSON.parse(line); } catch { continue; } if (m.id === undefined) continue; let result; if (m.method === "initialize") result={protocolVersion:m.params?.protocolVersion ?? "2025-06-18",capabilities:{tools:{}},serverInfo:{name:"fixture",version:"1"}}; else if (m.method === "tools/list") result={tools:[{name:"meta_auth_status",description:"fixture",inputSchema:{type:"object",properties:{}},annotations:{readOnlyHint:true}},{name:"meta_source_status",description:"fixture",inputSchema:{type:"object",properties:{}},annotations:{readOnlyHint:true}}]}; else if (m.method === "tools/call" && m.params?.name === "meta_auth_status") result={content:[{type:"text",text:JSON.stringify({config:{hasAppId:Boolean(process.env.META_INSTAGRAM_APP_ID),hasAppSecret:Boolean(process.env.META_INSTAGRAM_APP_SECRET),tokenStorePath:process.env.META_TOKEN_STORE_PATH,userId:"FIXTURE_PRIVATE_ID"},envToken:process.env.META_INSTAGRAM_ACCESS_TOKEN,storedToken:{accessToken:"FIXTURE_PRIVATE_TOKEN",username:"FIXTURE_PRIVATE_USER"}})}]}; else if (m.method === "tools/call" && m.params?.name === "meta_source_status") result={content:[{type:"text",text:JSON.stringify({sources:[{source:"api",availability:"ready"},{source:"browser",availability:"not_connected"},{source:"phone",availability:"offline"}],private:"FIXTURE_PRIVATE_DATA"})}]}; else result={}; process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result})+String.fromCharCode(10)); }\n`);
+  await writeFile(join(source, "fixture-server.mjs"), `import readline from "node:readline";\nconst expectedHubPath=${JSON.stringify(expectedHubPath)};\nconst rl=readline.createInterface({input:process.stdin,crlfDelay:Infinity});\nfor await (const line of rl) { let m; try { m=JSON.parse(line); } catch { continue; } if (m.id === undefined) continue; let result; if (m.method === "initialize") result={protocolVersion:m.params?.protocolVersion ?? "2025-06-18",capabilities:{tools:{}},serverInfo:{name:"fixture",version:"1"}}; else if (m.method === "tools/list") result={tools:[{name:"meta_auth_status",description:"fixture",inputSchema:{type:"object",properties:{}},annotations:{readOnlyHint:true}},{name:"meta_source_status",description:"fixture",inputSchema:{type:"object",properties:{}},annotations:{readOnlyHint:true}},{name:"meta_runtime_probe",description:"fixture",inputSchema:{type:"object",properties:{}},annotations:{readOnlyHint:true}}]}; else if (m.method === "tools/call" && m.params?.name === "meta_auth_status") result={content:[{type:"text",text:JSON.stringify({config:{hasAppId:Boolean(process.env.META_INSTAGRAM_APP_ID),hasAppSecret:Boolean(process.env.META_INSTAGRAM_APP_SECRET),tokenStorePath:process.env.META_TOKEN_STORE_PATH,userId:"FIXTURE_PRIVATE_ID"},envToken:process.env.META_INSTAGRAM_ACCESS_TOKEN,storedToken:{accessToken:"FIXTURE_PRIVATE_TOKEN",username:"FIXTURE_PRIVATE_USER"}})}]}; else if (m.method === "tools/call" && m.params?.name === "meta_source_status") result={content:[{type:"text",text:JSON.stringify({sources:[{source:"api",availability:"ready"},{source:"browser",availability:"not_connected"},{source:"phone",availability:"offline"}],private:"FIXTURE_PRIVATE_DATA"})}]}; else if (m.method === "tools/call" && m.params?.name === "meta_runtime_probe") result={content:[{type:"text",text:JSON.stringify({transport:process.env.INSTAGRAM_MCP_TRANSPORT,hubStatePathMatches:process.env.INSTAGRAM_MCP_HUB_STATE_PATH===expectedHubPath,browserWritesEnabled:process.env.INSTAGRAM_MCP_BROWSER_WRITES==="true",phoneWritesEnabled:process.env.INSTAGRAM_MCP_PHONE_WRITES==="true",apiWritesEnabled:process.env.META_INSTAGRAM_WRITE==="true",literalValueUnexpanded:process.env.META_GRAPH_FALLBACK_IPS==='$(printf fixture-literal)',sourceStatuses:{api:"ready",browser:"not_connected",phone:"offline"}})}]}; else result={}; process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result})+String.fromCharCode(10)); }\n`);
   await writeFile(join(source, "tools", "build.mjs"), "");
   execFileSync("git", ["init", "-b", "main", source], { stdio: "ignore" });
   git(["config", "user.name", "Installer fixture"]);
@@ -83,9 +86,44 @@ try {
   assert.equal(initialState.revision, first);
   const envPath = join(config, ".env");
   const tokenPath = join(config, "token.json");
-  const envBeforeUpdate = await readFile(envPath, "utf8");
+  let envBeforeUpdate = await readFile(envPath, "utf8");
   assert.equal(envBeforeUpdate.includes("fixture-app-secret"), true, "ignored local config should migrate to private config storage");
   execFileSync(process.execPath, ["--check", join(target, "dist", "server.js")], { stdio: "pipe" });
+  const runtimeEnv = [
+    "INSTAGRAM_MCP_TRANSPORT=http",
+    `INSTAGRAM_MCP_HUB_STATE_PATH=\"${expectedHubPath}\"`,
+    "INSTAGRAM_MCP_BROWSER_WRITES=true",
+    "INSTAGRAM_MCP_PHONE_WRITES=true",
+    "META_INSTAGRAM_WRITE=true",
+    'META_GRAPH_FALLBACK_IPS="$(printf fixture-literal)"'
+  ].join("\n") + "\n";
+  await writeFile(envPath, `${envBeforeUpdate}${runtimeEnv}`);
+  if (process.platform !== "win32") await chmod(envPath, 0o600);
+  envBeforeUpdate = await readFile(envPath, "utf8");
+  const { loadExternalConfig } = await import(pathToFileURL(join(target, "tools", "run.mjs")).href);
+  assert.equal(loadExternalConfig(config).values.META_GRAPH_FALLBACK_IPS, "$(printf fixture-literal)", "dotenv content must remain literal text");
+  await writeFile(envPath, "META_MCP_CONFIG_DIR=/tmp/should-not-be-overridden\n");
+  if (process.platform !== "win32") await chmod(envPath, 0o600);
+  assert.throws(() => loadExternalConfig(config), /CONFIG_NAME_UNSUPPORTED_1/, "external config must reject META_MCP_CONFIG_DIR");
+  await writeFile(envPath, envBeforeUpdate);
+  if (process.platform !== "win32") await chmod(envPath, 0o600);
+  const runtimeClient = new Client({ name: "installer-runtime-fixture", version: "1" });
+  const runtimeTransport = new StdioClientTransport({ command: process.execPath, args: [join(target, "tools", "run.mjs")], cwd: target,
+    env: { META_MCP_CONFIG_DIR: config } });
+  try {
+    await runtimeClient.connect(runtimeTransport);
+    const probe = await runtimeClient.callTool({ name: "meta_runtime_probe", arguments: {} });
+    const runtimeState = JSON.parse(probe.content?.find((item) => item.type === "text")?.text ?? "{}");
+    assert.equal(runtimeState.transport, "http", "private external config should select HTTP runtime mode through the installed wrapper");
+    assert.equal(runtimeState.hubStatePathMatches, true, "private external config should select the configured Hub state path");
+    assert.deepEqual(runtimeState.sourceStatuses, { api: "ready", browser: "not_connected", phone: "offline" }, "source readiness should remain independently gated");
+    assert.equal(runtimeState.browserWritesEnabled, true);
+    assert.equal(runtimeState.phoneWritesEnabled, true);
+    assert.equal(runtimeState.apiWritesEnabled, true);
+    assert.equal(runtimeState.literalValueUnexpanded, true, "dotenv values must not undergo shell substitution");
+  } finally {
+    await runtimeClient.close().catch(() => undefined);
+  }
   await writeFile(tokenPath, JSON.stringify({ accessToken: "fixture-token-value", userId: "fixture-account" }));
   if (process.platform !== "win32") await chmod(tokenPath, 0o600);
 
@@ -93,7 +131,7 @@ try {
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const report = JSON.parse(doctor);
   assert.equal(report.mcp.connected, true);
-  assert.equal(report.mcp.toolCount, 2);
+  assert.equal(report.mcp.toolCount, 3);
   assert.equal(report.mcp.appCredentialsPresent, true);
   assert.equal(report.mcp.accessTokenPresent, true);
   assert.deepEqual(report.sourceStatus.bySource, { api: "ready", browser: "not_connected", phone: "offline" });

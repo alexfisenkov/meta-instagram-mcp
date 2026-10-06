@@ -2,12 +2,15 @@ import { randomBytes, randomUUID, createHash, timingSafeEqual } from "node:crypt
 import { chmod, link, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { verifyUiApproval, type SignedUiApproval } from "./ui-approval.js";
+import type { Availability } from "./domain-types.js";
 
 export type BridgeMode = "browser_native_host" | "phone_standalone";
 export type BridgeSource = "browser" | "phone";
 export type BridgeTaskKind = "read" | "preview" | "write";
 export type BridgeOperation =
-  | "inbox.list" | "conversation.read" | "comments.list" | "comments.replies" | "insights.read"
+  | "account.inspect" | "account.snapshot" | "inbox.list" | "conversation.read" | "comments.list" | "comments.replies" | "insights.read"
+  | "context.refresh"
   | "message.send" | "message.react" | "message.unreact" | "comment.reply"
   | "comment.private_reply" | "comment.hide" | "comment.show" | "comment.delete"
   | "comment.like" | "comment.unlike";
@@ -23,6 +26,9 @@ export interface BridgeTask {
   payload: Readonly<Record<string, unknown>>;
   expiresAt: string;
   contextHash?: string;
+  requestId?: string;
+  fingerprint?: string;
+  writeApproval?: SignedUiApproval;
 }
 
 interface CompanionHubOptions {
@@ -34,6 +40,7 @@ interface CompanionHubOptions {
   maxPayloadBytes?: number;
   maxResultBytes?: number;
   lockTimeoutMs?: number;
+  approvalPublicKey?: string;
   now?: () => number;
 }
 interface RegisterInput {
@@ -41,12 +48,15 @@ interface RegisterInput {
 }
 interface EnqueueInput {
   kind: BridgeTaskKind; source: BridgeSource; accountBinding: string; operation: BridgeOperation;
+  bridgeId?: string;
   payload: Readonly<Record<string, unknown>>; targetRefs: Array<Record<string, string>>;
   contextHash?: string; ttlMs?: number;
+  requestId?: string; fingerprint?: string;
 }
 interface BridgeRecord {
   id: string; mode: BridgeMode; source: BridgeSource; accountBinding: string;
   capabilities: string[]; tokenHash: string; lastSeenAt: string;
+  liveStatus?: { availability: "ready" | "offline" | "not_connected" | "unsupported" | "unsupported_ui_version" | "needs_selection" | "missing_scope" | "permission_blocked"; capabilities: string[]; accountHandle?: string; surface?: "instagram" };
 }
 interface StoredTask extends BridgeTask {
   status: "queued" | "leased" | "complete" | "outcome_unknown" | "expired";
@@ -57,7 +67,7 @@ interface HubState {
   audit: Array<{ at: string; event: string; bridgeId?: string; taskId?: string; status?: string }>;
 }
 
-const READS = new Set<BridgeOperation>(["inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"]);
+const READS = new Set<BridgeOperation>(["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read", "context.refresh"]);
 const WRITES = new Set<BridgeOperation>([
   "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply",
   "comment.hide", "comment.show", "comment.delete", "comment.like", "comment.unlike"
@@ -80,7 +90,7 @@ export class HubLockError extends Error {
 interface HubLockOwner { version: 1; token: string; pid: number; acquiredAt: string }
 
 export class CompanionHub {
-  private readonly options: Required<Omit<CompanionHubOptions, "now">> & Pick<CompanionHubOptions, "now">;
+  private readonly options: Required<Omit<CompanionHubOptions, "now" | "approvalPublicKey">> & Pick<CompanionHubOptions, "now" | "approvalPublicKey">;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: CompanionHubOptions) {
@@ -99,7 +109,14 @@ export class CompanionHub {
     };
   }
 
-  async register(input: RegisterInput): Promise<{ bridgeId: string; bridgeToken: string }> {
+  /** Installs the runtime-owned verifier pin before companions are allowed to register. */
+  setApprovalPublicKey(publicKey: string): void {
+    if (typeof publicKey !== "string" || !publicKey.includes("BEGIN PUBLIC KEY") || publicKey.length > 2_000) throw new Error("invalid approval public key");
+    if (this.options.approvalPublicKey && this.options.approvalPublicKey !== publicKey) throw new Error("approval public key is already pinned");
+    this.options.approvalPublicKey = publicKey;
+  }
+
+  async register(input: RegisterInput): Promise<{ bridgeId: string; bridgeToken: string; approvalPublicKey?: string }> {
     if (!input || !["browser_native_host", "phone_standalone"].includes(input.mode)) throw new Error("invalid bridge mode");
     const source = input.source ?? (input.mode === "browser_native_host" ? "browser" : "phone");
     if ((input.mode === "browser_native_host" && source !== "browser") || (input.mode === "phone_standalone" && source !== "phone")) throw new Error("bridge mode/source mismatch");
@@ -111,32 +128,68 @@ export class CompanionHub {
       state.bridges.push({ id: bridgeId, mode: input.mode, source, accountBinding: input.accountBinding, capabilities: [...new Set(input.capabilities)], tokenHash: hash(bridgeToken), lastSeenAt: this.isoNow() });
       this.audit(state, "bridge.registered", bridgeId);
     });
-    return { bridgeId, bridgeToken };
+    return { bridgeId, bridgeToken, ...(this.options.approvalPublicKey ? { approvalPublicKey: this.options.approvalPublicKey } : {}) };
   }
 
   async heartbeat(input: { bridgeId: string; bridgeToken: string; source?: BridgeSource; status?: unknown }): Promise<void> {
     await this.change((state) => {
       const bridge = this.authBridge(state, input.bridgeId, input.bridgeToken, input.source);
       bridge.lastSeenAt = this.isoNow();
+      bridge.liveStatus = safeLiveStatus(input.status, bridge.capabilities, bridge.accountBinding);
       this.audit(state, "bridge.heartbeat", bridge.id);
     });
   }
 
   async enqueue(input: EnqueueInput): Promise<BridgeTask> {
+    if (input?.kind === "write") throw new Error("UI writes require the internal signed-approval enqueue path.");
+    return this.enqueueInternal(input);
+  }
+
+  async enqueueApprovedWrite(input: EnqueueInput, signApproval: (task: BridgeTask) => SignedUiApproval): Promise<BridgeTask> {
+    if (input?.kind !== "write" || !this.options.approvalPublicKey) throw new Error("UI write approvals are not configured.");
+    return this.enqueueInternal(input, signApproval);
+  }
+
+  async sourceStatus(source: BridgeSource, accountBinding?: string): Promise<{ source: BridgeSource; availability: Availability; capabilities: string[]; accountBinding?: string; accountHandle?: string; surface?: "instagram"; bridgeId?: string; reason?: string }> {
+    return this.read((state) => {
+      const now = this.now();
+      const candidates = state.bridges.filter((bridge) => bridge.source === source && (!accountBinding || bridge.accountBinding === accountBinding) && now - Date.parse(bridge.lastSeenAt) <= this.options.bridgeTtlMs);
+      if (!candidates.length) return { source, availability: "not_connected", capabilities: [], ...(accountBinding ? { accountBinding } : {}), reason: "No live companion is registered for this source." };
+      const bindings = [...new Set(candidates.map((bridge) => bridge.accountBinding))];
+      if (!accountBinding && bindings.length > 1) return { source, availability: "needs_selection", capabilities: [], reason: "More than one account is connected for this source." };
+      const bridge = candidates.sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0]!;
+      const liveStatus = bridge.liveStatus;
+      return { source, availability: liveStatus?.availability ?? "offline", capabilities: liveStatus?.capabilities ?? [], accountBinding: bridge.accountBinding, bridgeId: bridge.id,
+        ...(liveStatus?.accountHandle ? { accountHandle: liveStatus.accountHandle } : {}), ...(liveStatus?.surface ? { surface: liveStatus.surface } : {}),
+        ...(!liveStatus ? { reason: "The companion has not reported verified runtime readiness." } : {}) };
+    });
+  }
+
+  private async enqueueInternal(input: EnqueueInput, signApproval?: (task: BridgeTask) => SignedUiApproval): Promise<BridgeTask> {
     validateTaskInput(input, this.options.maxPayloadBytes);
     const task = await this.change((state) => {
-      const bridge = state.bridges.find((candidate) => candidate.source === input.source && candidate.accountBinding === input.accountBinding && candidate.capabilities.includes(input.operation) && this.now() - Date.parse(candidate.lastSeenAt) <= this.options.bridgeTtlMs);
+      const bridge = state.bridges.find((candidate) => candidate.source === input.source && candidate.accountBinding === input.accountBinding && (!input.bridgeId || candidate.id === input.bridgeId) && candidate.capabilities.includes(input.operation) && this.now() - Date.parse(candidate.lastSeenAt) <= this.options.bridgeTtlMs);
       if (!bridge) throw new Error("no assigned bridge available");
       this.prune(state);
       if (state.tasks.length >= this.options.maxTasks) throw new Error("hub queue is full");
       const now = this.now();
+      const maxTtlMs = input.kind === "write" ? Math.min(input.ttlMs ?? 30_000, 30_000, this.options.taskTtlMs) : this.options.taskTtlMs;
       const task: StoredTask = {
         id: randomUUID(), kind: input.kind, source: input.source, bridgeId: bridge.id,
         operation: input.operation, accountBinding: input.accountBinding,
         targetRefs: normalizeTargets(input.targetRefs), payload: structuredClone(input.payload),
-        expiresAt: new Date(now + Math.min(input.ttlMs ?? this.options.taskTtlMs, this.options.taskTtlMs)).toISOString(),
-        ...(input.contextHash ? { contextHash: input.contextHash } : {}), status: "queued"
+        expiresAt: new Date(now + maxTtlMs).toISOString(),
+        ...(input.contextHash ? { contextHash: input.contextHash } : {}),
+        ...(input.kind === "write" ? { requestId: input.requestId, fingerprint: input.fingerprint } : {}), status: "queued"
       };
+      if (input.kind === "write") {
+        if (!signApproval) throw new Error("UI writes require an approved safety attempt.");
+        const approval = signApproval(task);
+        if (!this.options.approvalPublicKey || !verifyUiApproval(task, approval, this.options.approvalPublicKey, { bridgeId: task.bridgeId, source: task.source, now })) {
+          throw new Error("UI write approval did not match the selected bridge task.");
+        }
+        task.writeApproval = structuredClone(approval);
+      }
       state.tasks.push(task);
       this.audit(state, "task.queued", bridge.id, task.id);
       return publicTask(task);
@@ -322,8 +375,14 @@ async function readLockOwner(lockPath: string): Promise<HubLockOwner | null> {
   if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
     throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
   }
+  let contents: string;
+  try { contents = await readFile(lockPath, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new HubLockError(`CompanionHub ledger lock owner cannot be read; inspect ${lockPath} before manual recovery.`, lockPath);
+  }
   try {
-    const owner = JSON.parse(await readFile(lockPath, "utf8")) as HubLockOwner;
+    const owner = JSON.parse(contents) as HubLockOwner;
     if (owner.version !== 1 || typeof owner.token !== "string" || !/^[a-zA-Z0-9_-]{40,48}$/.test(owner.token) || !Number.isInteger(owner.pid) || owner.pid < 1 || typeof owner.acquiredAt !== "string" || !Number.isFinite(Date.parse(owner.acquiredAt))) throw new Error("invalid owner");
     return owner;
   } catch {
@@ -342,10 +401,11 @@ function validateTaskInput(input: EnqueueInput, maxPayloadBytes: number): void {
   if (!input || !["read", "preview", "write"].includes(input.kind) || !["browser", "phone"].includes(input.source) || !validBinding(input.accountBinding) || !isOperation(input.operation)) throw new Error("invalid task");
   if ((input.kind === "read") !== READS.has(input.operation)) throw new Error("task kind/operation mismatch");
   if (input.kind !== "read" && !WRITES.has(input.operation)) throw new Error("mutation operation required");
+  if (input.kind === "write" && (!/^[\w-]{16,128}$/.test(input.requestId ?? "") || !/^[a-f0-9]{64}$/i.test(input.fingerprint ?? ""))) throw new Error("write task requires its common safety request id and fingerprint");
   if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload) || bytes(input.payload) > maxPayloadBytes) throw new Error("invalid task payload");
   validatePayload(input.operation, input.payload);
   if (!Array.isArray(input.targetRefs) || input.targetRefs.length > 10) throw new Error("invalid target refs");
-  const needsTarget = ["conversation.read", "comments.list", "comments.replies", "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.hide", "comment.show", "comment.delete", "comment.like", "comment.unlike"].includes(input.operation);
+  const needsTarget = ["conversation.read", "comments.list", "comments.replies", "context.refresh", "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.hide", "comment.show", "comment.delete", "comment.like", "comment.unlike"].includes(input.operation);
   if (needsTarget && input.targetRefs.length === 0) throw new Error("task target is required");
   for (const target of input.targetRefs) {
     if (target.accountBinding !== input.accountBinding || Object.keys(target).every((key) => key === "accountBinding")) throw new Error("task target binding mismatch");
@@ -369,8 +429,9 @@ function normalizeTargets(targets: Array<Record<string, string>>): Array<Record<
 }
 function validatePayload(operation: BridgeOperation, payload: Readonly<Record<string, unknown>>): void {
   const keys: Record<BridgeOperation, string[]> = {
-    "inbox.list": ["limit", "cursor"], "conversation.read": ["olderCursor", "limit"],
-    "comments.list": ["cursor", "limit"], "comments.replies": ["cursor", "limit"], "insights.read": ["period"],
+    "account.inspect": [], "account.snapshot": [],
+    "inbox.list": ["limit", "cursor"], "conversation.read": ["pages", "limit"],
+    "comments.list": ["cursor", "limit"], "comments.replies": ["cursor", "limit"], "insights.read": ["period"], "context.refresh": ["action"],
     "message.send": ["text"], "message.react": ["reaction"], "message.unreact": ["reaction"],
     "comment.reply": ["text"], "comment.private_reply": ["text"], "comment.hide": [], "comment.show": [],
     "comment.delete": [], "comment.like": [], "comment.unlike": []
@@ -378,9 +439,11 @@ function validatePayload(operation: BridgeOperation, payload: Readonly<Record<st
   if (Object.keys(payload).some((key) => !keys[operation].includes(key))) throw new Error("unexpected task payload field");
   for (const [key, value] of Object.entries(payload)) {
     if (key === "limit" && (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100)) throw new Error("invalid task limit");
+    if (key === "pages" && (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 5)) throw new Error("invalid older-history page budget");
     if (["cursor", "olderCursor", "period"].includes(key) && (typeof value !== "string" || value.length > 256)) throw new Error("invalid task parameter");
     if (key === "text" && (typeof value !== "string" || value.length < 1 || value.length > 2_200)) throw new Error("invalid task text");
     if (key === "reaction" && (typeof value !== "string" || value.length < 1 || value.length > 16)) throw new Error("invalid task reaction");
+    if (key === "action" && (typeof value !== "string" || !["message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.hide", "comment.show", "comment.delete", "comment.like", "comment.unlike"].includes(value))) throw new Error("invalid context refresh action");
   }
   if (["message.send", "comment.reply", "comment.private_reply"].includes(operation) && typeof payload.text !== "string") throw new Error("task text is required");
   if (["message.react", "message.unreact"].includes(operation) && typeof payload.reaction !== "string") throw new Error("task reaction is required");
@@ -416,4 +479,20 @@ function isSensitiveResultKey(key: string): boolean {
 function publicTask(task: StoredTask): BridgeTask {
   const { status: _status, leaseUntil: _leaseUntil, result: _result, resultHash: _resultHash, ...publicValue } = task;
   return structuredClone(publicValue);
+}
+function safeLiveStatus(value: unknown, allowedCapabilities: readonly string[], accountBinding: string): BridgeRecord["liveStatus"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { availability: "offline", capabilities: [] };
+  const record = value as Record<string, unknown>;
+  const availability = record.availability;
+  const allowedAvailability = ["ready", "offline", "not_connected", "unsupported", "unsupported_ui_version", "needs_selection", "missing_scope", "permission_blocked"] as const;
+  if (!allowedAvailability.includes(availability as typeof allowedAvailability[number])) return { availability: "offline", capabilities: [] };
+  const accountHandle = typeof record.accountHandle === "string" && /^[a-zA-Z0-9._]{1,30}$/.test(record.accountHandle) ? record.accountHandle : undefined;
+  if (availability === "ready" && (record.accountBinding !== accountBinding || record.surface !== "instagram" || !accountHandle)) {
+    return { availability: "offline", capabilities: [] };
+  }
+  const capabilities = Array.isArray(record.capabilities)
+    ? record.capabilities.filter((item): item is string => typeof item === "string" && allowedCapabilities.includes(item)).slice(0, 64)
+    : [];
+  return { availability: availability as Availability, capabilities: [...new Set(capabilities)],
+    ...(availability === "ready" ? { accountHandle, surface: "instagram" as const } : {}) };
 }

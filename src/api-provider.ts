@@ -3,8 +3,10 @@ import { createCommentsDomain, buildCommentWrite, listCommentsWithContext, listR
 import { createDirectDomain, ensureScope, ensureScopes, hashContext, messagingClient, readConversationWithContext, listConversationsWithContext } from "./direct.js";
 import type { MutationIntent, MutationResult, Observation, TargetRef } from "./domain-types.js";
 import { MetaApiError, MetaTransportError, type MetaClient } from "./meta-client.js";
+import type { ActionReadbackEvidence } from "./action-readback.js";
 
 export type ApiReadRequest =
+  | { operation: "account.inspect" }
   | { operation: "inbox.list"; limit?: number; cursor?: string }
   | { operation: "conversation.read"; target: TargetRef; olderCursor?: string; limit?: number }
   | { operation: "comments.list" | "comments.replies"; target: TargetRef; cursor?: string; limit?: number }
@@ -14,11 +16,15 @@ export interface ApiProviderOptions {
   resolveContext: AccountContextResolver;
   now?: () => Date;
 }
+export type ApiActionReadRequest =
+  | { operation: "conversation.read"; target: TargetRef; limit?: number }
+  | { operation: "comments.replies"; target: TargetRef; limit?: number };
 
 export interface ApiProvider {
   readonly source: "api";
-  status(): Promise<{ source: "api"; availability: "ready" | "missing_scope" | "permission_blocked"; capabilities: string[]; reason?: string; scopes: { requested: string[]; confirmed?: string[]; status: "confirmed" | "unknown" } }>;
+  status(operation?: ApiReadRequest["operation"]): Promise<{ source: "api"; availability: "ready" | "missing_scope" | "permission_blocked" | "unsupported"; capabilities: string[]; reason?: string; accountBinding?: string; scopes: { requested: string[]; confirmed?: string[]; status: "confirmed" | "unknown" } }>;
   read(request: ApiReadRequest): Promise<Observation<unknown>>;
+  readForAction(request: ApiActionReadRequest): Promise<ActionReadbackEvidence>;
   refreshContext(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string }>;
   execute(intent: MutationIntent, requestId: string, contextHash: string): Promise<MutationResult>;
   readonly direct: ReturnType<typeof createDirectDomain>;
@@ -45,28 +51,37 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
     source: "api",
     direct,
     comments,
-    async status() {
+    async status(operation) {
       try {
         const ctx = await options.resolveContext();
-        const required = [...MSG_SCOPES[ctx.authMode], COMMENTS_SCOPE[ctx.authMode], INSIGHTS_SCOPE[ctx.authMode]];
-        const requiredMissing = ctx.confirmedScopes ? required.filter((scope) => !ctx.confirmedScopes!.includes(scope)) : [];
-        const messageScopeMissing = Boolean(ctx.confirmedScopes && MSG_SCOPES[ctx.authMode].some((scope) => !ctx.confirmedScopes!.includes(scope)));
-        const messageClientReady = Boolean(ctx.authMode === "facebook" ? ctx.pageClient && ctx.pageTasks?.includes("MESSAGING") : ctx.userClient);
-        const messagingReady = messageClientReady && !messageScopeMissing;
-        const commentsClientReady = ctx.authMode !== "facebook" || Boolean(ctx.pageClient);
-        const available = ctx.confirmedScopes === undefined ? "permission_blocked" as const
-          : requiredMissing.length > 0 ? "missing_scope" as const : "ready" as const;
+        const availabilityFor = (scopes: readonly string[], clientReady = true): "ready" | "missing_scope" | "permission_blocked" => {
+          if (!ctx.confirmedScopes) return "permission_blocked";
+          if (!clientReady || scopes.some((scope) => !ctx.confirmedScopes!.includes(scope))) return "missing_scope";
+          return "ready";
+        };
+        const messageClientReady = ctx.authMode !== "facebook" || Boolean(ctx.pageClient && ctx.pageTasks?.includes("MESSAGING"));
+        const directAvailability = availabilityFor(MSG_SCOPES[ctx.authMode], messageClientReady);
+        const commentsAvailability = availabilityFor([COMMENTS_SCOPE[ctx.authMode]], ctx.authMode !== "facebook" || Boolean(ctx.pageClient));
+        const insightsAvailability = availabilityFor([INSIGHTS_SCOPE[ctx.authMode]]);
+        const capabilityAvailability = {
+          "account.inspect": "unsupported" as const,
+          "inbox.list": directAvailability, "conversation.read": directAvailability,
+          "comments.list": commentsAvailability, "comments.replies": commentsAvailability,
+          "insights.read": insightsAvailability
+        } as const;
+        const requestedAvailability = operation ? capabilityAvailability[operation] : directAvailability;
+        const available = requestedAvailability;
         return {
-          source: "api", availability: available,
+          source: "api", availability: available, accountBinding: ctx.accountBinding,
           capabilities: [
-            messagingReady ? "direct.read" : `direct.read:${messageScopeMissing ? "missing_scope" : "permission_blocked"}`,
+            ...(directAvailability === "ready" ? ["direct.read", "inbox.list", "conversation.read"] : [`direct.read:${directAvailability}`, `inbox.list:${directAvailability}`, `conversation.read:${directAvailability}`]),
             ...(ctx.authMode === "facebook" ? ["message.react:unsupported", "message.unreact:unsupported"] : []),
-            ctx.confirmedScopes?.includes(COMMENTS_SCOPE[ctx.authMode]) && commentsClientReady ? "comments.read" : `comments.read:${ctx.confirmedScopes && !ctx.confirmedScopes.includes(COMMENTS_SCOPE[ctx.authMode]) ? "missing_scope" : "permission_blocked"}`,
-            ctx.confirmedScopes?.includes(INSIGHTS_SCOPE[ctx.authMode]) ? "insights.read" : `insights.read:${ctx.confirmedScopes ? "missing_scope" : "permission_blocked"}`,
+            ...(commentsAvailability === "ready" ? ["comments.read", "comments.list", "comments.replies"] : [`comments.read:${commentsAvailability}`, `comments.list:${commentsAvailability}`, `comments.replies:${commentsAvailability}`]),
+            insightsAvailability === "ready" ? "insights.read" : `insights.read:${insightsAvailability}`,
             "comment.like:unsupported", "comment.unlike:unsupported"
           ],
-          ...(available === "permission_blocked" ? { reason: "Requested scopes are recorded, but the token's granted scopes are unknown." }
-            : available === "missing_scope" ? { reason: "One or more API-domain permissions are missing from the confirmed grant." } : {}),
+          ...(available === "permission_blocked" ? { reason: "The granted permissions could not be confirmed from the verified OAuth response or Meta permission endpoint." }
+            : available === "missing_scope" ? { reason: "The connected account is missing a permission or Page task required for this operation." } : {}),
           scopes: { requested: ctx.requestedScopes, ...(ctx.confirmedScopes ? { confirmed: ctx.confirmedScopes } : {}), status: ctx.scopeStatus }
         };
       } catch (error) {
@@ -77,6 +92,10 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
       let ctx: ApiAccountContext | undefined;
       try {
         ctx = await options.resolveContext();
+        if (request.operation === "conversation.read" && request.olderCursor?.startsWith("browser-older:")) {
+          return failureObservation(ctx, request.operation, "unsupported", new Error("Browser history cursors are scoped to the browser companion."));
+        }
+        if (request.operation === "account.inspect") return failureObservation(ctx, request.operation, "unsupported", new Error("Account inspection is supplied by a verified local companion."));
         if (request.operation === "inbox.list") return await listConversationsWithContext(ctx, request);
         if (request.operation === "conversation.read") return await readConversationWithContext(ctx, request.target, { limit: request.limit, olderCursor: request.olderCursor });
         if (request.operation === "comments.list") return await listCommentsWithContext(ctx, request.target, request);
@@ -95,6 +114,14 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
         const availability = classifyAvailability(error, ctx);
         return failureObservation(ctx, request.operation, availability, error);
       }
+    },
+    async readForAction(request) {
+      const ctx = await options.resolveContext();
+      if (request.target.accountBinding !== ctx.accountBinding) throw new Error("Read-back target belongs to a different account.");
+      const observation = request.operation === "conversation.read"
+        ? await readConversationWithContext(ctx, request.target, { limit: 20 })
+        : await listRepliesWithContext(ctx, request.target, { limit: 100 });
+      return { observation, ownerSenderIds: [ctx.instagramUserId, ctx.facebookPageId].filter((id): id is string => Boolean(id)) };
     },
     async refreshContext(intent) {
       if (intent.source !== "api") throw new Error("API executor only accepts API-bound intents.");

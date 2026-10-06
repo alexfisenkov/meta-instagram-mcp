@@ -6,6 +6,20 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+const SUPPORTED_CONFIG_NAMES = new Set([
+  "META_AUTH_MODE", "META_INSTAGRAM_AUTH_MODE", "META_INSTAGRAM_APP_ID", "META_INSTAGRAM_APP_SECRET",
+  "META_INSTAGRAM_REDIRECT_URI", "META_INSTAGRAM_SCOPES", "META_INSTAGRAM_ACCESS_TOKEN",
+  "META_INSTAGRAM_USER_ID", "META_FACEBOOK_PAGE_ID", "META_GRAPH_API_VERSION", "META_TOKEN_STORE_PATH",
+  "META_INSTAGRAM_WRITE", "META_INSTAGRAM_DELETE", "META_INSTAGRAM_PUBLISH_LOG", "META_GRAPH_FALLBACK_IPS",
+  "META_GRAPH_TIMEOUT_MS", "META_GRAPH_PREFER_FALLBACK", "META_WEBHOOK_VERIFY_TOKEN", "META_WEBHOOK_ACCOUNT_IDS",
+  "META_WEBHOOK_PATH", "META_WEBHOOK_JOURNAL_PATH", "INSTAGRAM_MCP_TRANSPORT", "INSTAGRAM_MCP_HUB_STATE_PATH",
+  "INSTAGRAM_MCP_BROWSER_WRITES", "INSTAGRAM_MCP_PHONE_WRITES", "INSTAGRAM_MCP_PHONE_CONFIG",
+  "INSTAGRAM_MCP_BRIDGE_CONFIG", "INSTAGRAM_MCP_EXTENSION_ID", "INSTAGRAM_MCP_HTTP_PORT",
+  "INSTAGRAM_MCP_HTTP_HOST", "INSTAGRAM_MCP_HTTP_BEARER_TOKEN", "INSTAGRAM_MCP_HTTP_ALLOWED_HOSTS",
+  "INSTAGRAM_MCP_HTTP_ALLOWED_ORIGINS", "INSTAGRAM_MCP_HTTP_MAX_REQUEST_BYTES", "INSTAGRAM_MCP_REMOTE_CONFIG",
+  "INSTAGRAM_MCP_REMOTE_URL", "INSTAGRAM_MCP_REMOTE_BEARER_TOKEN"
+]);
+
 export function defaultConfigDirectory(env = process.env) {
   const home = env.HOME || env.USERPROFILE || homedir();
   const xdg = env.XDG_CONFIG_HOME || join(home, ".config");
@@ -23,15 +37,19 @@ export function loadExternalConfig(configDirectory = defaultConfigDirectory()) {
   }
 
   const values = {};
-  for (const [index, rawLine] of readFileSync(configPath, "utf8").split(/\r?\n/).entries()) {
+  const text = readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const separator = line.indexOf("=");
     if (separator < 1) throw new Error(`CONFIG_LINE_INVALID_${index + 1}`);
     const name = line.slice(0, separator).trim();
-    if (!/^META_(?!MCP_)[A-Z0-9_]+$/.test(name)) throw new Error(`CONFIG_NAME_INVALID_${index + 1}`);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new Error(`CONFIG_NAME_INVALID_${index + 1}`);
+    if (!SUPPORTED_CONFIG_NAMES.has(name)) throw new Error(`CONFIG_NAME_UNSUPPORTED_${index + 1}`);
+    if (Object.hasOwn(values, name)) throw new Error(`CONFIG_NAME_DUPLICATE_${index + 1}`);
     let value = line.slice(separator + 1).trim();
-    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+    if (value.startsWith("\"") || value.startsWith("'")) {
+      if (value.length < 2 || value.at(-1) !== value[0]) throw new Error(`CONFIG_VALUE_INVALID_${index + 1}`);
       value = value.slice(1, -1);
     }
     values[name] = value;
@@ -42,12 +60,10 @@ export function loadExternalConfig(configDirectory = defaultConfigDirectory()) {
 export function applyExternalConfig(configDirectory = defaultConfigDirectory()) {
   const result = loadExternalConfig(configDirectory);
   for (const [name, value] of Object.entries(result.values)) {
-    if (value !== "" && process.env[name] === undefined) process.env[name] = value;
+    if (process.env[name] === undefined) process.env[name] = value;
   }
-  if (!existsSync(join(packageRoot, ".env"))) {
-    if (!process.env.META_TOKEN_STORE_PATH?.trim()) process.env.META_TOKEN_STORE_PATH = join(configDirectory, "token.json");
-    if (!process.env.META_INSTAGRAM_PUBLISH_LOG?.trim()) process.env.META_INSTAGRAM_PUBLISH_LOG = join(configDirectory, "publish-log.jsonl");
-  }
+  if (!process.env.META_TOKEN_STORE_PATH?.trim()) process.env.META_TOKEN_STORE_PATH = join(configDirectory, "token.json");
+  if (!process.env.META_INSTAGRAM_PUBLISH_LOG?.trim()) process.env.META_INSTAGRAM_PUBLISH_LOG = join(configDirectory, "publish-log.jsonl");
   return result;
 }
 

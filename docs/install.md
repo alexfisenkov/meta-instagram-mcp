@@ -3,12 +3,12 @@
 В этом репозитории предусмотрены два способа работы:
 
 - portable MCP для Node.js с конфигурацией и token-store вне каталога приложения;
-- четыре целевых профиля развёртывания, у которых разная готовность. API stdio — текущая локальная форма. HTTP server mode, browser host и phone companion нельзя считать доступными, пока их интеграция и проверки не вошли в опубликованный release. Сверяйтесь с [матрицей возможностей](capabilities.md).
+- четыре профиля: API stdio, API + server-owned persistent Chrome/extension/Native Host, external desktop browser и connected phone companion. Shared runtime paths для stdio/HTTP/API/browser/phone подключены в checkout; server deployment, host registration, live OAuth/UI/device QA и published release остаются отдельными gates. Сверяйтесь с [матрицей возможностей](capabilities.md).
 
 ## Требования
 
 - Git 2.30+;
-- Node.js 20 или новее и соответствующий npm;
+- Node.js 24 LTS рекомендуется; минимальная поддерживаемая версия — Node.js 22 LTS;
 - `tar` в `PATH` на всех системах, включая Windows PowerShell 7;
 - интернет для получения исходного commit и зависимостей npm;
 - macOS, Linux или Windows с PowerShell 7 для нативного Windows-установщика.
@@ -114,7 +114,13 @@ npm run meta:callback
 
 Команда загрузит внешний config, откроет локальный callback и не печатает token. Не копируйте callback URL с одноразовым `code=`. После consent через клиент доступны инструменты OAuth и проверки; привязка account/Page зависит от фактически выданных permissions. App Review, Advanced Access, webhook consent и Meta live access настраивает владелец своей Meta App; эта инструкция не означает, что они уже пройдены.
 
-Внешний env wrapper читает только `META_*`-параметры, оставляет уже заданные переменные окружения приоритетными и не пишет значения в log. На POSIX-системах config `.env` должен иметь права `0600`; если doctor сообщает `CONFIG_FILE_PERMISSIONS`, выполните `chmod 600 ~/.config/meta-instagram-mcp/.env`.
+Wrapper читает из внешнего `.env` только явный список поддерживаемых `META_*` и `INSTAGRAM_MCP_*` ключей. Неизвестное имя, в том числе `META_MCP_CONFIG_DIR`, отклоняется; подстановка shell-переменных не выполняется, содержимое трактуется как буквальный текст. Уже заданные переменные процесса имеют приоритет над внешним `.env`, а внешний `.env` — над `.env` внутри исходного checkout. Значения и ошибки не печатаются. На POSIX config-файл должен иметь права `0600`; если doctor сообщает `CONFIG_FILE_PERMISSIONS`, выполните `chmod 600 ~/.config/meta-instagram-mcp/.env`.
+
+### Runtime-параметры и transports
+
+Portable wrapper передаёт runtime-настройки из приватного `.env` в ту же factory, которая обслуживает stdio и Streamable HTTP. Для HTTP задайте `INSTAGRAM_MCP_TRANSPORT=http`, bearer token длиной не менее 32 байт в `INSTAGRAM_MCP_HTTP_BEARER_TOKEN` и при необходимости host/origin allowlists. Listener принимает только `127.0.0.1`; удалённый доступ размещайте за доверенным TLS reverse proxy. По умолчанию transport остаётся stdio. Remote proxy использует `INSTAGRAM_MCP_REMOTE_CONFIG` либо пару `INSTAGRAM_MCP_REMOTE_URL` и `INSTAGRAM_MCP_REMOTE_BEARER_TOKEN`; config-file path должен быть абсолютным, приватным и вне каталога проекта, а URL — HTTPS origin.
+
+`INSTAGRAM_MCP_HUB_STATE_PATH` задаёт durable state Hub. Write gates задаются отдельно: `META_INSTAGRAM_WRITE` для API, `INSTAGRAM_MCP_BROWSER_WRITES` для browser, `INSTAGRAM_MCP_PHONE_WRITES` для phone; удаление дополнительно требует `META_INSTAGRAM_DELETE`. Эти переключатели не создают OAuth scopes, подключение companion, подпись approval или подтверждение конкретного действия. Source readiness и coverage остаются отдельными для API, browser и phone.
 
 ## Обновить, откатить или удалить
 
@@ -156,21 +162,83 @@ tools/rollback.sh --target "$HOME/.local/share/meta-instagram-mcp/app" --backup 
 
 Uninstall перемещает каталог приложения в `.uninstalled...`; config, token-store и все backups остаются на месте. Они не удаляются автоматически.
 
-## API и будущие companions
+## Профили установки и companions
 
-Серверный install profile, постоянный Chrome профиль, Native Host/extension и phone companion имеют отдельные prerequisites и readiness gates; схема описана в [профилях возможностей](capabilities.md). Server+browser использует отдельный профиль Chrome самого узла. Первый вход выполняет его владелец через разрешённый private admin GUI или SSH-forwarded desktop; сессия остаётся на узле. Cookies с личного Mac не копируются. iOS companion требует Mac с настроенными Xcode/WDA/Appium; Android возможен только после отдельной настройки.
+В каждом профиле используется своя конфигурация и отдельный источник readiness. `node tools/doctor.mjs` проверяет локальное stdio соединение; browser/phone readiness и живой Meta access требуют своих проверок.
 
-Целевой порядок автоматического выбора источника для чтения: API → browser → phone. В этом checkout единый router ещё не подключён, поэтому этот приоритет пока не означает автоматический fallback; фактический ответ должен сохранять source и coverage. Для записи целевой контракт закрепляет один source в подтверждённом preview: после `OUTCOME_UNKNOWN` не повторяйте действие и не переключайте источник автоматически; выполните read-back того же target из того же source.
+| Профиль | Узел и prerequisites | Статус и границы |
+|---|---|---|
+| API stdio | Один компьютер или сервер с Node.js и MCP client; Meta App, professional Instagram account, OAuth scopes/consent | Рабочая форма portable wrapper. Account API status не доказывает, что запрошенные Meta permissions одобрены или работают live. |
+| API + server-owned browser | Server runtime и Streamable HTTP/Hub, Chrome на том же узле, MV3 extension, Native Messaging Host, постоянный отдельный Chrome profile | Factory и browser path подключены. Host registration, extension install, server profile login и live UI read-back выполняются отдельно и не подтверждены этим checkout. Владелец входит в постоянный Chrome profile узла через разрешённый private admin GUI или SSH-forwarded desktop; cookies/session с Mac не копируются. |
+| External desktop browser | Core/Hub с достижимым защищённым HTTP endpoint; Chrome, extension, Native Messaging Host и собственный bridge config на desktop | `tools/register-native-host.mjs` создаёт per-user host manifest и launcher/registry registration. Extension ID, account binding, соединение с core и live read-back настраиваются отдельно; readiness остаётся gated до проверки. |
+| Connected phone | Core/Hub с достижимым защищённым endpoint; iOS требует Mac с Xcode/WDA/Appium, Android — настроенный Appium/UiAutomator2 host | Runtime phone provider подключён. Установка и авторизация Instagram, выбор устройства и live UI QA выполняются отдельно. Phone older-history scrolling не поддерживается; transport readiness не доказывает выбранный аккаунт или рабочий экран. |
+
+Extension ID должен оставаться стабильным между обновлениями: origin в Native Messaging manifest связан с ним. Загружайте unpacked extension из постоянного пути `<app>/browser-extension`; при каждом запуске используйте тот же каталог приложения. Helper откажет при чужом manifest/registry conflict и обновит только собственную подтверждённую регистрацию. Не копируйте browser cookies/session на сервер.
+
+Для чтения runtime пробует API → browser → phone в ограниченном бюджете и сохраняет provenance, coverage, полноту истории и причины пропуска источников. Приоритет не обещает полных данных: API может не иметь scope, browser/phone могут быть offline или не подключены. Старшая история Direct через phone не реализована; API ограничивает окно и размер страницы по своим правилам. Для записи preview закрепляет один source/account/target/context; выполнение требует локального source gate, серверного signed grant для UI-действий и подтверждения точного запроса. При `OUTCOME_UNKNOWN` не повторяйте действие и не переключайте источник автоматически; выполните read-back того же target из того же source.
 
 ### Browser Native Messaging host
 
-В checkout есть исходники extension и Windows host, но установщик пока не регистрирует host и не устанавливает extension. Для соединения Native Messaging manifest поле `allowed_origins` должно содержать точный origin установленного extension вида `chrome-extension://<32-character-extension-id>/`. Private bridge JSON должен задавать `expectedAccountHandle`; значение проверяется с текущим Instagram аккаунтом. Windows host по умолчанию читает config из `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`; путь можно переопределить переменной `INSTAGRAM_MCP_BRIDGE_CONFIG`. Храните этот файл локально с доступом только владельца и не помещайте bridge credentials или extension ID в публичные логи и отчёты.
+Extension и Native Host source включены в runtime. Сначала установите Chrome, Node.js 22+ и приложение в постоянный каталог; bridge JSON создайте отдельно в приватном config directory с правами `0600` на macOS/Linux. Его JSON содержит `baseUrl`, `bearerToken`, `mode: "browser_native_host"`, `source: "browser"`, `accountBinding`, `expectedAccountHandle` и список разрешённых `capabilities`; `allowBrowserWrites` остаётся `false`, пока запись отдельно не настроена. Не передавайте token в аргументах команд.
 
-CI публикует самодостаточный Windows x64 host как artifact `instagram-native-host-win-x64`. Для самостоятельной сборки из исходников нужны .NET SDK 8 и команда:
+Загрузите extension через `chrome://extensions` → Developer mode → Load unpacked, выберите `<app>/browser-extension` и скопируйте показанный Chrome extension ID. Он должен состоять из 32 символов `a`–`p`. Не добавляйте permissions вручную.
+
+### macOS и Linux
+
+Из каталога установленного приложения сначала проверьте план:
+
+```bash
+node tools/register-native-host.mjs --dry-run --install-root "$HOME/.local/share/meta-instagram-mcp/app" --config-file "$HOME/.config/meta-instagram-mcp/browser-bridge.json" --extension-id '<32-character-extension-id>'
+```
+
+Затем выполните ту же команду без `--dry-run`. Она создаёт executable launcher в `$HOME/.config/meta-instagram-mcp/native-host/`, а Chrome manifest — в `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.alexfisenkov.instagram_companion.json` (macOS) или `~/.config/google-chrome/NativeMessagingHosts/com.alexfisenkov.instagram_companion.json` (Linux). Launcher указывает на абсолютный `node` и `dist/companion/browser-native-host.js`, экспортирует только путь bridge config и extension ID. В manifest записывается один точный origin `chrome-extension://<id>/`.
+
+Если helper недоступен, создайте manifest с теми же пятью полями (`name`, `description`, абсолютный `path` launcher, `type: "stdio"`, `allowed_origins` с единственным точным origin), сохраните его по платформенному пути выше с правами `0600`, а launcher — с `0700`. До ручной записи проверьте, что целевой manifest отсутствует; не заменяйте неизвестную регистрацию.
+
+### Windows PowerShell 7
+
+Нужен `InstagramNativeHost.exe` из self-contained x64 build. CI workflow создаёт 14-дневный artifact для своего run; он не является GitHub Release asset. Его можно собрать из исходников с .NET SDK 8, затем скопировать в фиксированный путь приложения:
 
 ```powershell
 dotnet publish native-host/windows/InstagramNativeHost.csproj --configuration Release --runtime win-x64 --self-contained true -o artifacts/native-host
 ```
+
+```powershell
+$InstallRoot = Join-Path $env:LOCALAPPDATA 'meta-instagram-mcp\app'
+$HostDirectory = Join-Path $InstallRoot 'tools\native-host'
+New-Item -ItemType Directory -Force -Path $HostDirectory | Out-Null
+Copy-Item 'artifacts/native-host/InstagramNativeHost.exe' (Join-Path $HostDirectory 'InstagramNativeHost.exe')
+node tools/register-native-host.mjs --dry-run --install-root $InstallRoot --extension-id '<32-character-extension-id>'
+node tools/register-native-host.mjs --install-root $InstallRoot --extension-id '<32-character-extension-id>'
+```
+
+Windows host manifest: `%LOCALAPPDATA%\MetaInstagramCompanion\native-host.json`; Chrome registration: `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.alexfisenkov.instagram_companion`, whose default value points to that manifest. The EXE derives its install root from `<app>\tools\native-host\InstagramNativeHost.exe`, then starts `node`; install Node.js 22+ and make `node` available in the Chrome process PATH. Bridge config defaults to `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. If an existing registration points elsewhere, helper stops without replacing it. Manual registry fallback after creating and inspecting the manifest:
+
+```powershell
+$Manifest = Join-Path $env:LOCALAPPDATA 'MetaInstagramCompanion\native-host.json'
+$Key = 'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.alexfisenkov.instagram_companion'
+$Existing = if (Test-Path -LiteralPath $Key) { (Get-Item -LiteralPath $Key).GetValue('') } else { $null }
+if ($Existing -and $Existing -ne $Manifest) { throw 'Refusing to replace a Native Messaging registration owned by another install.' }
+New-Item -Path $Key -Force | Out-Null
+Set-Item -Path $Key -Value $Manifest
+```
+
+Registering the host does not install or sign the extension, establish bridge credentials, authorize the Instagram account, or prove live UI readiness. On a server-owned profile, perform first login yourself through an allowed private admin GUI or SSH-forwarded desktop on that same node. Keep the session there; do not copy Mac cookies. The fixed extension implements semantic reads with bounded scrolling and approved actions; it does not expose generic selectors, raw clicks or arbitrary page script.
+
+### Контракт соединения
+
+| Часть | Значение |
+|---|---|
+| Extension | `<app>/browser-extension`; `nativeMessaging` plus только Instagram host permissions. |
+| Runtime asset | `<app>/dist/companion/browser-native-host.js`; Windows launcher — `<app>/tools/native-host/InstagramNativeHost.exe`. |
+| Host name | `com.alexfisenkov.instagram_companion`; origin allowlist — один `chrome-extension://<id>/`. |
+| Private bridge file | macOS/Linux путь задаётся в launcher как `INSTAGRAM_MCP_BRIDGE_CONFIG`; Windows default — `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. |
+| Required JSON fields | `baseUrl` (HTTPS origin), `bearerToken`, `mode`, `source`, `accountBinding`, `expectedAccountHandle`, `capabilities`; file values не передаются через argv. |
+| Hub routes | Host сам инициирует HTTPS `POST /bridge/register`, `/bridge/heartbeat`, `/bridge/poll`, `/bridge/result`; входящий порт на desktop не открывается. |
+| MCP listener | По умолчанию `127.0.0.1:8787`; ключи `INSTAGRAM_MCP_HTTP_HOST`, `INSTAGRAM_MCP_HTTP_PORT`, `INSTAGRAM_MCP_HTTP_BEARER_TOKEN`, `INSTAGRAM_MCP_HTTP_ALLOWED_HOSTS`, `INSTAGRAM_MCP_HTTP_ALLOWED_ORIGINS`; public HTTPS ставится через доверенный reverse proxy. |
+| Poll bounds | Browser host по умолчанию опрашивает раз в 1 секунду, batch 10 задач; poll interval ограничен 250–30 000 мс, Hub принимает не более 20 задач за poll. |
+| Read bounds | Browser older-history scroll ограничен 5 страницами; inbox/thread operations используют переданный bounded `limit`. |
+| Readiness handoff | Registration подтверждает только manifest/registry. Отдельно проверяются bridge heartbeat, `account.inspect`, ожидаемый account handle и source read-back; live UI readiness не предполагается. |
 
 Локальный doctor запускается так:
 
