@@ -208,7 +208,7 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
     const code = knownCodes.has(processError.code ?? "") ? processError.code : "OTHER";
     const status = Number.isInteger(processError.status) ? String(processError.status) : "NONE";
     const details = diagnostic
-      ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}`
+      ? `${diagnostic[1]}/${diagnostic[2]}/${diagnostic[3]}/${lastStage}`
       : `PROCESS_FAILURE/${code}/${status}/${lastStage}`;
     throw new Error(`Windows private filesystem ACL could not be verified (${details}).`);
   }
