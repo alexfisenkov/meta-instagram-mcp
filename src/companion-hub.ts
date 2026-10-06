@@ -388,14 +388,25 @@ async function readLockOwner(lockPath: string): Promise<HubLockOwner | null> {
   if (!info.isFile() || info.isSymbolicLink()) {
     throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
   }
-  try { await assertPrivateFile(lockPath); }
-  catch (error) {
-    // The lock owner can release the file after our first lstat(). Treat that
-    // disappearance as an unlocked path and let the caller retry acquisition.
-    // Permission, ACL, and file-type failures remain fail-closed.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
+  let privateLockVerified = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await assertPrivateFile(lockPath);
+      privateLockVerified = true;
+      break;
+    } catch {
+      // The owner can release (and another contender can recreate) the path
+      // while the Windows ACL check runs out of process. Retry only when the
+      // lock still exists; a missing path is safe to retry in the caller, and
+      // any persistent ACL/file-type failure remains fail-closed.
+      try { await lstat(lockPath); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
+      }
+    }
   }
+  if (!privateLockVerified) throw new HubLockError(`CompanionHub ledger lock is ambiguous or has unsafe permissions; inspect ${lockPath} before manual recovery.`, lockPath);
   let contents: string;
   try { contents = await readFile(lockPath, "utf8"); }
   catch (error) {
