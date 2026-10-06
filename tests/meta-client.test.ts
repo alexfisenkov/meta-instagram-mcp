@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../src/http-json.js", () => ({ requestJsonHttp: vi.fn() }));
 
 import { requestJsonHttp } from "../src/http-json.js";
-import { MetaClient } from "../src/meta-client.js";
+import { MetaApiError, MetaClient } from "../src/meta-client.js";
 import { jsonHttpResponse, metaErrorResponse } from "./helpers/json-http.js";
 
 const httpMock = vi.mocked(requestJsonHttp);
@@ -55,14 +55,44 @@ describe("MetaClient request assembly", () => {
   it("raises Meta errors returned with a non-2xx status", async () => {
     httpMock.mockResolvedValueOnce(metaErrorResponse("Unsupported get request."));
 
-    await expect(makeClient().get("/me")).rejects.toThrow(
-      "Meta Graph API error 400: Unsupported get request. (OAuthException, code 190)"
-    );
+    const error = await makeClient().get("/me").catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(MetaApiError);
+    expect(error).toMatchObject({ status: 400, apiCode: 190 });
+    expect((error as Error).message).toBe("Meta Graph API error 400: Unsupported get request. (OAuthException, code 190)");
   });
 
   it("raises Meta errors that arrive with a 200 status", async () => {
     httpMock.mockResolvedValueOnce(metaErrorResponse("Rate limited", { status: 200, type: "OAuthException", code: 4 }));
 
     await expect(makeClient().get("/me")).rejects.toThrow("Meta Graph API error 200: Rate limited");
+  });
+
+  it("sends nested JSON unchanged with Bearer authorization and does not retry writes", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ recipient_id: "person-7" }));
+
+    const result = await makeClient("https://graph.facebook.com").postJson("/v25.0/me/messages", {
+      recipient: { id: "person-7" },
+      message: { text: "A nested reply" }
+    });
+
+    expect(result).toEqual({ recipient_id: "person-7" });
+    const [url, init] = httpMock.mock.calls[0];
+    expect(url.href).toBe("https://graph.facebook.com/v25.0/me/messages");
+    expect(init?.method).toBe("POST");
+    expect(init?.allowRouteRetry).toBe(false);
+    expect(init?.headers?.authorization).toBe("Bearer token");
+    expect(String(init?.body)).toBe(JSON.stringify({ recipient: { id: "person-7" }, message: { text: "A nested reply" } }));
+  });
+
+  it("sends DELETE once with its query and access token", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ success: true }));
+
+    await makeClient("https://graph.facebook.com").delete("/v25.0/comment-9", { reason: "cleanup" });
+
+    const [url, init] = httpMock.mock.calls[0];
+    expect(url.searchParams.get("reason")).toBe("cleanup");
+    expect(url.searchParams.get("access_token")).toBe("token");
+    expect(init?.method).toBe("DELETE");
+    expect(init?.allowRouteRetry).toBe(false);
   });
 });
