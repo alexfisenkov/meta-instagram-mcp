@@ -98,7 +98,12 @@ describe("Instagram extension service worker protocol", () => {
     const task = await approvedTask();
     const authority = await approvalAuthority();
     const valid = authority.sign(task);
-    const forged = { ...valid, signature: `${valid.signature.slice(0, -1)}${valid.signature.endsWith("A") ? "B" : "A"}` };
+    const forgedBytes = Buffer.from(valid.signature, "base64url");
+    forgedBytes[0] = forgedBytes[0]! ^ 1;
+    const forged = { ...valid, signature: forgedBytes.toString("base64url") };
+    expect(verifyUiApproval(task, forged, authority.publicKey, { bridgeId: task.bridgeId, source: "browser" })).toBe(false);
+    expect(verifyUiApproval({ ...task, payload: { text: "Different text" } }, valid, authority.publicKey,
+      { bridgeId: task.bridgeId, source: "browser" })).toBe(false);
     const client = { register: vi.fn(async () => ({ bridgeId: task.bridgeId })), heartbeat: vi.fn(async () => {}),
       poll: vi.fn(async () => [task]), submit: vi.fn(async () => {}) };
     const input = new PassThrough();
