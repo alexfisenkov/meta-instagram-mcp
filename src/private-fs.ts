@@ -61,14 +61,22 @@ if ($env:INSTAGRAM_MCP_PRIVATE_FS_OPERATION -eq 'protect') {
 Write-Stage 'GET_ACL'
 $actual = Get-Acl -LiteralPath $path
 Write-Stage 'ACL_READ'
+if (-not $actual.AreAccessRulesProtected) { throw 'Private path access rules are not protected.' }
 $rules = $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
 Write-Stage 'RULES_READ'
 $allowedAllows = @{}
 foreach ($rule in $rules) {
+  $sid = $rule.IdentityReference.Value
+  if ($sid -notin $allowed -or $rule.IsInherited) { throw 'Private path grants access to another identity.' }
   if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
-    $sid = $rule.IdentityReference.Value
-    if ($sid -notin $allowed) { throw 'Private path grants access to another identity.' }
+    if ($rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+      throw 'Private path is missing a full-control access rule.'
+    }
     $allowedAllows[$sid] = $true
+  } elseif ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Deny) {
+    throw 'Private path contains an unsupported access rule.'
+  } else {
+    throw 'Private path denies access to a required identity.'
   }
 }
 foreach ($sid in $allowed) {
@@ -175,6 +183,7 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
   if (!systemRoot) throw new Error("Windows private filesystem support is unavailable.");
   const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+  const psModulePath = Object.entries(process.env).find(([name]) => name.toLowerCase() === "psmodulepath")?.[1];
   try {
     execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT], {
       encoding: "utf8",
@@ -184,6 +193,7 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
       env: {
         SystemRoot: systemRoot,
         WINDIR: systemRoot,
+        ...(psModulePath ? { PSModulePath: psModulePath } : {}),
         INSTAGRAM_MCP_PRIVATE_FS_PATH: path,
         INSTAGRAM_MCP_PRIVATE_FS_OPERATION: operation,
       },
