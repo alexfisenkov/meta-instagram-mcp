@@ -35,7 +35,7 @@ const PRIORITY: ReadonlyArray<SourceProvider["source"]> = ["api", "browser", "ph
 
 /** Bounded read-only fallback. Observations stay attributed; this router never merges records. */
 export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? (process.platform === "win32" ? 30_000 : 5_000);
   const maxProviders = options.maxProviders ?? PRIORITY.length;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error("invalid source router timeout");
   if (!Number.isInteger(maxProviders) || maxProviders < 1 || maxProviders > PRIORITY.length) throw new Error("invalid source router provider limit");
