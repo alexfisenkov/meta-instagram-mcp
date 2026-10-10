@@ -182,6 +182,14 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(clicks).toBe(1);
   });
 
+  it("does not treat an out-of-main pre-click node moved into the new main as fresh", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ outOfMainStaleMessageMoved: true, loadMessages: false, readDeadlineMs: 250 });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"],
+      errors: [{ code: "task_deadline_expired" }] });
+    expect(conversation.data?.messages).toBeUndefined();
+    expect(clicks).toBe(1);
+  });
+
   it("fails closed on ambiguous Direct card groups and stale or switched-account row refs", async () => {
     const ambiguous = await runInboxRowContractFixture({ separateGroups: true, skipRead: true });
     expect(ambiguous.inbox).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "inbox_rows_ambiguous" }] });
@@ -396,12 +404,13 @@ async function runFixture(file: string, url: string, operation: Record<string, u
 
 async function runInboxRowContractFixture(options: { shellOnly?: boolean; separateGroups?: boolean; skipRead?: boolean; removeBeforeRead?: boolean;
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
-  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean } = {}) {
+  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
   page.document.close();
   let staleToReveal: HTMLElement | undefined;
+  let staleToMove: HTMLElement | undefined;
   if (options.preexistingStaleMessage || options.hiddenStaleMessageRevealed) {
     const stale = page.document.createElement("div");
     stale.setAttribute("data-message-id", "stale-pre-click");
@@ -410,6 +419,15 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
     makeVisible(stale);
     if (options.hiddenStaleMessageRevealed) stale.style.display = "none";
     if (options.hiddenStaleMessageRevealed) staleToReveal = stale;
+  }
+  if (options.outOfMainStaleMessageMoved) {
+    const outside = page.document.createElement("aside");
+    staleToMove = page.document.createElement("div");
+    staleToMove.setAttribute("data-mid", "stale-outside-main");
+    staleToMove.textContent = "Stale outside main";
+    outside.append(staleToMove);
+    page.document.body.append(outside);
+    makeVisible(staleToMove);
   }
   let clicks = 0;
   const rows: HTMLElement[] = [];
@@ -432,6 +450,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
           clicks++;
           page.history.pushState({}, "", "/direct/t/observed-thread-7/");
           if (staleToReveal) staleToReveal.style.display = "";
+          if (staleToMove) page.document.querySelector("main")?.append(staleToMove);
           if (options.loadMessages !== false) {
             const message = page.document.createElement("div");
             message.setAttribute("data-message-id", "msg-1");

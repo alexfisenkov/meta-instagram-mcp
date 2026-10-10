@@ -148,9 +148,7 @@
   }
 
   function allThreadMessageNodes() {
-    const main = document.querySelector("main");
-    if (!main) return [];
-    return Array.from(main.querySelectorAll("[data-message-id], [data-mid]"));
+    return Array.from(document.querySelectorAll("[data-message-id], [data-mid]"));
   }
 
   function readSideEffectFailure(accountBinding, availability, message, code) {
