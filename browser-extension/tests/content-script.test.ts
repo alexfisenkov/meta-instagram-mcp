@@ -130,11 +130,12 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(item).toMatchObject({ unread: "unknown", unanswered: "unknown", target: { accountBinding } });
     expect(item.target.explicitOwnerRef).toMatch(/^browser-inbox-row:/);
     expect(item).not.toHaveProperty("nativeId");
-    expect(conversation).toMatchObject({ availability: "ready", source: "browser", sideEffects: ["may_mark_seen"],
-      data: { threadNativeId: "observed-thread-7", messages: [{ nativeId: "msg-1", text: "One message" }] } });
+    expect(conversation).toMatchObject({ availability: "ready", source: "browser", nativeRef: item.target.explicitOwnerRef, sideEffects: ["may_mark_seen"],
+      data: { messages: [{ nativeId: "msg-1", text: "One message" }] } });
+    expect(conversation.data).not.toHaveProperty("threadNativeId");
     expect(clicks).toBe(1);
     expect(url).toBe("https://www.instagram.com/direct/t/observed-thread-7/");
-    expect(conversationAgain).toMatchObject({ availability: "ready", data: { threadNativeId: "observed-thread-7" } });
+    expect(conversationAgain).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "msg-1" }] } });
   });
 
   it("does not reuse an opened row ref to navigate to a changed conversation route", async () => {
@@ -224,6 +225,8 @@ describe("Instagram content script against DOM fixtures", () => {
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/", settings: { disableJavaScriptEvaluation: false } });
     page.document.write('<!doctype html><html><body><main><div data-message-id="current-message">Current conversation message</div><div data-mid="hidden-message" style="display:none">Hidden stale message</div></main><aside><div data-message-id="other-thread-message">Other thread message</div></aside></body></html>');
     page.document.close();
+    makeVisible(page.document.querySelector("main")!);
+    makeVisible(page.document.querySelector("aside")!);
     for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
     const hidden = page.document.querySelector('[data-mid="hidden-message"]') as HTMLElement;
     hidden.style.display = "none";
@@ -238,10 +241,58 @@ describe("Instagram content script against DOM fixtures", () => {
     } finally { page.happyDOM.abort(); }
   });
 
+  it("keeps visible role-article history events separate from ordinary messages", async () => {
+    const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/", settings: { disableJavaScriptEvaluation: false } });
+    page.document.write('<!doctype html><html><body><main role="main"><div role="article">Older history is unavailable</div><div role="article">A story was shared</div></main></body></html>');
+    page.document.close();
+    makeVisible(page.document.querySelector("main")!);
+    for (const node of page.document.querySelectorAll('div[role="article"]')) makeVisible(node);
+    installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
+    let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+    Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+    page.eval(contentScript);
+    try {
+      const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        operation: { op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 2 } });
+      expect(result).toMatchObject({ availability: "ready", coverage: "partial", historyCompleteness: "unknown",
+        data: { messages: [], visibleEntries: [{ text: "Older history is unavailable", type: "unknown" }, { text: "A story was shared", type: "unknown" }] } });
+      expect(JSON.stringify(result.data.visibleEntries)).not.toMatch(/nativeId|author|timestamp|direction/i);
+    } finally { page.happyDOM.abort(); }
+  });
+
+  it("reads only fresh visible event entries created after the selected row opens", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ loadMessages: false, loadEventEntries: true });
+    expect(conversation).toMatchObject({ availability: "ready", coverage: "partial", historyCompleteness: "unknown",
+      sideEffects: ["may_mark_seen"], data: { messages: [], visibleEntries: [
+        { text: "Older history is unavailable", type: "unknown" }, { text: "A story was shared", type: "unknown" }
+      ] } });
+    expect(conversation.data).not.toHaveProperty("threadNativeId");
+    expect(clicks).toBe(1);
+  });
+
+  it("fails closed when multiple semantic thread mains contain role-article entries", async () => {
+    const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/", settings: { disableJavaScriptEvaluation: false } });
+    page.document.write('<!doctype html><html><body><main role="main"><div role="article">First pane</div></main><main role="main"><div role="article">Second pane</div></main></body></html>');
+    page.document.close();
+    for (const main of page.document.querySelectorAll("main")) makeVisible(main);
+    for (const node of page.document.querySelectorAll('div[role="article"]')) makeVisible(node);
+    installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
+    let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+    Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+    page.eval(contentScript);
+    try {
+      const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        operation: { op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 2 } });
+      expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "conversation_content_unclassified" }] });
+      expect(result.data).toBeUndefined();
+    } finally { page.happyDOM.abort(); }
+  });
+
   it("scrolls the exact selected thread by the bounded older-history page budget", async () => {
     const html = await readFile(resolve(root, "browser-extension/tests/fixtures/thread.html"), "utf8");
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
     page.document.write(html); page.document.close();
+    makeVisible(page.document.querySelector("main")!);
     for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
     installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
     const scroller = page.document.querySelector('[role="log"]') as HTMLElement;
@@ -292,6 +343,7 @@ describe("Instagram content script against DOM fixtures", () => {
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
     page.document.write(html);
     page.document.close();
+    makeVisible(page.document.querySelector("main")!);
     for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
     installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
     const form = page.document.createElement("form");
@@ -385,6 +437,7 @@ async function runFixture(file: string, url: string, operation: Record<string, u
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write(html);
   page.document.close();
+  makeVisible(page.document.querySelector("main")!);
   for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
   installOwnProfileControlFixture(page, url);
   let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
@@ -404,11 +457,13 @@ async function runFixture(file: string, url: string, operation: Record<string, u
 
 async function runInboxRowContractFixture(options: { shellOnly?: boolean; separateGroups?: boolean; skipRead?: boolean; removeBeforeRead?: boolean;
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
-  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean } = {}) {
+  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean;
+  loadEventEntries?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
   page.document.close();
+  makeVisible(page.document.querySelector("main")!);
   let staleToReveal: HTMLElement | undefined;
   let staleToMove: HTMLElement | undefined;
   if (options.preexistingStaleMessage || options.hiddenStaleMessageRevealed) {
@@ -451,6 +506,16 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
           page.history.pushState({}, "", "/direct/t/observed-thread-7/");
           if (staleToReveal) staleToReveal.style.display = "";
           if (staleToMove) page.document.querySelector("main")?.append(staleToMove);
+          if (options.loadEventEntries) {
+            page.document.querySelector("main")?.setAttribute("role", "main");
+            for (const text of ["Older history is unavailable", "A story was shared"]) {
+              const entry = page.document.createElement("div");
+              entry.setAttribute("role", "article");
+              entry.textContent = text;
+              page.document.querySelector("main")?.append(entry);
+              makeVisible(entry);
+            }
+          }
           if (options.loadMessages !== false) {
             const message = page.document.createElement("div");
             message.setAttribute("data-message-id", "msg-1");

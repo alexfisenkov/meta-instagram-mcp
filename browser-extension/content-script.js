@@ -142,13 +142,24 @@
   }
 
   function threadMessageNodes() {
-    const main = document.querySelector("main");
+    const main = uniqueVisibleMain();
     if (!main) return [];
     return Array.from(main.querySelectorAll("[data-message-id], [data-mid]")).filter(isVisible);
   }
 
-  function allThreadMessageNodes() {
-    return Array.from(document.querySelectorAll("[data-message-id], [data-mid]"));
+  function threadEventEntryNodes() {
+    const mains = Array.from(document.querySelectorAll('main[role="main"]')).filter(isVisible);
+    if (mains.length !== 1) return [];
+    return Array.from(mains[0].querySelectorAll('div[role="article"]')).filter(isVisible);
+  }
+
+  function allThreadCandidateNodes() {
+    return Array.from(document.querySelectorAll("[data-message-id], [data-mid], div[role='article']"));
+  }
+
+  function uniqueVisibleMain() {
+    const mains = Array.from(document.querySelectorAll("main")).filter(isVisible);
+    return mains.length === 1 ? mains[0] : undefined;
   }
 
   function readSideEffectFailure(accountBinding, availability, message, code) {
@@ -190,7 +201,7 @@
         if (taskDeadlineReached(taskExpiresAt)) {
           return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
         }
-        const priorMessages = new Set(allThreadMessageNodes());
+        const priorMessages = new Set(allThreadCandidateNodes());
         record.navigationStarted = true;
         try { record.row.click(); }
         catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
@@ -202,10 +213,10 @@
         }
         record.openedNativeId = routeId.slice(0, 256);
         expectedId = record.openedNativeId;
-        const loaded = await waitUntil(() => threadMessageNodes().some((node) => !priorMessages.has(node)), 2_500, taskExpiresAt);
+        const loaded = await waitUntil(() => [...threadMessageNodes(), ...threadEventEntryNodes()].some((node) => !priorMessages.has(node)), 2_500, taskExpiresAt);
         if (!loaded) return readSideEffectFailure(accountBinding, "offline", "new conversation messages did not load within the bounded read",
           taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_content_not_loaded");
-        operation.freshMessageNodes = threadMessageNodes().filter((node) => !priorMessages.has(node));
+        operation.freshContentNodes = [...threadMessageNodes(), ...threadEventEntryNodes()].filter((node) => !priorMessages.has(node));
       }
     } else {
       return failure(accountBinding, "needs_selection", "the conversation reference is not supported by this browser reader");
@@ -227,7 +238,10 @@
     const limit = boundedInteger(operation.limit, 1, MAX_LIMIT, 50);
     const messages = [];
     const seen = new Set();
-    const messageNodes = Array.isArray(operation.freshMessageNodes) ? operation.freshMessageNodes : threadMessageNodes();
+    const currentMessageNodes = threadMessageNodes();
+    const messageNodes = Array.isArray(operation.freshContentNodes)
+      ? operation.freshContentNodes.filter((node) => node.matches?.("[data-message-id], [data-mid]"))
+      : currentMessageNodes;
     for (const node of messageNodes) {
       const id = node.getAttribute("data-message-id") || node.getAttribute("data-mid");
       if (!id || seen.has(id)) continue;
@@ -238,10 +252,30 @@
       messages.push({ nativeId: id.slice(0, 256), text: cleanText(node.innerText || node.textContent, 2_000), direction, timestamp: node.getAttribute("data-timestamp") || "unknown" });
       if (messages.length >= limit) break;
     }
-    const data = { username, threadNativeId: expectedId, messages, unread: readUnreadState(), unanswered: "unknown",
+    const currentEventNodes = threadEventEntryNodes();
+    const eventCandidates = Array.isArray(operation.freshContentNodes)
+      ? operation.freshContentNodes.filter((node) => node.matches?.('div[role="article"]'))
+      : currentEventNodes;
+    const visibleEntries = [];
+    const remainingLimit = Math.max(0, limit - messages.length);
+    for (const node of eventCandidates.slice(0, remainingLimit)) {
+      const text = cleanText(node.innerText || node.textContent, 2_000);
+      if (text) visibleEntries.push({ text, type: "unknown" });
+    }
+    if (!messages.length && !visibleEntries.length) {
+      return readSideEffectFailure(accountBinding, "offline", "no supported visible message or event entries were found", "conversation_content_unclassified");
+    }
+    const itemCount = messages.length + visibleEntries.length;
+    const hasMoreVisibleItems = currentMessageNodes.length + currentEventNodes.length > limit;
+    const coverage = hasMoreVisibleItems || itemCount >= limit ? "partial" : "unknown";
+    const historyCompleteness = messages.length ? "limited" : "unknown";
+    const data = { username, ...(typeof target.nativeId === "string" ? { threadNativeId: expectedId } : {}), messages,
+      ...(visibleEntries.length ? { visibleEntries } : {}), unread: readUnreadState(), unanswered: "unknown",
       olderAvailable: Boolean(scroller && scroller.scrollTop > 0) };
     const contextHash = await digest(stableStringify({ accountBinding, target: { nativeId: expectedId }, data }));
-    return observation(accountBinding, { ...data, contextHash }, "ready", messages.length >= limit ? "partial" : "unknown", "limited", ["may_mark_seen"], { sideEffects: ["may_mark_seen"] });
+    const result = observation(accountBinding, { ...data, contextHash }, "ready", coverage, historyCompleteness, ["may_mark_seen"], { sideEffects: ["may_mark_seen"] });
+    if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)) result.nativeRef = target.explicitOwnerRef;
+    return result;
   }
 
   async function readComments(accountBinding, username, operation) {
