@@ -35,6 +35,9 @@ let reconnectScheduled = false;
 const inFlightWrites = new Set();
 const writeApprovals = new Map();
 const inboxRowTabs = new Map();
+const knownManagedReadTabs = new Set();
+const revokedManagedReadTabs = new Set();
+const activationRevocations = new Map();
 let pendingBootstrap;
 
 chrome.runtime.onStartup.addListener(connectNative);
@@ -45,6 +48,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (!nativePort) connectNative();
 });
 connectNative();
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  if (!Number.isInteger(activeInfo?.tabId)) return;
+  const tabId = activeInfo.tabId;
+  const revocation = revokeManagedReadSurface(tabId);
+  activationRevocations.set(tabId, revocation);
+  void revocation.finally(() => {
+    if (activationRevocations.get(tabId) === revocation) activationRevocations.delete(tabId);
+  });
+});
 
 function connectNative() {
   if (nativePort) return;
@@ -129,6 +142,11 @@ async function onNativeMessage(message, sourcePort = nativePort) {
     sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected", "browser_tab_selection_failed"), sourcePort, assignment);
     return;
   }
+  if (tab.managedReadSurface && !await verifyManagedReadSurfaceForDispatch(task, tab.id, { sourcePort, assignment, isCurrent })) {
+    if (!isCurrent()) return;
+    sendResult(task, unavailable("needs_selection", "the managed read surface is no longer owned by this browser session", "browser_managed_surface_unavailable"), sourcePort, assignment);
+    return;
+  }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
     sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"), sourcePort, assignment);
     return;
@@ -153,12 +171,17 @@ async function onNativeMessage(message, sourcePort = nativePort) {
       sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"), sourcePort, assignment);
       return;
     }
+    if (tab.managedReadSurface && !await verifyManagedReadSurfaceForDispatch(task, tab.id, { sourcePort, assignment, isCurrent })) {
+      if (!isCurrent()) return;
+      sendResult(task, unavailable("needs_selection", "the managed read surface was activated before browser data dispatch", "browser_managed_surface_active"), sourcePort, assignment);
+      return;
+    }
     const result = await chrome.tabs.sendMessage(tab.id, {
       kind: task.kind === "write" ? "execute" : "observe", operation,
       accountBinding, expectedAccountHandle, allowWrites, approval: message.approval, taskExpiresAt: task.expiresAt
     });
     if (!isCurrent()) return;
-    if (task.kind === "read" && task.operation === "inbox.list") rememberInboxRowTabs(task, result, tab.id);
+    if (task.kind === "read" && task.operation === "inbox.list") rememberInboxRowTabs(task, result, tab.id, Boolean(tab.managedReadSurface));
     sendResult(task, result, sourcePort, assignment);
   } catch {
     if (!isCurrent()) return;
@@ -210,7 +233,7 @@ async function selectUniqueTab(task, context) {
     if (!selected || selected.expiresAt <= Date.now() || selected.bridgeId !== task.bridgeId || selected.accountBinding !== task.accountBinding) {
       return tabSelectionFailure("browser_bootstrap_not_eligible", "the assigned browser tab is not available for this read reference");
     }
-    eligible = eligible.filter((tab) => tab.id === selected.tabId);
+    eligible = eligible.filter((tab) => tab.id === selected.tabId).map((tab) => selected.managedReadSurface ? { ...tab, managedReadSurface: true } : tab);
   }
   if (["inbox.list", "account.inspect"].includes(task.operation) && task.kind === "read" && task.targetRefs.length === 0 &&
       task.accountBinding === context.assignment.accountBinding) {
@@ -250,15 +273,19 @@ async function selectUniqueTab(task, context) {
 function tabSelectionFailure(code, message) { return { selectionFailure: { code, message } }; }
 
 async function resolveManagedReadSurface(task, context) {
-  let stored;
-  try { stored = await chrome.storage.session.get(MANAGED_INBOX_SESSION_KEY); }
-  catch { return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface could not be verified" }; }
-  if (!isRecord(stored)) return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface could not be verified" };
-  const marker = stored[MANAGED_INBOX_SESSION_KEY];
-  if (marker === undefined) return { found: false };
-  if (!isRecord(marker) || !Number.isInteger(marker.tabId) || !isBridgeId(marker.bridgeId) || marker.bridgeId !== task.bridgeId ||
-      marker.accountBinding !== task.accountBinding || marker.accountBinding !== context.assignment.accountBinding) {
+  const read = await readManagedSurfaceMarker();
+  if (!read.ok) return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface could not be verified" };
+  if (read.marker === undefined) return { found: false };
+  const marker = read.marker;
+  if (!managedSurfaceMarkerMatches(marker, task, context.assignment)) {
     return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface does not match this browser assignment" };
+  }
+  knownManagedReadTabs.add(marker.tabId);
+  await activationRevocations.get(marker.tabId);
+  const currentRead = await readManagedSurfaceMarker();
+  if (!currentRead.ok || !managedSurfaceMarkerMatches(currentRead.marker, task, context.assignment) ||
+      currentRead.marker.state === "revoked" || revokedManagedReadTabs.has(marker.tabId)) {
+    return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface was taken over and is no longer owned" };
   }
   if (pendingBootstrap) {
     return { found: true, code: "browser_managed_surface_busy", message: "the managed read surface is already preparing a read" };
@@ -270,9 +297,10 @@ async function resolveManagedReadSurface(task, context) {
       (!isDirectInboxUrl(tab.url) && !isDirectThreadUrl(tab.url))) {
     return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface is not on a supported Direct route" };
   }
-  if (isDirectInboxUrl(tab.url)) return { found: true, tab };
-  if (task.operation !== "inbox.list") return { found: true, tab };
+  if (isDirectInboxUrl(tab.url)) return { found: true, tab: markManagedReadSurface(tab) };
+  if (task.operation !== "inbox.list") return { found: true, tab: markManagedReadSurface(tab) };
   if (tab.active !== false) {
+    await revokeManagedReadSurface(tab.id);
     return { found: true, code: "browser_managed_surface_active", message: "the managed read surface is active and will not be redirected" };
   }
   const pending = { sourcePort: context.sourcePort, bridgeId: task.bridgeId, accountBinding: context.assignment.accountBinding,
@@ -285,7 +313,12 @@ async function resolveManagedReadSurface(task, context) {
     if (!context.isCurrent() || Date.parse(task.expiresAt) <= Date.now()) {
       return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface is no longer available" };
     }
-    const updated = await chrome.tabs.update(tab.id, { url: DIRECT_INBOX_BOOTSTRAP_URL, active: false });
+    const latest = await getVerifiedManagedTab(task, tab.id, context, "thread");
+    if (!latest || latest.active !== false) {
+      await revokeManagedReadSurface(tab.id);
+      return { found: true, code: "browser_managed_surface_active", message: "the managed read surface changed ownership before navigation" };
+    }
+    const updated = await chrome.tabs.update(tab.id, { url: DIRECT_INBOX_BOOTSTRAP_URL });
     if (!context.isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) {
       return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface preparation was cancelled" };
     }
@@ -298,13 +331,67 @@ async function resolveManagedReadSurface(task, context) {
     if (!context.isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now() || !isDirectInboxUrl(loaded?.url)) {
       return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface did not reach the Inbox before the task deadline" };
     }
-    return { found: true, tab: loaded };
+    const afterNavigation = await getVerifiedManagedTab(task, tab.id, context, "inbox");
+    if (!afterNavigation || afterNavigation.active !== false) {
+      if (afterNavigation?.active === true) await revokeManagedReadSurface(tab.id);
+      return { found: true, code: "browser_managed_surface_active", message: "the managed read surface changed ownership during navigation" };
+    }
+    return { found: true, tab: markManagedReadSurface(afterNavigation) };
   } catch {
     return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface could not be prepared" };
   } finally {
     pending.completed = true;
     if (pendingBootstrap === pending) pendingBootstrap = undefined;
   }
+}
+
+async function readManagedSurfaceMarker() {
+  try {
+    const stored = await chrome.storage.session.get(MANAGED_INBOX_SESSION_KEY);
+    return isRecord(stored) ? { ok: true, marker: stored[MANAGED_INBOX_SESSION_KEY] } : { ok: false, marker: undefined };
+  } catch { return { ok: false, marker: undefined }; }
+}
+
+function managedSurfaceMarkerMatches(marker, task, assignment) {
+  return isRecord(marker) && Number.isInteger(marker.tabId) &&
+    (marker.state === undefined || ["owned", "revoked"].includes(marker.state)) &&
+    marker.accountBinding === task.accountBinding && marker.accountBinding === assignment.accountBinding;
+}
+
+function markManagedReadSurface(tab) { return { ...tab, managedReadSurface: true }; }
+
+async function getVerifiedManagedTab(task, tabId, context, route) {
+  await activationRevocations.get(tabId);
+  if (!context.isCurrent() || Date.parse(task.expiresAt) <= Date.now() || revokedManagedReadTabs.has(tabId)) return undefined;
+  const read = await readManagedSurfaceMarker();
+  if (!read.ok || !managedSurfaceMarkerMatches(read.marker, task, context.assignment) ||
+      read.marker.tabId !== tabId || read.marker.state === "revoked") return undefined;
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); } catch { return undefined; }
+  if (!context.isCurrent() || Date.parse(task.expiresAt) <= Date.now() || revokedManagedReadTabs.has(tabId)) return undefined;
+  if (!isRecord(tab) || tab.id !== tabId || tab.active !== false || !isInstagramUrl(tab.url)) {
+    if (tab?.active === true) await revokeManagedReadSurface(tabId);
+    return undefined;
+  }
+  if (route === "thread" && !isDirectThreadUrl(tab.url)) return undefined;
+  if (route === "inbox" && !isDirectInboxUrl(tab.url)) return undefined;
+  if (route === "direct" && !isDirectInboxUrl(tab.url) && !isDirectThreadUrl(tab.url)) return undefined;
+  return tab;
+}
+
+async function verifyManagedReadSurfaceForDispatch(task, tabId, context) {
+  return Boolean(await getVerifiedManagedTab(task, tabId, context, task.operation === "inbox.list" ? "inbox" : "direct"));
+}
+
+async function revokeManagedReadSurface(tabId) {
+  if (knownManagedReadTabs.has(tabId)) revokedManagedReadTabs.add(tabId);
+  const read = await readManagedSurfaceMarker();
+  if (!read.ok || !isRecord(read.marker) || read.marker.tabId !== tabId) return;
+  knownManagedReadTabs.add(tabId);
+  revokedManagedReadTabs.add(tabId);
+  if (read.marker.state === "revoked") return;
+  try { await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: { ...read.marker, state: "revoked" } }); }
+  catch { /* this worker stays fail-closed; session persistence may recover on a later read */ }
 }
 
 function canBootstrapReadSurface(task, assignment) {
@@ -370,7 +457,7 @@ async function bootstrapReadSurface(task, context) {
     pending.cancelLoad = undefined;
     if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
     if (!loaded) return tabSelectionFailure("browser_bootstrap_load_failed", "the fixed Direct Inbox tab did not finish loading");
-    return loaded;
+    return markManagedReadSurface(loaded);
   }).catch(() => undefined).finally(() => {
     pending.completed = true;
     if (!pending.createPending && pendingBootstrap === pending) pendingBootstrap = undefined;
@@ -445,7 +532,7 @@ function isCompletedBootstrapTab(tab) {
   return tab?.status === "complete" && isInstagramUrl(tab.url) && (!tab.pendingUrl || isInstagramUrl(tab.pendingUrl));
 }
 
-function rememberInboxRowTabs(task, result, tabId) {
+function rememberInboxRowTabs(task, result, tabId, managedReadSurface = false) {
   if (!Number.isInteger(tabId) || !isRecord(result) || result.accountBinding !== task.accountBinding || !isRecord(result.data) || !Array.isArray(result.data.items)) return;
   for (const [reference, selected] of inboxRowTabs) {
     if (selected.bridgeId === task.bridgeId && selected.accountBinding === task.accountBinding && selected.tabId === tabId) inboxRowTabs.delete(reference);
@@ -454,7 +541,7 @@ function rememberInboxRowTabs(task, result, tabId) {
     if (!isRecord(item) || !isRecord(item.target)) continue;
     const reference = item.target.explicitOwnerRef;
     if (typeof reference !== "string" || !reference.startsWith("browser-inbox-row:") || item.target.accountBinding !== task.accountBinding) continue;
-    inboxRowTabs.set(reference, { tabId, bridgeId: task.bridgeId, accountBinding: task.accountBinding, expiresAt: Date.now() + 5 * 60_000 });
+    inboxRowTabs.set(reference, { tabId, bridgeId: task.bridgeId, accountBinding: task.accountBinding, managedReadSurface, expiresAt: Date.now() + 5 * 60_000 });
   }
   while (inboxRowTabs.size > 1_000) inboxRowTabs.delete(inboxRowTabs.keys().next().value);
 }
@@ -558,15 +645,12 @@ function isDirectInboxUrl(value) {
 async function storeManagedSurface(tab, task) {
   try {
     await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: {
-      tabId: tab.id, bridgeId: task.bridgeId, accountBinding: task.accountBinding
+      tabId: tab.id, accountBinding: task.accountBinding, state: "owned"
     } });
+    knownManagedReadTabs.add(tab.id);
+    revokedManagedReadTabs.delete(tab.id);
     return true;
   } catch {
-    let current;
-    try { current = await chrome.tabs.get(tab.id); } catch { current = undefined; }
-    if (current?.id === tab.id && current.active === false && isDirectInboxUrl(current.url)) {
-      try { await chrome.tabs.remove(tab.id); } catch { /* leave the tab and fail closed */ }
-    }
     return false;
   }
 }
