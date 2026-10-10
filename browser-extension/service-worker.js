@@ -48,7 +48,7 @@ function connectNative() {
   try {
     const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
     nativePort = port;
-    port.onMessage.addListener(onNativeMessage);
+    port.onMessage.addListener((message) => onNativeMessage(message, port));
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
       nativePort = undefined;
@@ -75,8 +75,8 @@ function scheduleReconnect() {
   chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delayMs / 60_000 });
 }
 
-async function onNativeMessage(message) {
-  if (!isRecord(message)) return;
+async function onNativeMessage(message, sourcePort = nativePort) {
+  if (!sourcePort || sourcePort !== nativePort || !isRecord(message)) return;
   if (message.kind === "ready" && message.version === 1 && typeof message.accountBinding === "string" &&
       /^[a-zA-Z0-9:_-]{1,128}$/.test(message.accountBinding) && typeof message.expectedAccountHandle === "string" &&
       /^[a-zA-Z0-9._]{1,30}$/.test(message.expectedAccountHandle) && typeof message.allowWrites === "boolean") {
@@ -92,12 +92,14 @@ async function onNativeMessage(message) {
   if (message.kind === "heartbeat") return;
   if (message.kind !== "task" || !bridgeReady || !validTask(message.task)) return;
   const task = message.task;
+  const assignment = { accountBinding, expectedAccountHandle, allowWrites };
+  const isCurrent = () => isCurrentAssignment(sourcePort, task, assignment);
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI execution", "task_deadline_expired"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI execution", "task_deadline_expired"), sourcePort, assignment);
     return;
   }
   if (task.kind === "write" && (!allowWrites || !message.approval || !nativePort || !isApproval(task, message.approval))) {
-    sendResult(task, { status: "FAILED", reason: "the assigned browser host did not approve this write lease" });
+    sendResult(task, { status: "FAILED", reason: "the assigned browser host did not approve this write lease" }, sourcePort, assignment);
     return;
   }
   if (task.kind === "write" && inFlightWrites.has(task.id)) return;
@@ -106,50 +108,69 @@ async function onNativeMessage(message) {
     writeApprovals.set(task.id, message.approval);
   }
   const tab = await selectUniqueTab(task);
+  if (!isCurrent()) return;
   if (!tab) {
-    sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected"));
+    sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected"), sourcePort, assignment);
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"), sourcePort, assignment);
     return;
   }
   const operation = taskToOperation(task, message.approval);
   if (!operation) {
-    sendResult(task, unavailable("unsupported", "the operation is not allowlisted"));
+    sendResult(task, unavailable("unsupported", "the operation is not allowlisted"), sourcePort, assignment);
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"), sourcePort, assignment);
     return;
   }
   try {
-    if (!await ensureContentScript(tab.id)) {
-      sendResult(task, unavailable("unsupported_ui_version", "the fixed content script did not answer the readiness ping", "content_script_unavailable"));
+    if (!await ensureContentScript(tab.id, isCurrent)) {
+      if (!isCurrent()) return;
+      sendResult(task, unavailable("unsupported_ui_version", "the fixed content script did not answer the readiness ping", "content_script_unavailable"), sourcePort, assignment);
+      return;
+    }
+    if (!isCurrent()) return;
+    if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
+      sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"), sourcePort, assignment);
       return;
     }
     const result = await chrome.tabs.sendMessage(tab.id, {
       kind: task.kind === "write" ? "execute" : "observe", operation,
       accountBinding, expectedAccountHandle, allowWrites, approval: message.approval, taskExpiresAt: task.expiresAt
     });
+    if (!isCurrent()) return;
     if (task.kind === "read" && task.operation === "inbox.list") rememberInboxRowTabs(task, result, tab.id);
-    sendResult(task, result);
+    sendResult(task, result, sourcePort, assignment);
   } catch {
-    sendResult(task, unavailable("unsupported_ui_version", "the fixed content script is not available in the selected tab"));
+    if (!isCurrent()) return;
+    sendResult(task, unavailable("unsupported_ui_version", "the fixed content script is not available in the selected tab"), sourcePort, assignment);
   }
 }
 
-async function ensureContentScript(tabId) {
+async function ensureContentScript(tabId, isCurrent = () => true) {
   try {
     const response = await chrome.tabs.sendMessage(tabId, { kind: "ping" });
+    if (!isCurrent()) return false;
     return isContentScriptPong(response);
   } catch (error) {
+    if (!isCurrent()) return false;
     if (!isMissingMessageReceiver(error)) throw error;
   }
 
   await chrome.scripting.executeScript({ target: { tabId }, files: ["content-script.js"] });
+  if (!isCurrent()) return false;
   const response = await chrome.tabs.sendMessage(tabId, { kind: "ping" });
+  if (!isCurrent()) return false;
   return isContentScriptPong(response);
+}
+
+function isCurrentAssignment(sourcePort, task, assignment) {
+  return sourcePort === nativePort && bridgeReady && accountBinding === task.accountBinding &&
+    accountBinding === assignment.accountBinding && expectedAccountHandle === assignment.expectedAccountHandle &&
+    allowWrites === assignment.allowWrites;
 }
 
 function isContentScriptPong(value) {
@@ -239,14 +260,16 @@ function taskToOperation(task, approval) {
   return operation;
 }
 
-function sendResult(task, result) {
-  if (!nativePort || !bridgeReady || !isRecord(result)) return;
+function sendResult(task, result, sourcePort = nativePort, assignment = { accountBinding, expectedAccountHandle, allowWrites }) {
+  if (!sourcePort || sourcePort !== nativePort || !bridgeReady || task.accountBinding !== accountBinding ||
+      accountBinding !== assignment.accountBinding || expectedAccountHandle !== assignment.expectedAccountHandle ||
+      allowWrites !== assignment.allowWrites || !isRecord(result)) return;
   if (task.kind === "write") {
     const approval = writeApprovals.get(task.id);
     const mutationResult = ["ACK", "OBSERVED", "OUTCOME_UNKNOWN"].includes(String(result.status)) &&
       approval && result.requestId === approval.requestId && result.contextHash === task.contextHash;
     if (!mutationResult && result.status !== "FAILED") result = { status: "FAILED", reason: "browser did not confirm a guarded semantic action" };
-    nativePort.postMessage({ kind: "result", taskId: task.id, result, contextHash: task.contextHash });
+    sourcePort.postMessage({ kind: "result", taskId: task.id, result, contextHash: task.contextHash });
     writeApprovals.delete(task.id);
     return;
   }
@@ -254,7 +277,7 @@ function sendResult(task, result) {
   if (resultAccount !== accountBinding) {
     result = unavailable("needs_selection", "result account did not match the assigned account");
   }
-  nativePort.postMessage({ kind: "result", taskId: task.id, result, contextHash: task.contextHash });
+  sourcePort.postMessage({ kind: "result", taskId: task.id, result, contextHash: task.contextHash });
 }
 
 function unavailable(availability, message, code = availability) {

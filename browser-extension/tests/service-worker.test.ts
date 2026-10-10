@@ -144,6 +144,60 @@ describe("Instagram extension service worker protocol", () => {
     }));
   });
 
+  it.each(["tab query", "ping", "script injection"])("does not dispatch a task after its native port disconnects during %s", async (stage) => {
+    let markStageStarted!: () => void;
+    let releaseStage!: () => void;
+    const stageStarted = new Promise<void>((resolve) => { markStageStarted = resolve; });
+    const stageGate = new Promise<void>((resolve) => { releaseStage = resolve; });
+    let pingCount = 0;
+    const fixture = workerFixture({
+      onTabsQuery: async () => {
+        if (stage !== "tab query") return [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }];
+        markStageStarted();
+        await stageGate;
+        return [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }];
+      },
+      onSendMessage: async (_tabId, message) => {
+        if (message.kind === "ping") {
+          pingCount++;
+          if (stage === "ping") {
+            markStageStarted();
+            await stageGate;
+          }
+          if (stage === "script injection" && pingCount === 1) {
+            throw new Error("Could not establish connection. Receiving end does not exist.");
+          }
+          return { kind: "pong", version: 1 };
+        }
+        return { availability: "ready", accountBinding, data: { items: [] }, errors: [] };
+      },
+      executeScript: vi.fn(async () => {
+        if (stage === "script injection") {
+          markStageStarted();
+          await stageGate;
+        }
+        return [];
+      })
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const processing = fixture.nativeMessage({ kind: "task", task: {
+      id: `task-disconnect-${stage.replaceAll(" ", "-")}`, kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    await stageStarted;
+    fixture.disconnect(0);
+    await fixture.fireAlarm("instagram-native-reconnect");
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false }, 1);
+    releaseStage();
+    await processing;
+
+    expect(fixture.sendMessage.mock.calls.filter(([, message]) => message.kind === "observe")).toHaveLength(0);
+    if (stage === "script injection") expect(fixture.scripting.executeScript).toHaveBeenCalledOnce();
+    else expect(fixture.scripting.executeScript).not.toHaveBeenCalled();
+    expect(fixture.portMessages.flat().some((message) => message?.kind === "result" && message.taskId === `task-disconnect-${stage.replaceAll(" ", "-")}`)).toBe(false);
+  });
+
   it("binds an ephemeral inbox ref to its originating bridge and selected tab", async () => {
     const rowRef = "browser-inbox-row:opaque-row-ref";
     const fixture = workerFixture({
@@ -353,6 +407,7 @@ function workerFixture(options: {
 } = {}) {
   const listeners: Array<Array<(message: unknown) => unknown>> = [];
   const disconnectListeners: Array<Array<() => void>> = [];
+  const portMessages: unknown[][] = [];
   const alarmListeners: Array<(alarm: { name: string }) => unknown> = [];
   const sendMessage = vi.fn(async (tabId: number, message: any) => {
     if (options.onSendMessage) return options.onSendMessage(tabId, message);
@@ -364,12 +419,18 @@ function workerFixture(options: {
     const portIndex = listeners.length;
     listeners.push([]);
     disconnectListeners.push([]);
+    portMessages.push([]);
+    const portPostMessage = vi.fn((message: unknown) => {
+      portMessages[portIndex]!.push(message);
+      postMessage(message);
+    });
     return {
       onMessage: { addListener: (listener: (message: unknown) => unknown) => listeners[portIndex]!.push(listener) },
-      onDisconnect: { addListener: (listener: () => void) => disconnectListeners[portIndex]!.push(listener) }, postMessage
+      onDisconnect: { addListener: (listener: () => void) => disconnectListeners[portIndex]!.push(listener) }, postMessage: portPostMessage
     };
   });
   const alarms = { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: { addListener: (listener: (alarm: { name: string }) => unknown) => alarmListeners.push(listener) } };
+  const scripting = { executeScript: options.executeScript ?? vi.fn(async () => []) };
   const chrome = {
     runtime: {
       onStartup: { addListener: vi.fn() }, onInstalled: { addListener: vi.fn() },
@@ -379,11 +440,11 @@ function workerFixture(options: {
     tabs: {
       query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
     },
-    scripting: { executeScript: options.executeScript ?? vi.fn(async () => []) }
+    scripting
   };
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Array, Promise, RegExp, String, Number, Boolean });
   return {
-    sendMessage, postMessage, connectNative, alarms,
+    sendMessage, postMessage, connectNative, alarms, scripting, portMessages,
     startupMessages: postMessage.mock.calls.map(([message]) => message),
     nativeMessage: async (message: unknown, portIndex = 0) => { await listeners[portIndex]?.[0]?.(message); },
     disconnect: (portIndex: number) => { for (const listener of disconnectListeners[portIndex] ?? []) listener(); },

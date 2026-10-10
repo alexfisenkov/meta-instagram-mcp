@@ -35,6 +35,8 @@ Browser companion, который уже зарегистрирован, но е
 
 Если очередь содержит выбранный диалог, используйте его `accountBinding` и native ID в `meta_read_source` с `operation: "conversation.read"`. Чтение через browser или phone может пометить открытый диалог просмотренным; результат отдельно сообщает этот возможный side effect. Направление сообщения, непрочитанное состояние и ответ остаются `unknown`, если источник их не подтверждает.
 
+Если browser показывает Direct row cards без native links, используйте только свежий browser `threadRef.explicitOwnerRef` из `meta_read_inbox`. Один лишь native ID или URL не доказывает, что видимые `DIV[role=article]` принадлежат выбранному диалогу; без установленного свежего row-ref proof browser завершит такой event-only read с `needs_selection`. Любая смена route инвалидирует proof и требует нового inbox snapshot.
+
 История ограничена возможностями источника: API использует Graph cursors и ограниченное окно; browser older-history cursor привязан к точному диалогу и ограниченной прокрутке; phone older-history cursor не поддерживается. Cursor одного источника нельзя переносить на другой. Повтор той же страницы должен либо явно сообщить `unsupported_cursor`, либо выполняться источником, который выдал cursor.
 
 `meta_triage_inbox` применяет те же правила чтения Direct. Комментарии включаются только для переданных точных media targets; без них account-wide сканирования комментариев нет.
