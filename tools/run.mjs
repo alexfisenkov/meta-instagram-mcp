@@ -21,6 +21,12 @@ const SUPPORTED_CONFIG_NAMES = new Set([
   "INSTAGRAM_MCP_REMOTE_URL", "INSTAGRAM_MCP_REMOTE_BEARER_TOKEN"
 ]);
 
+export function serverEntrypoint(packageRoot, env = process.env) {
+  const remoteConfigured = [env.INSTAGRAM_MCP_REMOTE_CONFIG, env.INSTAGRAM_MCP_REMOTE_URL, env.INSTAGRAM_MCP_REMOTE_BEARER_TOKEN]
+    .some((value) => typeof value === "string" && value.trim().length > 0);
+  return join(packageRoot, "dist", remoteConfigured ? "cli/remote-proxy.js" : "server.js");
+}
+
 export function defaultConfigDirectory(env = process.env) {
   const home = env.HOME || env.USERPROFILE || homedir();
   const xdg = env.XDG_CONFIG_HOME || join(home, ".config");
@@ -72,7 +78,7 @@ async function startServer() {
   const configDirectory = defaultConfigDirectory();
   try {
     applyExternalConfig(configDirectory);
-    const serverPath = join(packageRoot, "dist", "server.js");
+    const serverPath = serverEntrypoint(packageRoot, process.env);
     if (!existsSync(serverPath)) throw new Error("BUILD_MISSING");
     await runServerProcess(serverPath);
   } catch (error) {

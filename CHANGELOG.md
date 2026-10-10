@@ -1,8 +1,32 @@
 # Changelog
 
-Изменения относятся к публичным возможностям и инструкциям. Кодовый интерфейс сам по себе не означает, что feature опубликована или проверена live.
+Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
-## 0.2.0 — Unreleased
+## 0.2.1
+
+- Подключается ограниченный browser `account.inspect` перед автоматическим Direct read, если bridge зарегистрирован, но ещё не проверил аккаунт.
+- Browser `account.inspect` can verify the owner from the observed unique visible avatar link (outside `nav`/`header`/`aside`/`main`, without `aria-label`/`title`) and own `/accounts/edit/` control when the Direct DOM has no profile link in `nav`; it restores the original tab URL and fails closed on ambiguous or changed identity markers.
+- Browser owner verification reports fixed, value-free stage codes; Native Messaging passes the read-task expiry to the content script, which stops before returning data after its deadline.
+- Native Messaging extension восстанавливает соединение через ограниченный MV3 alarm backoff; browser inbox/comment cursors явно отклоняются, если UI pagination не поддерживается.
+- `tools/run.mjs` выбирает remote stdio proxy по внешней private config и не переключается на local core при ошибке remote. В phone inbox добавляется ограниченная semantic-навигация через exact accessibility IDs с fail-closed для неподтверждённого UI.
+- Unified read router оставляет запас до стандартного 60-секундного MCP request timeout; API Direct triage отменяет текущий GET и прекращает следующие conversation GET в своём ограниченном бюджете, сохраняя недочитанные диалоги как `unknown` и время для companion fallback.
+- Browser Native Host держит task id активным до завершения попытки отправить Hub receipt, чтобы параллельная повторная выдача leased read task не создавала второй semantic read. После rejected receipt Hub может повторно выдать read task; повторное чтение безопасно, а UI writes автоматически не повторяются.
+- Перед browser task extension отправляет пустой readiness ping; только точная ошибка отсутствующего message receiver разрешает один раз внедрить фиксированный `content-script.js` в выбранную Instagram-вкладку. После повторного ping операция отправляется один раз; ошибки/timeout уже отправленной операции не запускают повтор.
+- Общий read deadline теперь передаётся через browser preflight и companion queue. По expiry queued/leased read помечается отменённым в Hub; если браузер уже получил task, service worker не начинает UI-чтение после его expiry. Уже начатое UI-действие отмена не откатывает.
+- Companion readiness selection is pinned to one bridge ID through preflight, status checks, and task enqueue; an expired selected bridge is not silently replaced by another same-account companion.
+- For UI layouts without Direct href rows, the browser reads only visible, uniquely grouped semantic row cards. It returns short-lived bridge/tab/document-bound read-only refs; one explicit conversation.read may open one row and returns unknown rather than empty if the thread does not load. Operation-specific readiness prefers a ready capable same-account bridge; an existing row ref stays pinned to its origin.
+- Layered inbox formatting preserves a bounded visible row preview alongside the browser-only ref; unread/unanswered remain unknown without an exact UI marker.
+- Browser inbox reads also accept the verified Direct sidebar on an already-open thread route. A new row ref must prove a route change from the current thread; only the exact previously proven DOM row/thread/account association can be reused on the same route. One content-script admission guard rejects overlapping UI operations as `browser_ui_busy` instead of allowing navigation reads to race; it does not queue or replay an operation.
+- Conversation reads snapshot every existing message/event candidate before row navigation and parse only newly created visible nodes in the current main. Supported visible entries are returned as bounded `visibleEntries` with `type: unknown`; the reader does not distinguish DM text from system/history events or invent IDs, authors, directions, or timestamps.
+- Browser Native Host and phone companion graceful shutdown now stop new polling, drain admitted startup/poll/task/receipt work, then close their transport or Appium session. This does not cancel or roll back a UI operation already dispatched; writes keep their existing no-retry and unknown-outcome rules.
+- Browser conversation reads with native targets now require fresh same-document/account/route proof established from an explicit inbox row ref; a native ID or URL alone cannot bind visible message or event nodes to the requested thread. Any observed route change invalidates the row proof. After any awaited tab selection, ping or fixed-script injection, the service worker rechecks the originating Native Messaging port before it can dispatch a UI operation; late results from a disconnected port are not sent to a replacement host.
+- When a read-only `account.inspect` or `inbox.list` finds no Instagram tab in the assigned Chrome profile, the extension may create one inactive tab at the fixed Direct Inbox URL and wait for load within the task deadline. Multiple tabs, writes, stale conversation targets, unsupported UI and signed-out state remain fail-closed; no login, cookies or message actions are automated.
+- Fixed value-free browser readiness stages distinguish bootstrap refusal, ambiguous tabs, tab creation failure and load failure; deadline expiry remains `task_deadline_expired`.
+- Операционный runbook различает 27 нативных tools и 18 cloud allowlisted legacy tools, показывает текущие readiness boundaries и вводит iPhone/Appium runbook. Live browser/phone readiness остаётся отдельной runtime-проверкой.
+
+Устанавливайте только commit SHA, опубликованный в [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest).
+
+## 0.2.0 — Published 2026-10-06
 
 - Общая factory связывает legacy API, API Direct/comments/insights, API→browser→phone read router, triage/analysis и source-bound prepare/execute tools для stdio и Streamable HTTP.
 - Добавлены portable install/update/rollback/uninstall entrypoints, external-config wrapper, локальный doctor и fixture smoke.
@@ -15,4 +39,4 @@
 - Runtime supports OAuth callback and account-bound webhook adapters when configured; Meta consent, hosted HTTPS deployment, permission approval and actual webhook delivery remain unverified.
 - Приватные локальные хранилища проверяют Windows NTFS ACL и используют host-native сравнение путей; POSIX сохраняет строгие режимы файлов `0600` и каталогов `0700`.
 
-Release 0.2.0 и installer package ещё не опубликованы. Для установки используйте только уже опубликованные версии; этот changelog entry описывает текущий кандидат.
+Release `v0.2.0` опубликован. Установка и rollback описаны в [install runbook](docs/install.md); этот раздел фиксирует состав опубликованного release.

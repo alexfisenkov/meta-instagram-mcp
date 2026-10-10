@@ -276,11 +276,11 @@ describe("runtime composition", () => {
       expect(writeCount).toBe(2);
     } finally {
       await client.close(); await server.close(); await restartedClient?.close(); await restartedServer?.close();
-      host.close(); input.end(); output.end();
+      await host.close(); input.end(); output.end();
     }
-  }, process.platform === "win32" ? 90_000 : 15_000);
+  }, process.platform === "win32" ? 120_000 : 15_000);
 
-  it("bootstraps browser readiness from native account inspection through Hub, router, and MCP", async () => {
+  it("automatically verifies a registered browser before Direct inbox reads through Hub, router, and MCP", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-browser-bootstrap-")); dirs.push(dir);
     const hub = new CompanionHub({ storagePath: join(dir, "hub.json") });
     let bridgeToken = "";
@@ -299,13 +299,17 @@ describe("runtime composition", () => {
     const output = new PassThrough();
     const decoder = new NativeFrameDecoder();
     const frames: unknown[] = [];
+    const taskOperations: string[] = [];
     output.on("data", (chunk) => {
       for (const message of decoder.push(chunk)) {
         frames.push(message);
         if (!isRecord(message) || message.kind !== "task" || !isRecord(message.task)) continue;
         const task = message.task as unknown as { id: string; contextHash?: string; operation: string };
-        const data = { username: "alexfisenkov", accountBinding: "instagram:42", loggedIn: true, surface: "instagram",
-          capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] };
+        taskOperations.push(task.operation);
+        const data = task.operation === "account.inspect"
+          ? { username: "alexfisenkov", accountBinding: "instagram:42", loggedIn: true, surface: "instagram",
+              capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] }
+          : { username: "alexfisenkov", items: [{ id: "thread-42", unread: true, unanswered: "unknown" }] };
         const result = { source: "browser", nativeRef: "/direct/inbox/", accountBinding: "instagram:42", capturedAt: new Date().toISOString(),
           availability: "ready", coverage: "complete", historyCompleteness: "not_applicable", data, errors: [] };
         input.write(encodeNativeFrame({ kind: "result", taskId: task.id, result, ...(task.contextHash ? { contextHash: task.contextHash } : {}) }));
@@ -314,7 +318,8 @@ describe("runtime composition", () => {
     const host = createBrowserNativeHost({ client: bridgeClient, accountBinding: "instagram:42", expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
     const runtime = createRuntime({
       existingHandlers: fixtureHandlers(), config: { authMode: "instagram", graphApiVersion: "v25.0", tokenStorePath: join(dir, "token.json"), publishLogPath: join(dir, "publish.jsonl") },
-      hub, providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: process.platform === "win32" ? 30_000 : 2_000, pollMs: 25 })]
+      hub, ...(process.platform === "win32" ? { sourceRouterTimeoutMs: 60_000 } : {}),
+      providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: process.platform === "win32" ? 30_000 : 2_000, pollMs: 25 })]
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "browser-bootstrap", version: "1.0.0" });
@@ -326,14 +331,16 @@ describe("runtime composition", () => {
       server = runtime.createMcpServer();
       await server.connect(serverTransport);
       await client.connect(clientTransport);
-      const response = await client.callTool({ name: "meta_read_source", arguments: { operation: "account.inspect" } });
+      const response = await client.callTool({ name: "meta_read_inbox", arguments: { source: "auto", limit: 4 } }, undefined,
+        { timeout: process.platform === "win32" ? 75_000 : undefined });
       const result = JSON.parse(((response as { content: Array<{ text: string }> }).content[0]!).text);
-      expect(result).toMatchObject({ triedSources: ["browser"], observations: [{ source: "browser", availability: "ready", data: { username: "alexfisenkov" } }] });
+      expect(result).toMatchObject({ triedSources: ["browser"], items: [{ source: "browser", threadRef: { nativeId: "thread-42" } }], channelCoverage: { direct: "complete" } });
+      expect(taskOperations).toEqual(["account.inspect", "inbox.list"]);
       expect(await hub.sourceStatus("browser", "instagram:42")).toMatchObject({ availability: "ready", accountHandle: "alexfisenkov", surface: "instagram", capabilities: expect.arrayContaining(["inbox.list"]) });
     } finally {
-      await client.close(); await server?.close(); host.close(); input.end(); output.end();
+      await client.close(); await server?.close(); await host.close(); input.end(); output.end();
     }
-  }, process.platform === "win32" ? 45_000 : 15_000);
+  }, process.platform === "win32" ? 90_000 : 15_000);
 
   it("builds OAuth and signed webhook routes from configured runtime settings", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-runtime-configured-")); dirs.push(dir);

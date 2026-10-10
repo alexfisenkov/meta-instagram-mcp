@@ -166,6 +166,7 @@ function validateIntent(intent: MutationIntent): void {
   if (!intent || !["api", "browser", "phone"].includes(intent.source) || !ACTIONS.has(intent.action) ||
       !intent.accountBinding || !intent.contextHash || !intent.target ||
       intent.target.accountBinding !== intent.accountBinding ||
+      intent.target.explicitOwnerRef?.startsWith("browser-inbox-row:") ||
       !intent.payload || intent.payload.kind !== intent.action ||
       ("text" in intent.payload && typeof intent.payload.text !== "string") ||
       ("reaction" in intent.payload && typeof intent.payload.reaction !== "string")) {

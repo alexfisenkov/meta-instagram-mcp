@@ -6,27 +6,63 @@
   const READ_OPS = new Set(["account.inspect", "account.snapshot", "inbox.list", "thread.read", "thread.scroll_older", "comments.list", "comments.replies", "insights.read"]);
   const PREVIEW_OPS = new Set(["message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"]);
   const MUTATION_OPS = PREVIEW_OPS;
+  const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
   const LIVE_CAPABILITIES = Object.freeze(["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies",
     "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"]);
   const executedRequests = new Set();
+  const inboxRowRefs = new Map();
+  let verifiedOwnProfileProof;
+  let uiOperationInProgress = false;
+  let observedRoutePath = location.pathname;
+  const routeObserver = typeof MutationObserver === "function" && document.documentElement
+    ? new MutationObserver(observeRouteChange) : undefined;
+  routeObserver?.observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener("popstate", observeRouteChange);
+  window.addEventListener("hashchange", observeRouteChange);
   const MAX_LIMIT = 100;
   const MAX_SCROLL_PAGES = 5;
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.kind === "ping") {
+      sendResponse({ kind: "pong", version: 1 });
+      return false;
+    }
     if (!message || !["observe", "execute"].includes(message.kind)) return false;
+    if (uiOperationInProgress) {
+      sendResponse(message.kind === "execute"
+        ? { status: "FAILED", code: "browser_ui_busy", reason: "another browser UI operation is still in progress; no write was dispatched" }
+        : failure(message.accountBinding, "offline", "another browser UI operation is still in progress", "browser_ui_busy"));
+      return false;
+    }
+    uiOperationInProgress = true;
     const task = message.kind === "execute" ? runMutation(message) : runOperation(message);
-    void task.then(sendResponse).catch(() => sendResponse(failure(message.accountBinding, "unsupported_ui_version", "browser operation failed")));
+    void task.then((result) => {
+      uiOperationInProgress = false;
+      sendResponse(result);
+    }).catch(() => {
+      uiOperationInProgress = false;
+      sendResponse(failure(message.accountBinding, "unsupported_ui_version", "browser operation failed"));
+    });
     return true;
   });
 
   async function runOperation(message) {
+    observeRouteChange();
     const { operation, accountBinding, expectedAccountHandle } = message;
-    if (!isInstagramPage() || !validBinding(accountBinding) || !validHandle(expectedAccountHandle) || !isRecord(operation) || typeof operation.op !== "string") {
+    if (!isInstagramPage() || !validBinding(accountBinding) || !isRecord(operation) || typeof operation.op !== "string") {
       return failure(accountBinding, "unsupported_ui_version", "invalid Instagram page or operation");
     }
-    const username = findAccountHandle();
-    if (!username) return failure(accountBinding, "needs_selection", "current Instagram account could not be identified");
-    if (username.toLowerCase() !== expectedAccountHandle.toLowerCase()) return failure(accountBinding, "needs_selection", "current Instagram account does not match the assigned account");
+    if (!READ_OPS.has(operation.op) && !PREVIEW_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
+    if (typeof expectedAccountHandle !== "string" || !expectedAccountHandle.trim()) {
+      return failure(accountBinding, "needs_selection", "expected account verification context is unavailable", "expected_handle_missing");
+    }
+    if (!validHandle(expectedAccountHandle)) return failure(accountBinding, "needs_selection", "expected account verification context is invalid", "expected_handle_invalid");
+    if (taskDeadlineReached(message.taskExpiresAt)) return failure(accountBinding, "offline", "read task deadline expired", "task_deadline_expired");
+    const verificationStage = await verifyOwnAccount(expectedAccountHandle, message.taskExpiresAt);
+    if (verificationStage) return failure(accountBinding, verificationStage === "task_deadline_expired" ? "offline" : "needs_selection",
+      "owner account verification stopped at a fail-closed stage", verificationStage);
+    if (taskDeadlineReached(message.taskExpiresAt)) return failure(accountBinding, "offline", "read task deadline expired", "task_deadline_expired");
+    const username = expectedAccountHandle;
     if (PREVIEW_OPS.has(operation.op)) return previewResult(operation, accountBinding, username);
     if (!READ_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
 
@@ -34,40 +70,212 @@
       return observation(accountBinding, { username, accountBinding, loggedIn: true, surface: "instagram", capabilities: LIVE_CAPABILITIES }, "ready", "complete", "not_applicable", []);
     }
     if (operation.op === "inbox.list") return readInbox(accountBinding, username, operation.limit);
-    if (operation.op === "thread.read" || operation.op === "thread.scroll_older") return readThread(accountBinding, username, operation);
+    if (operation.op === "thread.read" || operation.op === "thread.scroll_older") return readThread(accountBinding, username, operation, message.taskExpiresAt);
     if (operation.op === "comments.list" || operation.op === "comments.replies") return readComments(accountBinding, username, operation);
     if (operation.op === "insights.read") return failure(accountBinding, "unsupported_ui_version", "insights semantic controls are not verified");
     return failure(accountBinding, "unsupported", "operation is not allowlisted");
   }
 
   function readInbox(accountBinding, username, requestedLimit) {
+    const inboxPath = location.pathname.replace(/\/+$/, "") || "/";
+    if (inboxPath !== "/direct/inbox" && !directThreadIdFromPath()) {
+      return failure(accountBinding, "unsupported_ui_version", "Direct sidebar rows are supported only on Inbox and conversation routes", "inbox_route_unsupported");
+    }
     const limit = boundedInteger(requestedLimit, 1, MAX_LIMIT, 50);
+    const currentThreadId = directThreadIdFromPath();
+    const retainedRows = new Map();
+    if (currentThreadId) {
+      for (const record of inboxRowRefs.values()) {
+        if (record.row && isFreshInboxRow(record) && record.accountBinding === accountBinding &&
+            record.expectedAccountHandle === username.toLowerCase() && record.ownerProof === verifiedOwnProfileProof &&
+            hasVerifiedThreadProof(record, accountBinding, currentThreadId)) retainedRows.set(record.row, record);
+      }
+    }
+    inboxRowRefs.clear();
     const items = [];
     const seen = new Set();
-    for (const anchor of document.querySelectorAll('a[href^="/direct/t/"]')) {
-      const url = safeInstagramUrl(anchor.href);
-      const id = url?.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      const row = anchor.closest('[role="listitem"], li, [role="link"]') || anchor;
-      const text = cleanText(row.innerText || row.textContent, 600);
-      const labels = [anchor.getAttribute("aria-label"), row.getAttribute("aria-label")].filter(Boolean).join(" ").toLowerCase();
-      const unread = /\b(unread|new)\b|непрочитан|нов(ое|ый)/i.test(labels) ? true : "unknown";
-      items.push({ nativeId: id, href: url.pathname, label: text || "", unread, unanswered: "unknown" });
-      if (items.length >= limit) break;
+    const cards = findInboxRowCards();
+    if (cards.ambiguous) return failure(accountBinding, "unsupported_ui_version", "the Direct inbox row container is ambiguous", "inbox_rows_ambiguous");
+    if (cards.rows.length > 0) {
+      const proof = verifiedOwnProfileProof;
+      if (!proof || proof.handle !== username.toLowerCase()) return failure(accountBinding, "needs_selection", "the verified owner proof is unavailable for inbox rows", "owner_proof_missing");
+      for (const row of cards.rows.slice(0, limit)) {
+        const retained = retainedRows.get(row);
+        const record = retained || { row, document, accountBinding, expectedAccountHandle: username.toLowerCase(), ownerProof: proof,
+          path: location.pathname, snapshot: inboxRowSnapshot(row), expiresAt: Date.now() + 5 * 60_000 };
+        const explicitOwnerRef = retained ? retained.reference : `${BROWSER_INBOX_ROW_REF_PREFIX}${crypto.randomUUID()}`;
+        record.reference = explicitOwnerRef;
+        inboxRowRefs.set(explicitOwnerRef, record);
+        items.push({ target: { accountBinding, explicitOwnerRef }, label: cleanText(row.innerText || row.textContent, 600), unread: "unknown", unanswered: "unknown" });
+      }
+    } else {
+      for (const anchor of document.querySelectorAll('a[href^="/direct/t/"]')) {
+        const url = safeInstagramUrl(anchor.href);
+        const id = url?.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const row = anchor.closest('[role="listitem"], li, [role="link"]') || anchor;
+        const text = cleanText(row.innerText || row.textContent, 600);
+        const labels = [anchor.getAttribute("aria-label"), row.getAttribute("aria-label")].filter(Boolean).join(" ").toLowerCase();
+        const unread = /\b(unread|new)\b|непрочитан|нов(ое|ый)/i.test(labels) ? true : "unknown";
+        items.push({ nativeId: id, href: url.pathname, label: text || "", unread, unanswered: "unknown" });
+        if (items.length >= limit) break;
+      }
     }
     const coverage = items.length >= limit ? "partial" : "unknown";
     return observation(accountBinding, { username, items }, "ready", coverage, "limited", [], { sideEffects: [] });
   }
 
-  async function readThread(accountBinding, username, operation) {
+  function findInboxRowCards() {
+    const path = location.pathname.replace(/\/+$/, "") || "/";
+    if (path !== "/direct/inbox" && !/^\/direct\/t\/[^/]+$/.test(path)) return { rows: [], ambiguous: false };
+    const groups = new Map();
+    for (const row of document.querySelectorAll('div[role="button"][tabindex="0"]')) {
+      if (!isInboxRowCard(row)) continue;
+      const container = nearestBranchingContainer(row);
+      if (!container) continue;
+      const rows = groups.get(container) || [];
+      rows.push(row);
+      groups.set(container, rows);
+    }
+    if (groups.size > 1) return { rows: [], ambiguous: true };
+    return { rows: groups.size === 1 ? [...groups.values()][0] : [], ambiguous: false };
+  }
+
+  function isInboxRowCard(row) {
+    if (row.tagName !== "DIV" || row.getAttribute("role") !== "button" || row.getAttribute("tabindex") !== "0" ||
+        row.hasAttribute("aria-label") || row.hasAttribute("title") || !isVisible(row) || row.querySelector("a, button")) return false;
+    const images = Array.from(row.querySelectorAll("img[alt]")).filter(isVisible);
+    const spans = row.querySelectorAll("span").length;
+    const divs = row.querySelectorAll("div").length;
+    return images.length === 1 && spans >= 8 && divs >= 12 && divs <= 32;
+  }
+
+  function nearestBranchingContainer(row) {
+    let ancestor = row.parentElement;
+    for (let depth = 1; ancestor && depth <= 8; depth += 1, ancestor = ancestor.parentElement) {
+      const visibleChildren = Array.from(ancestor.children).filter(isVisible);
+      if (visibleChildren.length > 1) return ancestor;
+    }
+    return undefined;
+  }
+
+  function inboxRowSnapshot(row) {
+    return stableStringify({
+      text: cleanText(row.innerText || row.textContent, 3_000),
+      attributes: ["role", "tabindex", "aria-label", "title", "href", "data-visualcompletion"].map((name) => [name, row.getAttribute(name)]),
+      imageAlts: Array.from(row.querySelectorAll("img[alt]"), (image) => cleanText(image.getAttribute("alt"), 256)),
+      descendants: Array.from(row.querySelectorAll("*"), (element) => [element.tagName, element.getAttribute("role"), element.getAttribute("tabindex")])
+    });
+  }
+
+  function isFreshInboxRow(record) {
+    return record.document === document && record.row.ownerDocument === document && record.row.isConnected &&
+      isInboxRowCard(record.row) &&
+      inboxRowSnapshot(record.row) === record.snapshot;
+  }
+
+  function directThreadIdFromPath() {
+    return location.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
+  }
+
+  function threadMessageNodes() {
+    const main = uniqueVisibleMain();
+    if (!main) return [];
+    return Array.from(main.querySelectorAll("[data-message-id], [data-mid]")).filter(isVisible);
+  }
+
+  function threadEventEntryNodes() {
+    const mains = Array.from(document.querySelectorAll('main[role="main"]')).filter(isVisible);
+    if (mains.length !== 1) return [];
+    return Array.from(mains[0].querySelectorAll('div[role="article"]')).filter(isVisible);
+  }
+
+  function allThreadCandidateNodes() {
+    return Array.from(document.querySelectorAll("[data-message-id], [data-mid], div[role='article']"));
+  }
+
+  function uniqueVisibleMain() {
+    const mains = Array.from(document.querySelectorAll("main")).filter(isVisible);
+    return mains.length === 1 ? mains[0] : undefined;
+  }
+
+  function readSideEffectFailure(accountBinding, availability, message, code) {
+    return { ...failure(accountBinding, availability, message, code), sideEffects: ["may_mark_seen"] };
+  }
+
+  async function readThread(accountBinding, username, operation, taskExpiresAt) {
     const target = operation.target;
-    if (!isRecord(target) || !validBinding(target.accountBinding) || target.accountBinding !== accountBinding || typeof target.nativeId !== "string") {
+    if (!isRecord(target) || !validBinding(target.accountBinding) || target.accountBinding !== accountBinding) {
       return failure(accountBinding, "needs_selection", "an exact conversation reference is required");
     }
-    const expectedId = target.nativeId.slice(0, 256);
-    const currentId = location.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
-    if (!currentId || currentId !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation does not match the requested reference");
+    let expectedId;
+    let rowRefProof;
+    if (typeof target.nativeId === "string") {
+      expectedId = target.nativeId.slice(0, 256);
+      const currentId = directThreadIdFromPath();
+      if (!currentId || currentId !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation does not match the requested reference");
+      const provenRows = Array.from(inboxRowRefs.values()).filter((record) => hasVerifiedThreadProof(record, accountBinding, currentId));
+      if (provenRows.length !== 1) {
+        return failure(accountBinding, "needs_selection", "a fresh browser inbox reference is required to prove this native thread target", "browser_thread_proof_missing");
+      }
+      rowRefProof = provenRows[0];
+      operation.freshContentNodes = rowRefProof.threadProof.nodes;
+    } else if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)) {
+      const rowRef = target.explicitOwnerRef;
+      const record = inboxRowRefs.get(rowRef);
+      rowRefProof = record;
+      if (!record || record.expiresAt <= Date.now() || record.accountBinding !== accountBinding ||
+          record.expectedAccountHandle !== username.toLowerCase() || record.ownerProof !== verifiedOwnProfileProof || record.document !== document) {
+        inboxRowRefs.delete(rowRef);
+        return failure(accountBinding, "needs_selection", "the selected inbox row reference is stale or no longer matches its verified owner", "stale_inbox_row_ref");
+      }
+      if (record.openedNativeId) {
+        const currentId = directThreadIdFromPath();
+        if (!currentId || currentId !== record.openedNativeId) {
+          return failure(accountBinding, "needs_selection", "the selected inbox row was already opened in another route", "stale_inbox_row_ref");
+        }
+        if (!hasVerifiedThreadProof(record, accountBinding, currentId)) {
+          inboxRowRefs.delete(rowRef);
+          return failure(accountBinding, "needs_selection", "a fresh inbox reference is required to re-establish this thread proof", "stale_inbox_row_ref");
+        }
+        expectedId = currentId.slice(0, 256);
+        operation.freshContentNodes = record.threadProof.nodes;
+      } else {
+        if (record.navigationStarted) {
+          return readSideEffectFailure(accountBinding, "offline", "navigation for this inbox row is already in progress or ended without a verified route", "inbox_row_navigation_unknown");
+        }
+        if (location.pathname !== record.path || !isFreshInboxRow(record)) {
+          inboxRowRefs.delete(rowRef);
+          return failure(accountBinding, "needs_selection", "the selected inbox row node changed before navigation", "stale_inbox_row_ref");
+        }
+        if (taskDeadlineReached(taskExpiresAt)) {
+          return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
+        }
+        const priorMessages = new Set(allThreadCandidateNodes());
+        const priorThreadId = directThreadIdFromPath();
+        record.navigationStarted = true;
+        try { record.row.click(); }
+        catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
+        const navigated = await waitUntil(() => {
+          const routeId = directThreadIdFromPath();
+          return Boolean(routeId && routeId !== priorThreadId);
+        }, 1_500, taskExpiresAt);
+        const routeId = directThreadIdFromPath();
+        if (!navigated || !routeId || routeId === priorThreadId) {
+          return readSideEffectFailure(accountBinding, taskDeadlineReached(taskExpiresAt) ? "offline" : "needs_selection",
+            "the selected inbox row did not reach a conversation route", taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_route_not_reached");
+        }
+        record.openedNativeId = routeId.slice(0, 256);
+        expectedId = record.openedNativeId;
+        const loaded = await waitUntil(() => [...threadMessageNodes(), ...threadEventEntryNodes()].some((node) => !priorMessages.has(node)), 2_500, taskExpiresAt);
+        if (!loaded) return readSideEffectFailure(accountBinding, "offline", "new conversation messages did not load within the bounded read",
+          taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_content_not_loaded");
+        operation.freshContentNodes = [...threadMessageNodes(), ...threadEventEntryNodes()].filter((node) => !priorMessages.has(node));
+      }
+    } else {
+      return failure(accountBinding, "needs_selection", "the conversation reference is not supported by this browser reader");
+    }
 
     const pages = operation.op === "thread.scroll_older" ? boundedInteger(operation.pages, 1, MAX_SCROLL_PAGES, 1) : 0;
     let scroller = findMessageScroller();
@@ -80,11 +288,20 @@
       }
       scroller = findMessageScroller();
     }
+    observeRouteChange();
+    if (rowRefProof && !Array.from(inboxRowRefs.values()).includes(rowRefProof)) {
+      return readSideEffectFailure(accountBinding, "needs_selection", "the browser inbox proof changed during conversation read", "stale_inbox_row_ref");
+    }
+    if (directThreadIdFromPath() !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation route changed before the read completed", "conversation_route_changed");
 
     const limit = boundedInteger(operation.limit, 1, MAX_LIMIT, 50);
     const messages = [];
     const seen = new Set();
-    for (const node of document.querySelectorAll('[data-message-id], [data-mid]')) {
+    const currentMessageNodes = threadMessageNodes();
+    const messageNodes = Array.isArray(operation.freshContentNodes)
+      ? operation.freshContentNodes.filter((node) => node.matches?.("[data-message-id], [data-mid]") && currentMessageNodes.includes(node))
+      : currentMessageNodes;
+    for (const node of messageNodes) {
       const id = node.getAttribute("data-message-id") || node.getAttribute("data-mid");
       if (!id || seen.has(id)) continue;
       seen.add(id);
@@ -94,10 +311,61 @@
       messages.push({ nativeId: id.slice(0, 256), text: cleanText(node.innerText || node.textContent, 2_000), direction, timestamp: node.getAttribute("data-timestamp") || "unknown" });
       if (messages.length >= limit) break;
     }
-    const data = { username, threadNativeId: expectedId, messages, unread: readUnreadState(), unanswered: "unknown",
+    const currentEventNodes = threadEventEntryNodes();
+    const eventCandidates = Array.isArray(operation.freshContentNodes)
+      ? operation.freshContentNodes.filter((node) => node.matches?.('div[role="article"]') && currentEventNodes.includes(node))
+      : rowRefProof?.threadProof?.document === document && rowRefProof.threadProof.accountBinding === accountBinding &&
+        rowRefProof.threadProof.ownerProof === verifiedOwnProfileProof && rowRefProof.threadProof.routeId === expectedId
+        ? rowRefProof.threadProof.nodes.filter((node) => node.matches?.('div[role="article"]') && currentEventNodes.includes(node)) : [];
+    const visibleEntries = [];
+    const remainingLimit = Math.max(0, limit - messages.length);
+    for (const node of eventCandidates.slice(0, remainingLimit)) {
+      const text = cleanText(node.innerText || node.textContent, 2_000);
+      if (text) visibleEntries.push({ text, type: "unknown" });
+    }
+    if (!messages.length && !visibleEntries.length) {
+      return readSideEffectFailure(accountBinding, "offline", "no supported visible message or event entries were found", "conversation_content_unclassified");
+    }
+    const itemCount = messages.length + visibleEntries.length;
+    const hasMoreVisibleItems = currentMessageNodes.length + currentEventNodes.length > limit;
+    const coverage = hasMoreVisibleItems || itemCount >= limit ? "partial" : "unknown";
+    const historyCompleteness = messages.length ? "limited" : "unknown";
+    const data = { username, ...(typeof target.nativeId === "string" ? { threadNativeId: expectedId } : {}), messages,
+      ...(visibleEntries.length ? { visibleEntries } : {}), unread: readUnreadState(), unanswered: "unknown",
       olderAvailable: Boolean(scroller && scroller.scrollTop > 0) };
     const contextHash = await digest(stableStringify({ accountBinding, target: { nativeId: expectedId }, data }));
-    return observation(accountBinding, { ...data, contextHash }, "ready", messages.length >= limit ? "partial" : "unknown", "limited", ["may_mark_seen"], { sideEffects: ["may_mark_seen"] });
+    const result = observation(accountBinding, { ...data, contextHash }, "ready", coverage, historyCompleteness, ["may_mark_seen"], { sideEffects: ["may_mark_seen"] });
+    if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)) {
+      result.nativeRef = target.explicitOwnerRef;
+      if (rowRefProof) {
+        rowRefProof.navigationStarted = false;
+        rowRefProof.threadProof = { document, accountBinding, ownerProof: verifiedOwnProfileProof, routeId: expectedId, main: uniqueVisibleMain(),
+          nodes: (Array.isArray(operation.freshContentNodes) ? operation.freshContentNodes : [...currentMessageNodes, ...currentEventNodes])
+            .filter((node) => currentMessageNodes.includes(node) || currentEventNodes.includes(node)) };
+      }
+    }
+    return result;
+  }
+
+  function observeRouteChange() {
+    const nextPath = location.pathname;
+    if (nextPath === observedRoutePath) return;
+    observedRoutePath = nextPath;
+    const nextThreadId = directThreadIdFromPath();
+    for (const [reference, record] of inboxRowRefs) {
+      if (!record.openedNativeId && record.navigationStarted && nextThreadId) {
+        record.openedNativeId = nextThreadId;
+        continue;
+      }
+      if (record.openedNativeId && (!nextThreadId || nextThreadId !== record.openedNativeId)) inboxRowRefs.delete(reference);
+    }
+  }
+
+  function hasVerifiedThreadProof(record, accountBinding, routeId) {
+    const proof = record?.threadProof;
+    return record?.expiresAt > Date.now() && record.openedNativeId === routeId && proof?.document === document &&
+      proof.accountBinding === accountBinding && proof.ownerProof === verifiedOwnProfileProof && proof.routeId === routeId &&
+      proof.main && proof.main === uniqueVisibleMain() && Array.isArray(proof.nodes);
   }
 
   async function readComments(accountBinding, username, operation) {
@@ -315,6 +583,119 @@
     return candidates.size === 1 ? [...candidates][0] : "";
   }
 
+  async function verifyOwnAccount(expectedHandle, taskExpiresAt) {
+    if (taskDeadlineReached(taskExpiresAt)) return "task_deadline_expired";
+    const controls = ownProfileControls();
+    if (controls.length === 0) { verifiedOwnProfileProof = undefined; return "owner_marker_missing"; }
+    if (controls.length !== 1) { verifiedOwnProfileProof = undefined; return "owner_marker_ambiguous"; }
+    const control = controls[0];
+    if (control.handle.toLowerCase() !== expectedHandle.toLowerCase()) { verifiedOwnProfileProof = undefined; return "expected_handle_mismatch"; }
+    if (verifiedOwnProfileProof && verifiedOwnProfileProof.handle === expectedHandle.toLowerCase() &&
+        verifiedOwnProfileProof.element === control.element && verifiedOwnProfileProof.href === control.href && verifiedOwnProfileProof.alt === control.alt) return undefined;
+    if (isExpectedProfilePath(expectedHandle)) {
+      const editStage = ownEditProfileStage(expectedHandle);
+      if (editStage) { verifiedOwnProfileProof = undefined; return editStage; }
+      verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: control.element, href: control.href, alt: control.alt };
+      return undefined;
+    }
+
+    const original = safeInstagramUrl(location.href);
+    if (!original) return "original_url_unavailable";
+    if (taskDeadlineReached(taskExpiresAt)) return "task_deadline_expired";
+    try { control.element.click(); } catch { return "profile_control_click_failed"; }
+    await waitUntil(() => isExpectedProfilePath(expectedHandle) && !ownEditProfileStage(expectedHandle), 1_500, taskExpiresAt);
+    const pathReached = isExpectedProfilePath(expectedHandle);
+    const editStage = pathReached ? ownEditProfileStage(expectedHandle) : "profile_path_not_reached";
+    let restored = isSameUrl(original);
+    if (!restored) {
+      try { history.back(); } catch { return "original_url_restore_failed"; }
+      restored = await waitUntil(() => isSameUrl(original), 1_500);
+    }
+    if (!restored) { verifiedOwnProfileProof = undefined; return "original_url_restore_failed"; }
+    if (taskDeadlineReached(taskExpiresAt)) { verifiedOwnProfileProof = undefined; return "task_deadline_expired"; }
+    if (!pathReached) { verifiedOwnProfileProof = undefined; return "profile_path_not_reached"; }
+    if (editStage) { verifiedOwnProfileProof = undefined; return editStage; }
+    const currentControls = ownProfileControls();
+    if (currentControls.length === 0) { verifiedOwnProfileProof = undefined; return "post_restore_marker_missing"; }
+    if (currentControls.length !== 1) { verifiedOwnProfileProof = undefined; return "post_restore_marker_ambiguous"; }
+    const currentControl = currentControls[0];
+    if (currentControl.href !== control.href || currentControl.alt !== control.alt ||
+        currentControl.handle.toLowerCase() !== expectedHandle.toLowerCase()) {
+      verifiedOwnProfileProof = undefined;
+      return "post_restore_marker_changed";
+    }
+    verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: currentControl.element, href: currentControl.href, alt: currentControl.alt };
+    return undefined;
+  }
+
+  function ownProfileControls() {
+    return Array.from(document.querySelectorAll('a[role="link"]')).flatMap((element) => {
+      if (element.closest("nav, header, aside, main") || element.hasAttribute("aria-label") || element.hasAttribute("title") || !isVisible(element)) return [];
+      if (element.target && element.target.toLowerCase() !== "_self") return [];
+      const url = safeInstagramUrl(element.href);
+      const handle = url?.pathname.match(/^\/([^/]+)\/?$/)?.[1];
+      if (!url || url.username || url.password || url.port || !handle || RESERVED.has(handle.toLowerCase()) || url.search || url.hash) return [];
+      const images = Array.from(element.querySelectorAll("img[alt]")).filter(isVisible);
+      if (images.length !== 1) return [];
+      const alt = cleanText(images[0]?.getAttribute("alt"), 256);
+      if (!profileImageAltContainsHandle(alt, handle)) return [];
+      return [{ element, handle, href: `${url.origin}${url.pathname}`, alt }];
+    });
+  }
+
+  function profileImageAltContainsHandle(value, handle) {
+    const tokens = String(value || "").toLowerCase().match(/[a-z0-9][a-z0-9._]*/g) || [];
+    return tokens.includes(handle.toLowerCase());
+  }
+
+  function isExpectedProfilePath(handle) {
+    const url = safeInstagramUrl(location.href);
+    return Boolean(url && !url.search && !url.hash && url.pathname.replace(/\/$/, "").toLowerCase() === `/${handle.toLowerCase()}`);
+  }
+
+  function ownEditProfileStage(handle) {
+    if (!isExpectedProfilePath(handle)) return "profile_path_not_reached";
+    const controls = Array.from(document.querySelectorAll('header a[role="link"][href]')).filter((element) => {
+      if (!isVisible(element) || element.hasAttribute("aria-label") || element.hasAttribute("title")) return false;
+      const url = safeInstagramUrl(element.href);
+      return url && !url.username && !url.password && !url.port && url.pathname === "/accounts/edit/" && !url.search && !url.hash;
+    });
+    if (controls.length > 1) return "edit_marker_ambiguous";
+    if (controls.length === 0 || cleanText(controls[0].textContent, 128).toLowerCase() !== "редактировать профиль") return "edit_marker_missing";
+    return undefined;
+  }
+
+  function isVisible(element) {
+    if (!element.isConnected || element.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  }
+
+  function isSameUrl(url) {
+    try { return safeInstagramUrl(location.href)?.href === url.href; } catch { return false; }
+  }
+
+  function taskDeadline(taskExpiresAt) {
+    if (typeof taskExpiresAt !== "string") return undefined;
+    const deadline = Date.parse(taskExpiresAt);
+    return Number.isFinite(deadline) ? deadline : Number.NEGATIVE_INFINITY;
+  }
+
+  function taskDeadlineReached(taskExpiresAt) {
+    const deadline = taskDeadline(taskExpiresAt);
+    return deadline !== undefined && Date.now() >= deadline;
+  }
+
+  async function waitUntil(predicate, timeoutMs, taskExpiresAt) {
+    const deadline = Math.min(Date.now() + timeoutMs, taskDeadline(taskExpiresAt) ?? Number.POSITIVE_INFINITY);
+    while (Date.now() <= deadline) {
+      if (predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    return Boolean(predicate());
+  }
+
   function observation(accountBinding, data, availability, coverage, historyCompleteness, sideEffects, extras = {}) {
     return {
       source: "browser", nativeRef: location.pathname.slice(0, 512), accountBinding,
@@ -323,8 +704,8 @@
     };
   }
 
-  function failure(accountBinding, availability, message) {
-    return observation(validBinding(accountBinding) ? accountBinding : "unknown", undefined, availability, "unknown", "unknown", [], { errors: [{ code: availability, message }] });
+  function failure(accountBinding, availability, message, code = availability) {
+    return observation(validBinding(accountBinding) ? accountBinding : "unknown", undefined, availability, "unknown", "unknown", [], { errors: [{ code, message }] });
   }
 
   function safeInstagramUrl(value) {

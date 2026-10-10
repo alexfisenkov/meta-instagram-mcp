@@ -10,11 +10,11 @@ import { createHash } from "node:crypto";
 
 const roots: string[] = [];
 const authorities = new WeakMap<CompanionHub, Awaited<ReturnType<typeof createUiApprovalAuthority>>>();
-async function makeHub(options: { leaseMs?: number; now?: () => number } = {}) {
+async function makeHub(options: { leaseMs?: number; bridgeTtlMs?: number; now?: () => number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "instagram-hub-"));
   roots.push(root);
   const authority = await createUiApprovalAuthority({ privateKeyPath: join(root, "approval.json"), projectRoot: process.cwd() });
-  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: options.leaseMs ?? 30_000, now: options.now, approvalPublicKey: authority.publicKey });
+  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: options.leaseMs ?? 30_000, bridgeTtlMs: options.bridgeTtlMs, now: options.now, approvalPublicKey: authority.publicKey });
   authorities.set(hub, authority);
   return hub;
 }
@@ -45,6 +45,38 @@ describe("CompanionHub", () => {
     expect(await hub.result(task.id)).toMatchObject({ status: "complete", result: { items: [] } });
   });
 
+  it("cancels only queued or leased read tasks and never changes a write lease", async () => {
+    const hub = await makeHub();
+    const { bridgeId, bridgeToken } = await hub.register(registration);
+    const queued = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] });
+
+    expect(await hub.cancelReadTask(queued.id)).toBe(true);
+    expect(await hub.result(queued.id)).toMatchObject({ status: "expired" });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toEqual([]);
+
+    const leased = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: leased.id }]);
+    expect(await hub.cancelReadTask(leased.id)).toBe(true);
+    expect(await hub.result(leased.id)).toMatchObject({ status: "expired" });
+    await expect(hub.submit(bridgeId, leased.id, { items: [] }, undefined, bridgeToken)).rejects.toThrow(/expired/i);
+
+    const write = await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "approved" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: write.id }]);
+    expect(await hub.cancelReadTask(write.id)).toBe(false);
+    expect(await hub.result(write.id)).toMatchObject({ status: "leased" });
+  }, process.platform === "win32" ? 45_000 : 15_000);
+
+  it("honors a shorter read task TTL so a late poll cannot lease it", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now });
+    const { bridgeId, bridgeToken } = await hub.register(registration);
+    const task = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [], ttlMs: 100 });
+    now += 101;
+
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toEqual([]);
+    expect(await hub.result(task.id)).toMatchObject({ status: "expired" });
+  });
+
   it("publishes the verifier key and requires an account-bound Instagram surface before reporting readiness", async () => {
     const hub = await makeHub();
     const phoneRegistration = { mode: "phone_standalone" as const, source: "phone" as const, accountBinding: "acct:one", capabilities: ["inbox.list", "comment.like"] };
@@ -58,6 +90,65 @@ describe("CompanionHub", () => {
       availability: "ready", capabilities: ["inbox.list", "comment.like"], accountBinding: "acct:one"
     });
   });
+
+  it("pins readiness and read delivery to the same selected bridge", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
+    const bridgeA = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list"] });
+    await hub.heartbeat({ bridgeId: bridgeA.bridgeId, bridgeToken: bridgeA.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+    now = 2_000;
+    const bridgeB = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list"] });
+    await hub.heartbeat({ bridgeId: bridgeB.bridgeId, bridgeToken: bridgeB.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+
+    const selected = await hub.sourceStatus("browser", "acct:one");
+    expect(selected).toMatchObject({ availability: "ready", bridgeId: bridgeB.bridgeId });
+    const inspect = await hub.enqueue({ kind: "read", source: "browser", bridgeId: selected.bridgeId, accountBinding: "acct:one", operation: "account.inspect", payload: {}, targetRefs: [] });
+    const inbox = await hub.enqueue({ kind: "read", source: "browser", bridgeId: selected.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: { limit: 4 }, targetRefs: [] });
+
+    expect(await hub.poll(bridgeA.bridgeId, 2, bridgeA.bridgeToken, "browser")).toEqual([]);
+    expect(await hub.poll(bridgeB.bridgeId, 2, bridgeB.bridgeToken, "browser")).toMatchObject([
+      { id: inspect.id, bridgeId: bridgeB.bridgeId, operation: "account.inspect" },
+      { id: inbox.id, bridgeId: bridgeB.bridgeId, operation: "inbox.list" }
+    ]);
+
+    now = 4_000;
+    await hub.heartbeat({ bridgeId: bridgeA.bridgeId, bridgeToken: bridgeA.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+    now = 7_001;
+    expect(await hub.sourceStatus("browser", "acct:one")).toMatchObject({ availability: "ready", bridgeId: bridgeA.bridgeId });
+    expect(await hub.sourceStatus("browser", "acct:one", bridgeB.bridgeId)).toMatchObject({ availability: "not_connected", capabilities: [] });
+    await expect(hub.enqueue({ kind: "read", source: "browser", bridgeId: bridgeB.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] }))
+      .rejects.toThrow(/no assigned bridge available/i);
+  }, process.platform === "win32" ? 60_000 : 15_000);
+
+  it("prefers an older ready operation-capable browser over a newer unready bridge", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
+    const mac = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    await hub.heartbeat({ bridgeId: mac.bridgeId, bridgeToken: mac.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["inbox.list", "conversation.read"]
+    } });
+    now = 2_000;
+    const server = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    await hub.heartbeat({ bridgeId: server.bridgeId, bridgeToken: server.bridgeToken, source: "browser", status: {
+      availability: "unsupported_ui_version", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: []
+    } });
+
+    expect(await hub.sourceStatus("browser", "acct:one")).toMatchObject({ availability: "unsupported_ui_version", bridgeId: server.bridgeId });
+    const inboxReady = await hub.sourceStatus("browser", "acct:one", undefined, "inbox.list");
+    expect(inboxReady).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId, capabilities: ["inbox.list", "conversation.read"] });
+    expect(await hub.sourceStatus("browser", "acct:one", mac.bridgeId, "conversation.read")).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId });
+    const task = await hub.enqueue({ kind: "read", source: "browser", bridgeId: inboxReady.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: { limit: 2 }, targetRefs: [] });
+
+    expect(task.bridgeId).toBe(mac.bridgeId);
+    expect(await hub.poll(server.bridgeId, 1, server.bridgeToken, "browser")).toEqual([]);
+    expect(await hub.poll(mac.bridgeId, 1, mac.bridgeToken, "browser")).toMatchObject([{ id: task.id, bridgeId: mac.bridgeId }]);
+  }, process.platform === "win32" ? 60_000 : 15_000);
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     let now = 1_000;

@@ -5,6 +5,7 @@ export interface JsonHttpRequestInit {
   headers?: Record<string, string | undefined>;
   body?: string | Buffer | URLSearchParams;
   timeoutMs?: number;
+  signal?: AbortSignal;
   /**
    * Перебор резервных IP при сетевом сбое (таймаут, обрыв). По умолчанию
    * включён — это безопасно для чтения, идемпотентного по определению.
@@ -47,11 +48,13 @@ export async function requestJsonHttp(url: URL, init: JsonHttpRequestInit = {}):
   const attempts: JsonHttpAttempt[] = [];
 
   for (const route of routes) {
+    if (init.signal?.aborted) throw abortError(init.signal);
     try {
       const response = await requestOnce(url, init, route.ip);
       attempts.push({ route: route.label, ok: true, status: response.status });
       return { ...response, attempts };
     } catch (error) {
+      if (init.signal?.aborted) throw abortError(init.signal);
       attempts.push({ route: route.label, ok: false, error: errorMessage(error) });
     }
   }
@@ -61,6 +64,7 @@ export async function requestJsonHttp(url: URL, init: JsonHttpRequestInit = {}):
 
 function requestOnce(url: URL, init: JsonHttpRequestInit, fallbackIp?: string): Promise<Omit<JsonHttpResponse, "attempts">> {
   return new Promise((resolve, reject) => {
+    if (init.signal?.aborted) { reject(abortError(init.signal)); return; }
     const body = normalizeBody(init.body);
     const headers = normalizeHeaders(init.headers);
     if (body && !hasHeader(headers, "content-length")) {
@@ -95,6 +99,7 @@ function requestOnce(url: URL, init: JsonHttpRequestInit, fallbackIp?: string): 
       const chunks: Buffer[] = [];
       res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       res.on("end", () => {
+        cleanup();
         const text = Buffer.concat(chunks).toString("utf8");
         resolve({
           ok: Boolean(res.statusCode && res.statusCode >= 200 && res.statusCode < 300),
@@ -103,15 +108,27 @@ function requestOnce(url: URL, init: JsonHttpRequestInit, fallbackIp?: string): 
           body: parseBody(text)
         });
       });
+      res.on("error", (error) => { cleanup(); reject(error); });
     });
 
+    const cleanup = () => init.signal?.removeEventListener("abort", onAbort);
+    const onAbort = () => req.destroy(abortError(init.signal!));
     req.on("timeout", () => {
       req.destroy(new Error(`timeout after ${options.timeout}ms`));
     });
-    req.on("error", reject);
+    req.on("error", (error) => { cleanup(); reject(error); });
+    init.signal?.addEventListener("abort", onAbort, { once: true });
+    if (init.signal?.aborted) onAbort();
     if (body) req.write(body);
     req.end();
   });
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error("Meta HTTP request was aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 function buildRoutes(hostname: string): Array<{ label: string; ip?: string }> {

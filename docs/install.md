@@ -41,7 +41,7 @@ git checkout --detach $Revision
 .\install.ps1 -Revision $Revision
 ```
 
-Установщик сверяет SHA с `HEAD`, требует чистую рабочую копию и собирает только отслеживаемые файлы указанного commit. Он не запускает `sudo`, не устанавливает Node.js, не меняет настройки MCP-клиентов и не публикует release. Версия `0.2.0` пока предварительная; не используйте её как опубликованный release, пока она не появилась в GitHub Releases с commit SHA.
+Установщик сверяет SHA с `HEAD`, требует чистую рабочую копию и собирает только отслеживаемые файлы указанного commit. Он не запускает `sudo`, не устанавливает Node.js, не меняет настройки MCP-клиентов и не публикует release. Выбирайте установочный commit из [последнего опубликованного release](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest); версия локального `package.json` не заменяет публикацию tag и assets в GitHub Releases.
 
 Каталог программы по умолчанию — `~/.local/share/meta-instagram-mcp/app` на macOS/Linux и `%LOCALAPPDATA%\meta-instagram-mcp\app` на Windows. Конфигурация отдельно: `~/.config/meta-instagram-mcp/.env`, token-store по умолчанию `~/.config/meta-instagram-mcp/token.json`. Windows использует `%USERPROFILE%\.config\meta-instagram-mcp`. Пути можно заменить флагами `--target` и `--config-dir` (`-Target`, `-ConfigDir` в PowerShell). Каталог конфигурации должен находиться вне каталога программы.
 
@@ -118,7 +118,9 @@ Wrapper читает из внешнего `.env` только явный спи
 
 ### Runtime-параметры и transports
 
-Portable wrapper передаёт runtime-настройки из приватного `.env` в ту же factory, которая обслуживает stdio и Streamable HTTP. Для HTTP задайте `INSTAGRAM_MCP_TRANSPORT=http`, bearer token длиной не менее 32 байт в `INSTAGRAM_MCP_HTTP_BEARER_TOKEN` и при необходимости host/origin allowlists. Listener принимает только `127.0.0.1`; удалённый доступ размещайте за доверенным TLS reverse proxy. По умолчанию transport остаётся stdio. Remote proxy использует `INSTAGRAM_MCP_REMOTE_CONFIG` либо пару `INSTAGRAM_MCP_REMOTE_URL` и `INSTAGRAM_MCP_REMOTE_BEARER_TOKEN`; config-file path должен быть абсолютным, приватным и вне каталога проекта, а URL — HTTPS origin.
+Portable wrapper запускается через `tools/run.mjs`, передаёт runtime-настройки из приватного внешнего `.env` в ту же factory, которая обслуживает stdio и Streamable HTTP. Для HTTP задайте `INSTAGRAM_MCP_TRANSPORT=http`, bearer token длиной не менее 32 байт в `INSTAGRAM_MCP_HTTP_BEARER_TOKEN` и при необходимости host/origin allowlists. Listener принимает только `127.0.0.1`; удалённый доступ размещайте за доверенным TLS reverse proxy. По умолчанию stdio запускает локальное ядро.
+
+Для Mac или другого локального MCP-клиента, который должен подключаться к удалённому Streamable HTTP core, задайте `INSTAGRAM_MCP_REMOTE_CONFIG` либо пару `INSTAGRAM_MCP_REMOTE_URL` и `INSTAGRAM_MCP_REMOTE_BEARER_TOKEN` во внешнем приватном `.env`. URL должен быть HTTPS origin, token — не короче 32 байт. Тогда `tools/run.mjs` запускает stdio-proxy к remote core и не создаёт локальное ядро. Ошибка URL, bearer или соединения останавливает proxy без переключения на локальный server. Одноразовый запуск proxy также доступен через `node tools/cli.mjs remote-proxy`; команда использует тот же внешний `.env`.
 
 `INSTAGRAM_MCP_HUB_STATE_PATH` задаёт durable state Hub. Write gates задаются отдельно: `META_INSTAGRAM_WRITE` для API, `INSTAGRAM_MCP_BROWSER_WRITES` для browser, `INSTAGRAM_MCP_PHONE_WRITES` для phone; удаление дополнительно требует `META_INSTAGRAM_DELETE`. Эти переключатели не создают OAuth scopes, подключение companion, подпись approval или подтверждение конкретного действия. Source readiness и coverage остаются отдельными для API, browser и phone.
 
@@ -178,6 +180,8 @@ Extension ID должен оставаться стабильным между �
 Для чтения runtime пробует API → browser → phone в ограниченном бюджете и сохраняет provenance, coverage, полноту истории и причины пропуска источников. Приоритет не обещает полных данных: API может не иметь scope, browser/phone могут быть offline или не подключены. Старшая история Direct через phone не реализована; API ограничивает окно и размер страницы по своим правилам. Для записи preview закрепляет один source/account/target/context; выполнение требует локального source gate, серверного signed grant для UI-действий и подтверждения точного запроса. При `OUTCOME_UNKNOWN` не повторяйте действие и не переключайте источник автоматически; выполните read-back того же target из того же source.
 
 ### Companion с подключённым телефоном
+
+Для обязательных prerequisites, loopback readiness checks и безопасного Direct smoke используйте отдельный [iPhone/Appium operator runbook](ios-appium-operator-runbook.md). Сценарии ниже описывают формат внешней phone-конфигурации и bridge contract.
 
 Телефонный companion запускается на том же компьютере, где доступны выбранное устройство и настроенный Appium. Для iOS нужны Xcode, Appium, WebDriverAgent (WDA) и Instagram; для Android — Appium с UiAutomator2 и Instagram. Конфигурация хранится вне каталога приложения и содержит секрет Hub и идентификатор выбранного устройства — не коммитьте её и не пересылайте вместе с логами.
 
@@ -305,7 +309,7 @@ Registering the host does not install or sign the extension, establish bridge cr
 
 | Часть | Значение |
 |---|---|
-| Extension | `<app>/browser-extension`; `nativeMessaging` plus только Instagram host permissions. |
+| Extension | `<app>/browser-extension`; `nativeMessaging`, `alarms`, `scripting` и только Instagram host permissions. Фиксированный content script внедряется в выбранную вкладку только после точного ping error «Receiving end does not exist»; read/write task затем dispatch once. |
 | Runtime asset | `<app>/dist/companion/browser-native-host.js`; Windows launcher — `<app>/tools/native-host/InstagramNativeHost.exe`. |
 | Host name | `com.alexfisenkov.instagram_companion`; origin allowlist — один `chrome-extension://<id>/`. |
 | Private bridge file | macOS/Linux путь задаётся в launcher как `INSTAGRAM_MCP_BRIDGE_CONFIG`; Windows default — `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. |

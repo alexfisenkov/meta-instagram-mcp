@@ -15,7 +15,7 @@ export type PhoneUiOperation =
 export interface PhoneUiClient {
   readiness(): Promise<AppiumReadiness>;
   getSource(): Promise<string>;
-  clickSemantic(control: "profile_tab" | "insights_menu" | "insights_entry" | "selected_row" | "comment_like" | "comment_unlike", observedLabel?: string): Promise<void>;
+  clickSemantic(control: "profile_tab" | "home_tab" | "inbox_tab" | "insights_menu" | "insights_entry" | "selected_row" | "comment_like" | "comment_unlike", observedLabel?: string): Promise<void>;
 }
 export interface PhoneUiProviderOptions {
   client: PhoneUiClient;
@@ -63,7 +63,7 @@ export function createPhoneUiProvider(options: PhoneUiProviderOptions): PhoneUiP
       const root = await readInstagramTree(options.client);
       if (operation.op === "account.inspect" || operation.op === "account.snapshot") return await accountObservation(root, operation.op, capturedAt);
       if (operation.op === "insights.read") return await insightsObservation(root, operation, capturedAt);
-      if (operation.op === "inbox.list") return inboxObservation(root, operation.limit, capturedAt);
+      if (operation.op === "inbox.list") return await ensureInbox(root, operation.limit, capturedAt);
       if (operation.op === "thread.read") return await threadObservation(root, operation.target, operation.limit, capturedAt);
       if (operation.op === "comments.list" || operation.op === "comments.replies") return await commentsObservation(root, operation.op, operation.target, operation.limit, capturedAt);
       if (operation.op === "thread.scroll_older") return observation(options, capturedAt, "unsupported", "unknown", "limited", "phone older-history scrolling is not implemented");
@@ -76,8 +76,10 @@ export function createPhoneUiProvider(options: PhoneUiProviderOptions): PhoneUiP
   async function accountObservation(root: AppiumXmlNode, _op: "account.inspect" | "account.snapshot", capturedAt: string): Promise<Observation<unknown>> {
     let values = appiumXmlValues(root);
     if (!isOwnProfile(values, options.expectedAccountHandle)) {
+      const profileLabel = uniqueSemanticButton(root, ["Profile"]);
+      if (!profileLabel) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "current Instagram screen has no unique Profile accessibility ID for account verification");
       try {
-        await options.client.clickSemantic("profile_tab");
+        await options.client.clickSemantic("profile_tab", profileLabel);
         const fresh = await readInstagramTree(options.client);
         values = appiumXmlValues(fresh);
         if (!isOwnProfile(values, options.expectedAccountHandle)) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "visible profile could not be bound to the configured account");
@@ -96,6 +98,29 @@ export function createPhoneUiProvider(options: PhoneUiProviderOptions): PhoneUiP
     }
     const data = { username: options.expectedAccountHandle, ...profile };
     return makeObservation(options, capturedAt, "ready", "partial", "not_applicable", data, [], `profile:${hash(options.accountBinding).slice(0, 20)}`);
+  }
+
+  async function ensureInbox(root: AppiumXmlNode, requestedLimit: number, capturedAt: string): Promise<Observation<unknown>> {
+    const account = await accountObservation(root, "account.inspect", capturedAt);
+    if (account.availability !== "ready" || !isRecord(account.data) || account.data.username !== options.expectedAccountHandle) return account;
+    try { root = await readInstagramTree(options.client); }
+    catch { return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "verified Instagram account screen could not be reread before opening Direct"); }
+
+    if (isInboxScreen(root)) return inboxObservation(root, requestedLimit, capturedAt);
+    const homeLabel = uniqueSemanticButton(root, ["Home"]);
+    if (!homeLabel) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "verified Instagram profile has no unique Home accessibility ID");
+    try { await options.client.clickSemantic("home_tab", homeLabel); }
+    catch { return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "supported Home accessibility control could not be opened"); }
+    try { root = await readInstagramTree(options.client); }
+    catch { return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "Instagram app could not be verified after opening Home"); }
+    const inboxLabel = uniqueSemanticButton(root, ["Messages", "Inbox"]);
+    if (!inboxLabel) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "verified Instagram Home has no unique supported Messages or Inbox accessibility ID");
+    try { await options.client.clickSemantic("inbox_tab", inboxLabel); }
+    catch { return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "supported Messages or Inbox accessibility control could not be opened"); }
+    try { root = await readInstagramTree(options.client); }
+    catch { return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "Instagram application could not be verified after opening Direct"); }
+    if (!isInboxScreen(root)) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "selected Messages or Inbox control did not open a recognized Direct screen");
+    return inboxObservation(root, requestedLimit, capturedAt);
   }
 
   async function insightsObservation(root: AppiumXmlNode, operation: Extract<PhoneUiOperation, { op: "insights.read" }>, capturedAt: string): Promise<Observation<unknown>> {
@@ -123,8 +148,7 @@ export function createPhoneUiProvider(options: PhoneUiProviderOptions): PhoneUiP
   }
 
   function inboxObservation(root: AppiumXmlNode, requestedLimit: number, capturedAt: string): Observation<unknown> {
-    const screenValues = appiumXmlValues(root);
-    if (!screenValues.includes("Messages") && !screenValues.includes("Inbox")) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "inbox screen signature is not recognized");
+    if (!isInboxScreen(root)) return observation(options, capturedAt, "unsupported_ui_version", "unknown", "unknown", "inbox screen signature is not recognized");
     const limit = boundedLimit(requestedLimit);
     const rows = visibleRows(root);
     const parsed = rows.map((row, index) => selectionFromRow(row, index, options.accountBinding)).filter((item): item is Selection & { peer: string; preview?: string; unread: boolean | "unknown" } => Boolean(item));
@@ -133,6 +157,9 @@ export function createPhoneUiProvider(options: PhoneUiProviderOptions): PhoneUiP
     const unique = parsed.filter((item) => counts.get(item.peer.toLowerCase()) === 1);
     threadCache.byNativeId.clear();
     for (const item of unique) threadCache.byNativeId.set(item.nativeId, item);
+    if (unique.length === 0) return makeObservation(options, capturedAt, "ready", "unknown", "limited",
+      { threads: [] }, [{ code: "inbox_rows_unrecognized", message: "No unique Direct rows or verified empty-state signature was visible." }],
+      `inbox:${hash(options.accountBinding).slice(0, 20)}`);
     const truncated = unique.length > limit;
     const threads = unique.slice(0, limit).map((item) => ({
       target: { accountBinding: options.accountBinding, nativeId: item.nativeId },
@@ -275,6 +302,17 @@ function isOwnProfile(values: string[], handle: string): boolean {
   const exactHandle = normalized.includes(handle.toLowerCase()) || normalized.includes(`@${handle.toLowerCase()}`);
   return exactHandle && normalized.some((value) => ["edit profile", "share profile"].includes(value));
 }
+function isInboxScreen(root: AppiumXmlNode): boolean {
+  const headings = appiumXmlFind(root, (node) =>
+    ["XCUIElementTypeStaticText", "XCUIElementTypeNavigationBar", "android.widget.TextView"].includes(node.tag) &&
+    ["Messages", "Inbox"].includes(label(node)));
+  return headings.length === 1;
+}
+function uniqueSemanticButton(root: AppiumXmlNode, allowedIds: string[]): string | undefined {
+  const matches = appiumXmlFind(root, (node) => node.attributes.visible !== "false" && isButton(node) && allowedIds.includes(semanticAccessibilityId(node)));
+  return matches.length === 1 ? semanticAccessibilityId(matches[0]!) : undefined;
+}
+function semanticAccessibilityId(node: AppiumXmlNode): string { return first(node.attributes.name, node.attributes["content-desc"]); }
 
 function isReelInsights(values: string[]): boolean { return values.includes("Reel insights") && (values.includes("Overview") || values.includes("Summary")); }
 function insightScreen(values: string[]): string { return values.includes("Actions after viewing") ? "engagement" : values.includes("Who viewed your reel") ? "audience" : "overview"; }
@@ -405,4 +443,5 @@ function stableStringify(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 function safeError(_error: unknown): string { return "Appium source is malformed, oversized, or belongs to an unknown Instagram UI state."; }

@@ -1,9 +1,9 @@
 {
   "name": "meta-instagram-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
-  "description": "Local MCP server for official Meta Instagram API read-only analytics.",
+  "description": "Unified Instagram MCP with official Meta API and connected browser/phone companions.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,6 +31,7 @@
     "test": "vitest run",
     "test:installer": "node tools/test-installer.mjs",
     "test:native-registration": "node tools/test-native-registration.mjs",
+    "test:remote-entrypoint": "node tools/test-remote-entrypoint.mjs",
     "doctor": "node tools/doctor.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "meta:auth-url": "node tools/cli.mjs auth-url",

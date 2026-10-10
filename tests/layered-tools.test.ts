@@ -25,6 +25,19 @@ describe("layered tools", () => {
     expect(queue.limitations).not.toHaveLength(0);
   });
 
+  it("preserves an ephemeral browser row ref as a read-only conversation target", async () => {
+    const rowRef = "browser-inbox-row:opaque-row-ref";
+    const browser = provider("browser", observation("browser", { items: [
+      { target: { accountBinding: "instagram:42", explicitOwnerRef: rowRef }, label: "A visible preview", unread: "unknown", unanswered: "unknown" }
+    ] }, "partial"));
+    const queue = await createLayeredToolHandlers({ router: createSourceRouter({ providers: [browser] }) })
+      .triageInbox({ source: "auto", limit: 2 });
+
+    expect(queue.items).toMatchObject([{ threadRef: { accountBinding: "instagram:42", explicitOwnerRef: rowRef },
+      source: "browser", preview: "A visible preview", unread: "unknown", unanswered: "unknown", state: "unknown" }]);
+    expect(queue.channelCoverage.direct).toBe("partial");
+  });
+
   it("keeps unread separate from unanswered and never calls partial unknown context answered", async () => {
     const api = observation("api", { items: [
       { id: "thread-1", unread: true, unanswered: "unknown" },

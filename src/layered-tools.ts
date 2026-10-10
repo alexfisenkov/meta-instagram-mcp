@@ -9,6 +9,7 @@ export interface ReviewQueueItem {
   source: SourceId;
   sourceRefs?: Array<{ source: SourceId; nativeRef: string }>;
   coverage: Coverage;
+  preview?: string;
   latestInbound?: { nativeId: string; capturedAt?: string; direction: "inbound" | "unknown"; text?: string };
   unread: Truth;
   unanswered: Truth;
@@ -59,6 +60,7 @@ export interface LayeredToolOptions { router: SourceRouter; hostAnalysis?: HostA
 const READ_OPERATIONS: ReadRequest["operation"][] = ["account.inspect", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"];
 const LIMIT_MAX = 100;
 const COMMENT_TARGETS_MAX = 20;
+const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
 
 export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredToolHandlers {
   const now = options.now ?? (() => new Date());
@@ -152,7 +154,10 @@ function observationToItems(observation: Observation<unknown>, kind: "direct" | 
     const isComment = kind === "comments" || typeof raw.commentId === "string";
     const id = firstString(raw.commentId, raw.id, raw.threadId, raw.conversationId,
       typeof nestedTarget?.nativeId === "string" ? nestedTarget.nativeId : undefined);
-    const target = id ? { accountBinding: observation.accountBinding, nativeId: id } : undefined;
+    const explicitOwnerRef = typeof nestedTarget?.explicitOwnerRef === "string" && nestedTarget.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)
+      ? nestedTarget.explicitOwnerRef : undefined;
+    const target = id ? { accountBinding: observation.accountBinding, nativeId: id }
+      : explicitOwnerRef && observation.source === "browser" ? { accountBinding: observation.accountBinding, explicitOwnerRef } : undefined;
     const latestRaw = firstRecord(raw.latestInbound, raw.latestMessage, raw.latestComment, latestMessage(raw.messages));
     const direction = latestRaw?.direction === "inbound" ? "inbound" : "unknown";
     const latestInbound = latestRaw && direction === "inbound" && typeof latestRaw.id === "string"
@@ -162,6 +167,7 @@ function observationToItems(observation: Observation<unknown>, kind: "direct" | 
     const explicitUnanswered = truth(raw.unanswered);
     const unanswered: Truth = explicitUnanswered ?? deriveUnanswered(latestRaw, observation.historyCompleteness);
     output.push({ ...(target ? isComment ? { commentRef: target } : { threadRef: target } : {}), source: observation.source,
+      ...(kind === "direct" && typeof raw.label === "string" && raw.label.length ? { preview: raw.label.slice(0, 600) } : {}),
       sourceRefs: [{ source: observation.source, nativeRef: observation.nativeRef }],
       coverage: observation.coverage, ...(latestInbound ? { latestInbound } : {}), unread: truth(raw.unread) ?? "unknown", unanswered,
       state: unanswered === true ? "needs_review" : unanswered === false ? "answered" : "unknown" });
@@ -181,7 +187,7 @@ function mergeVerifiedItems(items: ReviewQueueItem[]): ReviewQueueItem[] {
   for (const item of items) {
     const target = item.threadRef ?? item.commentRef;
     const kind = item.commentRef ? "comment" : "direct";
-    const identity = target?.nativeId;
+    const identity = target?.nativeId ?? target?.explicitOwnerRef;
     if (!target || !identity) {
       merged.set(`unbound:${merged.size}`, item);
       continue;

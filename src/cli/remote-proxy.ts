@@ -52,8 +52,8 @@ export async function loadRemoteProxyConfig(env: NodeJS.ProcessEnv = process.env
   return config;
 }
 
-async function main(): Promise<void> {
-  const config = await loadRemoteProxyConfig();
+export async function startRemoteProxy(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const config = await loadRemoteProxyConfig(env);
   const clientTransport = createRemoteProxyTransport(new URL("/mcp", config.url), config.bearerToken);
   const upstream = new Client({ name: "meta-instagram-remote-proxy", version: "0.1.0" });
   await upstream.connect(clientTransport);
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((error: unknown) => {
+  startRemoteProxy().catch((error: unknown) => {
     process.stderr.write(`remote proxy failed: ${error instanceof Error ? error.name : "unknown error"}\n`);
     process.exit(1);
   });

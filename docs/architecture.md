@@ -6,7 +6,7 @@
 
 ## Runtime
 
-Одна factory сохраняет 18 legacy API tools и добавляет per-source reads, inbox triage/analysis и guarded action flow. Источники читаются API → browser → phone с ограниченным бюджетом и явным coverage/provenance. API auth/permission status, companion readiness и live account checks остаются отдельными доказательствами. Legacy media publish живёт отдельно от Direct/comments/phone/browser actions.
+Одна factory сохраняет 18 legacy API tools и добавляет per-source reads, inbox triage/analysis и guarded action flow. Нативный stdio/HTTP каталог содержит 27 tools; отдельный cloud allowlist может иметь другой каталог и его нельзя считать общим runtime. Источники читаются API → browser → phone с ограниченным бюджетом и явным coverage/provenance. Если browser bridge зарегистрирован, но остаётся offline без live readiness, ordinary read делает ограниченный `account.inspect`, сверяет username с account handle Hub, перечитывает status и только затем запрашивает операцию. Статус API, companion readiness и live account checks остаются отдельными доказательствами. Legacy media publish живёт отдельно от Direct/comments/phone/browser actions.
 
 ## OAuth modes
 

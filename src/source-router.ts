@@ -1,12 +1,15 @@
 import type { Availability, HistoryCompleteness, MutationIntent, Observation, SourceId, TargetRef } from "./domain-types.js";
 import type { ApiReadRequest } from "./api-provider.js";
+import type { SourceReadContext } from "./read-context.js";
 
 export type ReadRequest = ApiReadRequest;
 
 export interface SourceProvider {
   readonly source: Exclude<SourceId, "user_supplied">;
-  status(operation?: ReadRequest["operation"]): Promise<{ source: SourceId; availability: Availability; capabilities: string[]; reason?: string; accountBinding?: string }>;
-  read(request: ReadRequest): Promise<Observation<unknown>>;
+  status(operation?: ReadRequest["operation"], context?: SourceReadContext): Promise<{ source: SourceId; availability: Availability; capabilities: string[]; reason?: string; accountBinding?: string; bridgeId?: string }>;
+  /** Optional bounded, read-only source bootstrap before the requested read. */
+  prepareRead?(request: ReadRequest, context?: SourceReadContext): Promise<void>;
+  read(request: ReadRequest, context?: SourceReadContext): Promise<Observation<unknown>>;
   refreshContext?(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string; availability?: Availability; sideEffects?: Array<"may_mark_seen"> }>;
 }
 
@@ -32,10 +35,26 @@ export interface SourceRouter {
 }
 
 const PRIORITY: ReadonlyArray<SourceProvider["source"]> = ["api", "browser", "phone"];
+const WINDOWS_DEFAULT_READ_BUDGET_MS = 50_000;
+const TRIAGE_API_FALLBACK_RESERVE_MS = 8_000;
+const WINDOWS_TRIAGE_API_FALLBACK_RESERVE_MS = 35_000;
+const READ_ABORT_GRACE_MS = 250;
+const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
+
+/** Returns the default shared provider budget; Windows leaves room before the MCP client's 60s request timeout. */
+export function defaultSourceRouterTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32" ? WINDOWS_DEFAULT_READ_BUDGET_MS : 12_000;
+}
+
+/** Reserves shared route time for browser/phone after a slow API inbox-triage read. */
+export function sourceRouterTriageFallbackReserveMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32" ? WINDOWS_TRIAGE_API_FALLBACK_RESERVE_MS : TRIAGE_API_FALLBACK_RESERVE_MS;
+}
 
 /** Bounded read-only fallback. Observations stay attributed; this router never merges records. */
 export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
-  const timeoutMs = options.timeoutMs ?? (process.platform === "win32" ? 30_000 : 5_000);
+  // Keep the shared Windows read result ahead of the MCP SDK's 60s client request deadline.
+  const timeoutMs = options.timeoutMs ?? defaultSourceRouterTimeoutMs();
   const maxProviders = options.maxProviders ?? PRIORITY.length;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error("invalid source router timeout");
   if (!Number.isInteger(maxProviders) || maxProviders < 1 || maxProviders > PRIORITY.length) throw new Error("invalid source router provider limit");
@@ -63,40 +82,95 @@ export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
       if (target && (!target.accountBinding || !hasVerifiableIdentity(target))) {
         return emptyResult(observations, triedSources, [target], skippedSources, [{ source: "api", code: "needs_selection", message: "A native id or explicit owner reference is required for a selected target." }]);
       }
+      const browserInboxRowRef = target?.explicitOwnerRef?.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) ?? false;
+      if (browserInboxRowRef && request.operation !== "conversation.read") {
+        return emptyResult(observations, triedSources, [], skippedSources, [{ source: "browser", code: "browser_ref_read_only", message: "A browser inbox row reference is valid only for a selected conversation read." }]);
+      }
 
       const ordered = PRIORITY.map((source) => bySource.get(source)).filter((item): item is SourceProvider => Boolean(item)).slice(0, maxProviders);
-      for (const provider of ordered) {
-        const remaining = deadline - Date.now();
+      for (let providerIndex = 0; providerIndex < ordered.length; providerIndex += 1) {
+        const provider = ordered[providerIndex]!;
+        if (browserInboxRowRef && provider.source !== "browser") {
+          skippedSources.push({ source: provider.source, reason: "The selected target is an ephemeral browser inbox reference." });
+          continue;
+        }
+        let remaining = deadline - Date.now();
         if (remaining <= 0) {
           skippedSources.push({ source: provider.source, reason: "The shared read budget expired." });
           continue;
         }
-        let sourceStatus;
-        try { sourceStatus = await withTimeout(provider.status(request.operation), remaining); }
-        catch (error) {
+        const isApiInboxTriage = provider.source === "api" && request.operation === "inbox.list" && request.triage === true;
+        const laterProviderExists = providerIndex + 1 < ordered.length;
+        const desiredReserve = isApiInboxTriage && laterProviderExists ? sourceRouterTriageFallbackReserveMs() : 0;
+        const fallbackReserve = Math.min(desiredReserve, Math.max(0, remaining - 1));
+        const providerBudgetMs = Math.max(1, remaining - fallbackReserve);
+        const controller = new AbortController();
+        const sourceStartedAt = Date.now();
+        const abortAfterMs = Math.max(1, providerBudgetMs - Math.min(READ_ABORT_GRACE_MS, Math.floor(providerBudgetMs / 4)));
+        const context = { signal: controller.signal, deadlineAt: sourceStartedAt + abortAfterMs };
+        const abortTimer = setTimeout(() => controller.abort(new Error("Provider read deadline expired.")), abortAfterMs);
+        if (provider.prepareRead) {
+          let preflightFailed = false;
+          try {
+            const preflightRemaining = Math.max(1, providerBudgetMs - (Date.now() - sourceStartedAt));
+            await withTimeout(provider.prepareRead(request, context), preflightRemaining, () => controller.abort());
+          } catch (error) {
+            preflightFailed = true;
+            const code = error instanceof TimeoutError ? "preflight_timeout" : "preflight_failed";
+            errors.push({ source: provider.source, code, message: safeReason(error) });
+            skippedSources.push({ source: provider.source, reason: "Source did not pass its required read preflight." });
+          }
+          remaining = deadline - Date.now();
+          const sourceRemaining = providerBudgetMs - (Date.now() - sourceStartedAt);
+          if (preflightFailed || controller.signal.aborted || sourceRemaining <= 0) {
+            if (!preflightFailed) skippedSources.push({ source: provider.source, reason: "The shared read budget expired during source preflight." });
+            clearTimeout(abortTimer);
+            continue;
+          }
+          if (remaining <= 0) {
+            skippedSources.push({ source: provider.source, reason: "The shared read budget expired during source preflight." });
+            clearTimeout(abortTimer);
+            continue;
+          }
+        }
+        let statusTimedOut = false;
+        let sourceStatus: Awaited<ReturnType<SourceProvider["status"]>> | undefined;
+        let result: Observation<unknown>;
+        try {
+          const statusBudgetMs = Math.max(1, providerBudgetMs - (Date.now() - sourceStartedAt));
+          sourceStatus = await withTimeout(provider.status(request.operation, context), statusBudgetMs, () => controller.abort());
+        } catch (error) {
+          statusTimedOut = true;
           const code = error instanceof TimeoutError ? "timeout" : "provider_status_failed";
           skippedSources.push({ source: provider.source, reason: safeReason(error) });
           errors.push({ source: provider.source, code, message: safeReason(error) });
+        }
+        if (statusTimedOut || !sourceStatus) {
+          clearTimeout(abortTimer);
           continue;
         }
         if (sourceStatus.accountBinding && target && sourceStatus.accountBinding !== target.accountBinding) {
           identityConflicts.push(target);
           skippedSources.push({ source: provider.source, reason: "Provider account does not match the selected target." });
+          clearTimeout(abortTimer);
           continue;
         }
         const browserBootstrap = request.operation === "account.inspect" && provider.source === "browser" && sourceStatus.availability !== "ready";
         if (sourceStatus.availability !== "ready" && !browserBootstrap) {
           skippedSources.push({ source: provider.source, reason: sourceStatus.reason ?? `Source is ${sourceStatus.availability}.` });
           errors.push({ source: provider.source, code: sourceStatus.availability, message: sourceStatus.reason ?? `Source is ${sourceStatus.availability}.` });
+          clearTimeout(abortTimer);
           continue;
         }
         triedSources.push(provider.source);
-        let result: Observation<unknown>;
+        const sourceRemainingMs = Math.max(1, providerBudgetMs - (Date.now() - sourceStartedAt));
         try {
-          result = await withTimeout(provider.read(request), Math.max(1, deadline - Date.now()));
+          result = await withTimeout(provider.read(request, context), sourceRemainingMs, () => controller.abort());
         } catch (error) {
           const timeout = error instanceof TimeoutError;
           result = unavailableObservation(provider.source, target?.accountBinding ?? sourceStatus.accountBinding ?? "unresolved", timeout ? "offline" : "offline", safeReason(error), timeout ? "timeout" : "read_failed");
+        } finally {
+          clearTimeout(abortTimer);
         }
         if (result.source !== provider.source || (target && result.accountBinding !== target.accountBinding)) {
           identityConflicts.push(target ?? { accountBinding: result.accountBinding, explicitOwnerRef: result.nativeRef });
@@ -154,9 +228,12 @@ function unavailableObservation(source: SourceProvider["source"], accountBinding
 
 class TimeoutError extends Error { constructor() { super("Source read exceeded the shared time budget."); } }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError()), timeoutMs);
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new TimeoutError());
+    }, timeoutMs);
     promise.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error); });
   });
 }

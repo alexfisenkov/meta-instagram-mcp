@@ -3,6 +3,33 @@ import { describe, expect, it } from "vitest";
 import { createAppiumClient } from "../src/providers/appium-client.js";
 
 describe("AppiumClient readiness", () => {
+  it("opens Direct only through the exact Messages or Inbox accessibility labels", async () => {
+    const requests: Array<{ method: string; path: string; body: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? init.body : "";
+      requests.push({ method, path: url.pathname, body });
+      const payload = url.pathname.endsWith("/status") ? { value: { ready: true } }
+        : url.pathname.endsWith("/session") && method === "POST" ? { value: { sessionId: "session-1", capabilities: { udid: "fixture-device" } } }
+          : url.pathname.endsWith("/elements") ? { value: [{ "element-6066-11e4-a52e-4f735466cecf": "element-1" }] } : {};
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const client = createAppiumClient({ serverUrl: "http://127.0.0.1:4723", platform: "iOS",
+      selectedDevice: { id: "fixture-device" }, wdaStatusUrl: "http://127.0.0.1:8100/status", fetchImpl });
+
+    await client.createSession();
+    await client.clickSemantic("profile_tab", "Profile");
+    await client.clickSemantic("home_tab", "Home");
+    await client.clickSemantic("inbox_tab", "Messages");
+
+    expect(requests.filter((request) => request.path.endsWith("/elements")).map((request) => JSON.parse(request.body)))
+      .toEqual(["Profile", "Home", "Messages"].map((value) => ({ using: "accessibility id", value })));
+    await expect(client.clickSemantic("inbox_tab", "Search")).rejects.toThrow(/unsupported semantic control/);
+    expect(requests.filter((request) => request.path.endsWith("/elements"))).toHaveLength(3);
+    await client.close();
+  });
+
   it("requires a ready Appium server and selected-device WDA before creating a session", async () => {
     const requests: string[] = [];
     const appium = createServer((request, response) => {

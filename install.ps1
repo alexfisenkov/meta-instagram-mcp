@@ -28,7 +28,7 @@ foreach ($command in @("git", "node", "npm", "tar")) {
   if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { throw "Required command is missing: $command" }
 }
 $nodeMajor = [int]((& node -p "process.versions.node.split('.')[0]").Trim())
-if ($nodeMajor -lt 20) { throw "Node.js 20 or newer is required." }
+if ($nodeMajor -lt 22) { throw "Node.js 22 or newer is required." }
 
 $SourceDir = (Resolve-Path -LiteralPath $SourceDir).Path
 $Target = [System.IO.Path]::GetFullPath($Target)

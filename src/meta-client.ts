@@ -58,7 +58,7 @@ export class MetaClient {
     this.#apiVersion = options.apiVersion;
   }
 
-  async get(path: string, query: GraphGetParams = {}): Promise<unknown> {
+  async get(path: string, query: GraphGetParams = {}, options: { signal?: AbortSignal } = {}): Promise<unknown> {
     const url = this.buildUrl(path);
     const nestedQuery = query.query;
     for (const [key, value] of Object.entries(query)) {
@@ -70,7 +70,7 @@ export class MetaClient {
     }
     assertNoReservedParams(url.searchParams);
     url.searchParams.set("access_token", this.#accessToken);
-    const body = await this.request(url, { method: "GET", headers: { accept: "application/json" } });
+    const body = await this.request(url, { method: "GET", headers: { accept: "application/json" }, signal: options.signal });
     return sanitizeGraphValue(body, this.#accessToken);
   }
 
@@ -130,7 +130,7 @@ export class MetaClient {
   }
 
   /** Resolve one Facebook Page and create a client bound to its Page token. */
-  async forFacebookPage(pageId: string): Promise<FacebookPageClient> {
+  async forFacebookPage(pageId: string, options: { signal?: AbortSignal } = {}): Promise<FacebookPageClient> {
     if (new URL(this.#baseUrl).hostname !== "graph.facebook.com") {
       throw new Error("Facebook Page lookup requires graph.facebook.com.");
     }
@@ -145,7 +145,8 @@ export class MetaClient {
       assertNoReservedParams(url.searchParams);
       url.searchParams.set("access_token", this.#accessToken);
 
-      const body = await this.request(url, { method: "GET", headers: { accept: "application/json" } });
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error("Facebook Page lookup was aborted.");
+      const body = await this.request(url, { method: "GET", headers: { accept: "application/json" }, signal: options.signal });
       if (!isRecord(body) || !Array.isArray(body.data)) throw new Error("Meta returned an invalid Facebook Pages response.");
       for (const candidate of body.data) {
         if (!isRecord(candidate) || candidate.id !== pageId) continue;

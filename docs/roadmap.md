@@ -28,8 +28,14 @@
 - Подтвердить OAuth scopes для своего account/Page и нужного login mode. Webhook должен оставаться fail-closed до ожидаемого account binding, permissions и подписанного event setup.
 - Пройти один read-only smoke на подключённом MCP client и отдельные browser/phone checks. Не смешивать кодовый PASS с Meta live access, отправкой/публикацией или production readiness.
 
+## Known maintenance issues
+
+- A sanitized Mac DOM observation identified one visible own-profile avatar control with no `nav`, `header`, `aside`, or `main` ancestor and no `aria-label`/`title`, plus the authenticated own-profile `/accounts/edit/` control. Fixtures exercise those predicates with a neutral wrapper. A configured live bridge/read has not yet verified the flow end to end.
+- A bounded read deadline can expire after a browser/phone companion has already received or started a UI task. The Hub rejects a canceled task receipt and browser/phone checks expiry before beginning a task, but an action already underway cannot be reliably stopped or rolled back; UI reads may also mark a conversation seen. Verify behavior on attached hardware before claiming cancellation of active UI work.
+- Graceful close now drains admitted browser/phone work and receipt submission before transport/Appium teardown. It does not cancel or roll back UI actions already dispatched; callers must retain the existing `OUTCOME_UNKNOWN`/no-write-retry handling. Earlier `ENOTEMPTY` cleanup failures were observed, but their cause was not isolated to this shutdown race; this fix does not prove that every such failure is eliminated.
+
 ## Release/branch guardrails
 
 - Не выполнять Meta mutations, публикацию, server deploy, owner client-config update или GitHub release из CI.
-- `package.json` version `0.2.0` предварительная; точный опубликованный version/SHA задаётся после integrated acceptance.
+- Единственная цель для установки — [последний опубликованный GitHub Release](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest), включая SHA тега и provenance assets. Версия `package.json` описывает checkout и не подтверждает, что этот commit/tag опубликован.
 - Предыдущие инсталляции, token-store, OAuth state и backup-каталоги остаются восстановимыми; cleanup выполняется только отдельной явно заданной операцией.

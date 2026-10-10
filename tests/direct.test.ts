@@ -102,6 +102,50 @@ describe("Direct API domain", () => {
     expect((result.data as { items: Array<{ unread: unknown }> }).items.every((item) => item.unread === "unknown")).toBe(true);
   });
 
+  it("stops API triage after cancellation and preserves unread conversation ids as unknown", async () => {
+    const ctx = context();
+    const controller = new AbortController();
+    const get = vi.fn(async (path: string, _query?: unknown, options?: { signal?: AbortSignal }) => {
+      expect(options?.signal).toBe(controller.signal);
+      if (path.endsWith("/conversations")) return { data: [{ id: "thread-1" }, { id: "thread-2" }] };
+      if (path.endsWith("/thread-1/messages")) {
+        controller.abort();
+        throw new Error("request aborted");
+      }
+      throw new Error("triage started a GET after cancellation");
+    });
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createDirectDomain(async () => ctx);
+
+    const result = await domain.listUnanswered({ limit: 2 }, controller.signal);
+
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/page-4/conversations", "/thread-1/messages"]);
+    expect(result.coverage).toBe("partial");
+    expect(result.data).toMatchObject({ items: [
+      { conversationId: "thread-1", unread: "unknown", unanswered: "unknown" },
+      { conversationId: "thread-2", unread: "unknown", unanswered: "unknown" }
+    ] });
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: "read_budget_exhausted" }));
+  });
+
+  it("passes cancellation into the repeated account-context lookup before starting API triage", async () => {
+    const ctx = context();
+    const controller = new AbortController();
+    controller.abort(new Error("read budget expired"));
+    const resolveContext = vi.fn(async (readContext?: { signal?: AbortSignal }) => {
+      if (readContext?.signal?.aborted) throw readContext.signal.reason;
+      return ctx;
+    });
+    const get = vi.fn();
+    (ctx.pageClient as never as { get: typeof get }).get = get;
+    const domain = createDirectDomain(resolveContext);
+
+    await expect(domain.listUnanswered({ limit: 2 }, controller.signal)).rejects.toThrow("read budget expired");
+
+    expect(resolveContext).toHaveBeenCalledWith({ signal: controller.signal });
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("keeps unanswered unknown when native message IDs are absent or equal timestamps make ordering ambiguous", async () => {
     const ctx = context();
     const get = vi.fn(async (path: string) => {
