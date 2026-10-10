@@ -180,6 +180,35 @@ describe("Instagram extension service worker protocol", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("does not dispatch if fixed tab creation itself exceeds the read deadline", async () => {
+    vi.useFakeTimers();
+    let markCreateStarted!: () => void;
+    let releaseCreate!: (tab: { id: number; url: string; status: string }) => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    const createGate = new Promise<{ id: number; url: string; status: string }>((resolve) => { releaseCreate = resolve; });
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => { markCreateStarted(); return createGate; } });
+    try {
+      await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+      const task = { id: "task-bootstrap-create-deadline", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+        accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 100).toISOString() };
+      const processing = fixture.nativeMessage({ kind: "task", task });
+      await createStarted;
+      await vi.advanceTimersByTimeAsync(100);
+      await processing;
+      releaseCreate({ id: 96, url: "https://www.instagram.com/direct/inbox/", status: "loading" });
+      for (let step = 0; step < 20; step += 1) await Promise.resolve();
+      expect(fixture.sendMessage).not.toHaveBeenCalled();
+      expect(fixture.updatedListenerCount).toBe(0);
+      expect(fixture.createTab).toHaveBeenCalledOnce();
+      expect(fixture.portMessages[0]?.filter((message) => message?.kind === "result" && message.taskId === task.id)).toHaveLength(1);
+      expect(fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result)
+        .toMatchObject({ availability: "offline", errors: [{ code: "task_deadline_expired" }] });
+    } finally {
+      releaseCreate({ id: 96, url: "https://www.instagram.com/direct/inbox/", status: "loading" });
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry bootstrap when the created tab is signed out or unsupported", async () => {
     const tab = { id: 95, url: "https://www.instagram.com/direct/inbox/", status: "complete" };
     const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => tab,
