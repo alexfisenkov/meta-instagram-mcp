@@ -31,5 +31,5 @@
 ## Release/branch guardrails
 
 - Не выполнять Meta mutations, публикацию, server deploy, owner client-config update или GitHub release из CI.
-- `v0.2.0` опубликован и остаётся текущей версией для установки. `package.json` version `0.2.1` обозначает текущий кандидат; tag/release и installable SHA появятся только после integrated acceptance.
+- Единственная цель для установки — [последний опубликованный GitHub Release](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest), включая SHA тега и provenance assets. Версия `package.json` описывает checkout и не подтверждает, что этот commit/tag опубликован.
 - Предыдущие инсталляции, token-store, OAuth state и backup-каталоги остаются восстановимыми; cleanup выполняется только отдельной явно заданной операцией.

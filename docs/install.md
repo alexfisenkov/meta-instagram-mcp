@@ -41,7 +41,7 @@ git checkout --detach $Revision
 .\install.ps1 -Revision $Revision
 ```
 
-Установщик сверяет SHA с `HEAD`, требует чистую рабочую копию и собирает только отслеживаемые файлы указанного commit. Он не запускает `sudo`, не устанавливает Node.js, не меняет настройки MCP-клиентов и не публикует release. Текущий опубликованный release — `v0.2.0`; `v0.2.1` в этой ветке — непубликованный кандидат. Устанавливайте только commit SHA, опубликованный в GitHub Releases.
+Установщик сверяет SHA с `HEAD`, требует чистую рабочую копию и собирает только отслеживаемые файлы указанного commit. Он не запускает `sudo`, не устанавливает Node.js, не меняет настройки MCP-клиентов и не публикует release. Выбирайте установочный commit из [последнего опубликованного release](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest); версия локального `package.json` не заменяет публикацию tag и assets в GitHub Releases.
 
 Каталог программы по умолчанию — `~/.local/share/meta-instagram-mcp/app` на macOS/Linux и `%LOCALAPPDATA%\meta-instagram-mcp\app` на Windows. Конфигурация отдельно: `~/.config/meta-instagram-mcp/.env`, token-store по умолчанию `~/.config/meta-instagram-mcp/token.json`. Windows использует `%USERPROFILE%\.config\meta-instagram-mcp`. Пути можно заменить флагами `--target` и `--config-dir` (`-Target`, `-ConfigDir` в PowerShell). Каталог конфигурации должен находиться вне каталога программы.
 
