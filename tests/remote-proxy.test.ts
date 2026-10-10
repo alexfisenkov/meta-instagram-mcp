@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createRemoteProxyServer, createRemoteProxyTransport, loadRemoteProxyConfig, startRemoteProxy } from "../src/cli/remote-proxy.js";
+import { ensurePrivateFile } from "../src/private-fs.js";
 
 describe("remote-proxy", () => {
   it("loads a private external remote config and rejects an invalid remote route without local fallback", async () => {
@@ -14,6 +15,7 @@ describe("remote-proxy", () => {
     const config = { url: "https://mcp.example.test", bearerToken: "remote-proxy-fixture-token-0123456789" };
     try {
       await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+      await ensurePrivateFile(configPath);
       expect(await loadRemoteProxyConfig({ INSTAGRAM_MCP_REMOTE_CONFIG: configPath })).toEqual(config);
       await expect(startRemoteProxy({ INSTAGRAM_MCP_REMOTE_URL: "http://mcp.example.test", INSTAGRAM_MCP_REMOTE_BEARER_TOKEN: config.bearerToken }))
         .rejects.toThrow(/HTTPS origin/);
