@@ -288,7 +288,9 @@ async function bootstrapReadSurface(task, context) {
     const created = outcome.tab;
     if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now() ||
         !Number.isInteger(created?.id)) return undefined;
-    if (!isInstagramUrl(created.url)) return tabSelectionFailure("browser_bootstrap_load_failed", "the fixed Direct Inbox tab did not stay on Instagram");
+    if (!isBootstrapTabUrlState(created)) {
+      return tabSelectionFailure("browser_bootstrap_load_failed", "the fixed Direct Inbox tab did not stay on Instagram");
+    }
     const loaded = await waitForTabComplete(created, task.expiresAt, isCurrent, (cancel) => { pending.cancelLoad = cancel; });
     pending.cancelLoad = undefined;
     if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
@@ -319,8 +321,8 @@ function awaitBootstrapForTask(promise, expiresAt, isCurrent) {
 }
 
 function waitForTabComplete(initialTab, expiresAt, isCurrent, registerCancel) {
-  if (!Number.isInteger(initialTab?.id) || !isInstagramUrl(initialTab.url)) return Promise.resolve(undefined);
-  if (initialTab.status === "complete") return Promise.resolve(initialTab);
+  if (!Number.isInteger(initialTab?.id) || !isBootstrapTabUrlState(initialTab)) return Promise.resolve(undefined);
+  if (initialTab.status === "complete" && isCompletedBootstrapTab(initialTab)) return Promise.resolve(initialTab);
   const remainingMs = Date.parse(expiresAt) - Date.now();
   if (remainingMs <= 0 || !isCurrent()) return Promise.resolve(undefined);
   return new Promise((resolve) => {
@@ -337,7 +339,10 @@ function waitForTabComplete(initialTab, expiresAt, isCurrent, registerCancel) {
     const onUpdated = (tabId, changeInfo, tab) => {
       if (tabId !== initialTab.id) return;
       if (!isCurrent() || Date.parse(expiresAt) <= Date.now()) return finish(undefined);
-      if (changeInfo.status === "complete") finish(isInstagramUrl(tab.url) ? tab : undefined);
+      if (changeInfo.status === "complete") {
+        if (isCompletedBootstrapTab(tab)) finish(tab);
+        else if (!isBootstrapTabUrlState(tab)) finish(undefined);
+      }
     };
     chrome.tabs.onUpdated.addListener(onUpdated);
     timeout = setTimeout(cancel, remainingMs);
@@ -345,9 +350,24 @@ function waitForTabComplete(initialTab, expiresAt, isCurrent, registerCancel) {
     void chrome.tabs.get(initialTab.id).then((tab) => {
       if (settled) return;
       if (!isCurrent() || Date.parse(expiresAt) <= Date.now()) return finish(undefined);
-      if (tab?.status === "complete") finish(isInstagramUrl(tab.url) ? tab : undefined);
+      if (tab?.status === "complete") {
+        if (isCompletedBootstrapTab(tab)) finish(tab);
+        else if (!isBootstrapTabUrlState(tab)) finish(undefined);
+      }
     }, () => finish(undefined));
   });
+}
+
+function isBootstrapTabUrlState(tab) {
+  if (!isRecord(tab)) return false;
+  const committedUrl = tab.url;
+  const provisionalUrl = committedUrl === "" || committedUrl === "about:blank" || typeof committedUrl !== "string";
+  if (!isInstagramUrl(committedUrl) && !provisionalUrl) return false;
+  return !tab.pendingUrl || isInstagramUrl(tab.pendingUrl);
+}
+
+function isCompletedBootstrapTab(tab) {
+  return tab?.status === "complete" && isInstagramUrl(tab.url) && (!tab.pendingUrl || isInstagramUrl(tab.pendingUrl));
 }
 
 function rememberInboxRowTabs(task, result, tabId) {

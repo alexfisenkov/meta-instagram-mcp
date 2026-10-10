@@ -41,8 +41,9 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.alarms.create).toHaveBeenLastCalledWith("instagram-native-reconnect", { delayInMinutes: 1 });
   });
 
-  it.each(["account.inspect", "inbox.list"])("creates one fixed inactive Direct tab for zero-tab %s and waits for load before ping", async (operation) => {
-    const instagramTab = { id: 91, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+  it.each([["account.inspect", "", "loading"], ["inbox.list", "about:blank", "loading"], ["account.inspect", "about:blank", "complete"]])(
+    "creates one fixed inactive Direct tab for zero-tab %s from a provisional URL and waits for load before ping", async (operation, provisionalUrl, provisionalStatus) => {
+    const instagramTab = { id: 91, url: provisionalUrl, pendingUrl: "https://www.instagram.com/direct/inbox/", status: provisionalStatus };
     const fixture = workerFixture({
       onTabsQuery: async () => [],
       onCreateTab: async (properties) => {
@@ -62,7 +63,7 @@ describe("Instagram extension service worker protocol", () => {
     await waitFor(() => fixture.updatedListenerCount === 1);
     expect(fixture.createTab).toHaveBeenCalledOnce();
     expect(fixture.sendMessage).not.toHaveBeenCalled();
-    fixture.updateTab(91, { status: "complete" });
+    fixture.updateTab(91, { url: "https://www.instagram.com/direct/inbox/", status: "complete" });
     await processing;
 
     expect(fixture.createTab).toHaveBeenCalledOnce();
@@ -233,6 +234,22 @@ describe("Instagram extension service worker protocol", () => {
     expect(JSON.stringify(result)).not.toContain("private tab detail");
     expect(fixture.updatedListenerCount).toBe(0);
     expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch when the bootstrap tab commits outside Instagram", async () => {
+    const tab = { id: 99, url: "", pendingUrl: "https://www.instagram.com/direct/inbox/", status: "loading" };
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => tab, onGetTab: async () => tab });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "task-bootstrap-external-commit", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    const processing = fixture.nativeMessage({ kind: "task", task });
+    await waitFor(() => fixture.updatedListenerCount === 1);
+    fixture.updateTab(99, { url: "https://example.invalid/", pendingUrl: undefined, status: "complete" });
+    await processing;
+    const result = fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result;
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "browser_bootstrap_load_failed" }] });
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.updatedListenerCount).toBe(0);
   });
 
   it("stops waiting for an unready login tab at the task deadline and preserves needs_selection", async () => {
@@ -660,8 +677,8 @@ function workerFixture(options: {
   response?: unknown;
   onPostMessage?: (message: unknown) => void;
   onTabsQuery?: () => Promise<Array<{ id: number; url: string }>>;
-  onCreateTab?: (properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string }>;
-  onGetTab?: (tabId: number) => Promise<{ id: number; url: string; status: string } | undefined>;
+  onCreateTab?: (properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string; pendingUrl?: string }>;
+  onGetTab?: (tabId: number) => Promise<{ id: number; url: string; status: string; pendingUrl?: string } | undefined>;
   onSendMessage?: (tabId: number, message: any) => Promise<unknown>;
   executeScript?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -691,10 +708,10 @@ function workerFixture(options: {
   });
   const alarms = { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: { addListener: (listener: (alarm: { name: string }) => unknown) => alarmListeners.push(listener) } };
   const scripting = { executeScript: options.executeScript ?? vi.fn(async () => []) };
-  const updatedListeners = new Set<(tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void>();
-  const tabsById = new Map<number, { id: number; url: string; status: string }>();
+  const updatedListeners = new Set<(tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void>();
+  const tabsById = new Map<number, { id: number; url: string; status: string; pendingUrl?: string }>();
   const createTab = vi.fn(async (properties: { url: string; active: boolean }) => {
-    const tab = options.onCreateTab ? await options.onCreateTab(properties) : { id: 999, url: properties.url, status: "complete" };
+    const tab = options.onCreateTab ? await options.onCreateTab(properties) : { id: 999, url: properties.url, status: "complete" as const };
     tabsById.set(tab.id, tab);
     return tab;
   });
@@ -707,8 +724,8 @@ function workerFixture(options: {
     alarms,
     tabs: {
       query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/", status: "complete" }]),
-      create: createTab, get: getTab, onUpdated: { addListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void) => updatedListeners.add(listener),
-        removeListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void) => updatedListeners.delete(listener) },
+      create: createTab, get: getTab, onUpdated: { addListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void) => updatedListeners.add(listener),
+        removeListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void) => updatedListeners.delete(listener) },
       sendMessage
     },
     scripting
@@ -717,7 +734,7 @@ function workerFixture(options: {
   return {
     sendMessage, postMessage, connectNative, alarms, scripting, portMessages, createTab,
     get updatedListenerCount() { return updatedListeners.size; },
-    updateTab(tabId: number, changeInfo: Partial<{ url: string; status: string }>) {
+    updateTab(tabId: number, changeInfo: Partial<{ url: string; status: string; pendingUrl?: string }>) {
       const previous = tabsById.get(tabId) ?? { id: tabId, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
       const updated = { ...previous, ...changeInfo };
       tabsById.set(tabId, updated);
