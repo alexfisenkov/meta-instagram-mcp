@@ -168,7 +168,7 @@ describe("Instagram content script against DOM fixtures", () => {
 
   it("keeps extension permissions limited to Instagram and Native Messaging", async () => {
     const manifest = JSON.parse(await readFile(resolve(root, "browser-extension/manifest.json"), "utf8"));
-    expect(manifest.permissions).toEqual(["nativeMessaging"]);
+    expect(manifest.permissions).toEqual(["nativeMessaging", "alarms"]);
     expect(manifest.host_permissions).toEqual(["https://www.instagram.com/*", "https://instagram.com/*"]);
     expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|cookies|tabs|scripting/i);
   });

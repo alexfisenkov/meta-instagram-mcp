@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createPhoneUiProvider } from "../src/providers/phone-ui.js";
 
 const profileXml = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="@fixture"/><XCUIElementTypeButton label="Edit profile"/><XCUIElementTypeStaticText label="1,234 followers"/><XCUIElementTypeStaticText label="321 following"/><XCUIElementTypeStaticText label="42 posts"/></XCUIElementTypeApplication></AppiumAUT>';
+const profileInboxXml = profileXml.replace("</XCUIElementTypeApplication>", '<XCUIElementTypeButton name="Home" label="Home"/></XCUIElementTypeApplication>');
+const homeXml = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeButton name="Profile" label="Profile"/><XCUIElementTypeButton name="Home" label="Home"/><XCUIElementTypeButton name="Messages" label="Messages"/></XCUIElementTypeApplication></AppiumAUT>';
+const inboxXml = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeButton name="Profile" label="Profile"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@peer"/><XCUIElementTypeStaticText label="Latest preview"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
 
 describe("PhoneUiProvider", () => {
   it("returns a bounded profile observation only when the app and selected account are proven", async () => {
@@ -15,6 +18,75 @@ describe("PhoneUiProvider", () => {
     expect(result).toMatchObject({ source: "phone", accountBinding: "acct:fixture", availability: "ready", coverage: "partial" });
     expect(result.data).toMatchObject({ username: "fixture", followers: 1234, following: 321, posts: 42 });
     expect(JSON.stringify(result)).not.toContain("AppiumAUT");
+  });
+
+  it.each([
+    ["verified profile", profileInboxXml, profileInboxXml, ["home_tab:Home", "inbox_tab:Messages"]],
+    ["home", homeXml, profileInboxXml, ["profile_tab:Profile", "home_tab:Home", "inbox_tab:Messages"]],
+    ["already-open inbox", inboxXml, profileInboxXml, ["profile_tab:Profile", "home_tab:Home", "inbox_tab:Messages"]]
+  ])("opens Direct from a verified %s through exact accessibility controls", async (_state, initial, profile, expectedClicks) => {
+    let current = initial;
+    const clicks: string[] = [];
+    const client = {
+      readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: [], transportReady: true, selectedDeviceIdentity: "verified" as const })),
+      getSource: vi.fn(async () => current),
+      clickSemantic: vi.fn(async (control: string, observedLabel?: string) => {
+        clicks.push(`${control}:${observedLabel ?? ""}`);
+        if (control === "profile_tab") current = profile;
+        if (control === "home_tab") current = homeXml;
+        if (control === "inbox_tab") current = inboxXml;
+      })
+    };
+    const provider = createPhoneUiProvider({ client, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" });
+
+    const result = await provider.observe({ op: "inbox.list", limit: 10 });
+
+    expect(clicks).toEqual(expectedClicks);
+    expect(clicks.length).toBeLessThanOrEqual(3);
+    expect(result.errors).toEqual([]);
+    expect(result).toMatchObject({ availability: "ready", coverage: "complete", data: { threads: [{ peer: "@peer" }] } });
+  });
+
+  it("does not report a recognized but rowless inbox as an empty Direct", async () => {
+    const emptyInbox = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeStaticText label="No messages"/></XCUIElementTypeApplication></AppiumAUT>';
+    let current = profileInboxXml;
+    const client = {
+      readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: [], transportReady: true, selectedDeviceIdentity: "verified" as const })),
+      getSource: vi.fn(async () => current),
+      clickSemantic: vi.fn(async (control: string) => {
+        if (control === "home_tab") current = homeXml;
+        if (control === "inbox_tab") current = emptyInbox;
+      })
+    };
+    const result = await createPhoneUiProvider({ client, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" })
+      .observe({ op: "inbox.list", limit: 10 });
+
+    expect(result).toMatchObject({ availability: "ready", coverage: "unknown", historyCompleteness: "limited",
+      data: { threads: [] }, errors: [{ code: "inbox_rows_unrecognized" }] });
+  });
+
+  it.each([
+    ["wrong app", '<AppiumAUT><XCUIElementTypeApplication name="Settings"/></AppiumAUT>', profileXml, "unsupported_ui_version"],
+    ["wrong account", '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="@other"/><XCUIElementTypeButton label="Edit profile"/><XCUIElementTypeButton name="Profile" label="Profile"/></XCUIElementTypeApplication></AppiumAUT>', '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="@other"/><XCUIElementTypeButton label="Edit profile"/><XCUIElementTypeButton name="Profile" label="Profile"/></XCUIElementTypeApplication></AppiumAUT>', "unsupported_ui_version"],
+    ["unknown UI", profileXml, profileXml.replace('<XCUIElementTypeButton label="Edit profile"/>', ''), "unsupported_ui_version"]
+  ])("fails closed on %s before opening Direct", async (_state, initial, afterProfile, availability) => {
+    let current = initial;
+    const clicks: string[] = [];
+    const client = {
+      readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: [], transportReady: true, selectedDeviceIdentity: "verified" as const })),
+      getSource: vi.fn(async () => current),
+      clickSemantic: vi.fn(async (control: string, observedLabel?: string) => {
+        clicks.push(`${control}:${observedLabel ?? ""}`);
+        if (control === "profile_tab") current = afterProfile;
+        if (control === "inbox_tab") current = inboxXml;
+      })
+    };
+    const result = await createPhoneUiProvider({ client, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" })
+      .observe({ op: "inbox.list", limit: 10 });
+
+    expect(result).toMatchObject({ availability, coverage: "unknown" });
+    expect(result.data).toBeUndefined();
+    expect(clicks.some((click) => click.startsWith("inbox_tab:"))).toBe(false);
   });
 
   it("extracts only recognized visible Reel insight labels for an exact selected media ref", async () => {
@@ -47,14 +119,20 @@ describe("PhoneUiProvider", () => {
   });
 
   it("returns bounded inbox rows and reads only a freshly selected unique peer", async () => {
-    const inbox = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@peer"/><XCUIElementTypeStaticText label="Latest preview"/><XCUIElementTypeStaticText label="2m"/><XCUIElementTypeStaticText label="Unread"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
+    const inbox = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeButton name="Profile" label="Profile"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@peer"/><XCUIElementTypeStaticText label="Latest preview"/><XCUIElementTypeStaticText label="2m"/><XCUIElementTypeStaticText label="Unread"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
     const conversation = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeNavigationBar label="@peer"/><XCUIElementTypeCell><XCUIElementTypeStaticText label="Earlier message"/></XCUIElementTypeCell><XCUIElementTypeCell><XCUIElementTypeStaticText label="Latest reply"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
-    let sources = [inbox, inbox, conversation];
+    let current = inbox;
     const clicks: string[] = [];
     const client = {
       readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: [], transportReady: true, selectedDeviceIdentity: "verified" as const })),
-      getSource: vi.fn(async () => sources.shift() ?? conversation),
-      clickSemantic: vi.fn(async (control: string, label?: string) => { clicks.push(`${control}:${label ?? ""}`); })
+      getSource: vi.fn(async () => current),
+      clickSemantic: vi.fn(async (control: string, label?: string) => {
+        clicks.push(`${control}:${label ?? ""}`);
+        if (control === "profile_tab") current = profileInboxXml;
+        if (control === "home_tab") current = homeXml;
+        if (control === "inbox_tab") current = inbox;
+        if (control === "selected_row") current = conversation;
+      })
     };
     const provider = createPhoneUiProvider({ client, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" });
     const listed = await provider.observe({ op: "inbox.list", limit: 10 });
@@ -64,14 +142,14 @@ describe("PhoneUiProvider", () => {
     const read = await provider.observe({ op: "thread.read", target: thread.target, limit: 10 });
     expect(read).toMatchObject({ availability: "ready", coverage: "partial", historyCompleteness: "limited", sideEffects: ["may_mark_seen"] });
     expect((read.data as { messages: Array<{ direction: string; text: string }> }).messages.map((message) => message.text)).toEqual(["Earlier message", "Latest reply"]);
-    expect(clicks).toEqual(["selected_row:@peer"]);
+    expect(clicks).toEqual(["profile_tab:Profile", "home_tab:Home", "inbox_tab:Messages", "selected_row:@peer"]);
   });
 
   it("keeps unread and unanswered unknown and marks bounded thread, comments, and replies history", async () => {
-    const inbox = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@peer"/><XCUIElementTypeStaticText label="Preview"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
+    const inbox = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Messages"/><XCUIElementTypeButton name="Profile" label="Profile"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@peer"/><XCUIElementTypeStaticText label="Preview"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
     const conversation = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeNavigationBar label="@peer"/><XCUIElementTypeCell><XCUIElementTypeStaticText label="Earlier message"/></XCUIElementTypeCell><XCUIElementTypeCell><XCUIElementTypeStaticText label="Latest reply"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
     const comments = '<AppiumAUT><XCUIElementTypeApplication name="Instagram"><XCUIElementTypeStaticText label="Comments"/><XCUIElementTypeStaticText label="fixture-media"/><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@commenter"/><XCUIElementTypeStaticText label="First comment"/><XCUIElementTypeOther><XCUIElementTypeStaticText label="@replyone"/><XCUIElementTypeStaticText label="First reply"/></XCUIElementTypeOther><XCUIElementTypeOther><XCUIElementTypeStaticText label="@replytwo"/><XCUIElementTypeStaticText label="Second reply"/></XCUIElementTypeOther></XCUIElementTypeCell><XCUIElementTypeCell visible="true"><XCUIElementTypeStaticText label="@another"/><XCUIElementTypeStaticText label="Second comment"/></XCUIElementTypeCell></XCUIElementTypeApplication></AppiumAUT>';
-    let sources = [inbox, inbox, conversation, comments, comments];
+    let sources = [inbox, profileInboxXml, profileInboxXml, homeXml, inbox, inbox, conversation, comments, comments];
     const client = {
       readiness: vi.fn(async () => ({ availability: "ready" as const, capabilities: [], transportReady: true, selectedDeviceIdentity: "verified" as const })),
       getSource: vi.fn(async () => sources.shift() ?? comments),

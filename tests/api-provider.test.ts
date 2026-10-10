@@ -90,7 +90,7 @@ describe("official API provider", () => {
   it("advertises Facebook message reactions as unsupported and never dispatches them", async () => {
     const { ctx, pageClient } = makeContext(["instagram_basic", "pages_manage_metadata", "instagram_manage_messages"]);
     pageClient.get.mockResolvedValue({ data: [{ id: "msg-11", from: { id: "peer-5" }, message: "Question", created_time: "2026-10-06T10:00:00.000Z" }] });
-    const provider = createApiProvider({ resolveContext: async () => ctx });
+    const provider = createApiProvider({ resolveContext: async () => ctx, now: () => new Date("2026-10-06T11:00:00.000Z") });
     const status = await provider.status();
     const intent = { source: "api", accountBinding: ctx.accountBinding, action: "message.react", payload: { kind: "message.react", reaction: "love" }, target: { accountBinding: ctx.accountBinding, nativeId: "thread-2" }, contextHash: "context" } as const;
     const refreshed = await provider.refreshContext(intent as never);

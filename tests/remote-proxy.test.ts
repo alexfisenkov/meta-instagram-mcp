@@ -1,10 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createRemoteProxyServer, createRemoteProxyTransport } from "../src/cli/remote-proxy.js";
+import { createRemoteProxyServer, createRemoteProxyTransport, loadRemoteProxyConfig, startRemoteProxy } from "../src/cli/remote-proxy.js";
+import * as runWrapper from "../tools/run.mjs";
+
+const runtimeEntrypoint = (runWrapper as unknown as { serverEntrypoint(packageRoot: string, env: NodeJS.ProcessEnv): string }).serverEntrypoint;
 
 describe("remote-proxy", () => {
+  it("selects the remote stdio proxy whenever remote config is present and preserves local default", () => {
+    const root = "/fixture/meta-instagram-mcp";
+    expect(runtimeEntrypoint(root, {})).toBe(join(root, "dist", "server.js"));
+    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_URL: "https://mcp.example.test", INSTAGRAM_MCP_REMOTE_BEARER_TOKEN: "x".repeat(40) }))
+      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
+    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_CONFIG: "/private/remote.json" }))
+      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
+    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_URL: "https://mcp.example.test" }))
+      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
+  });
+
+  it("loads a private external remote config and rejects an invalid remote route without local fallback", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "instagram-remote-config-"));
+    const configPath = join(directory, "remote.json");
+    const config = { url: "https://mcp.example.test", bearerToken: "remote-proxy-fixture-token-0123456789" };
+    try {
+      await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+      expect(await loadRemoteProxyConfig({ INSTAGRAM_MCP_REMOTE_CONFIG: configPath })).toEqual(config);
+      await expect(startRemoteProxy({ INSTAGRAM_MCP_REMOTE_URL: "http://mcp.example.test", INSTAGRAM_MCP_REMOTE_BEARER_TOKEN: config.bearerToken }))
+        .rejects.toThrow(/HTTPS origin/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("forwards upstream schemas, annotations, and tool results over stdio MCP", async () => {
     const sourceTool = {
       name: "meta_get_account_info", description: "account info",

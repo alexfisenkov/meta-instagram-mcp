@@ -1,4 +1,7 @@
 const NATIVE_HOST_NAME = "com.alexfisenkov.instagram_companion";
+const RECONNECT_ALARM = "instagram-native-reconnect";
+const RECONNECT_BASE_MS = 30_000;
+const RECONNECT_MAX_MS = 5 * 60_000;
 const INSTAGRAM_URL_PATTERNS = ["https://www.instagram.com/*", "https://instagram.com/*"];
 const OPERATION_MAP = Object.freeze({
   "account.inspect": "account.inspect",
@@ -25,19 +28,28 @@ let bridgeReady;
 let expectedAccountHandle;
 let accountBinding;
 let allowWrites = false;
+let reconnectAttempts = 0;
+let reconnectScheduled = false;
 const inFlightWrites = new Set();
 const writeApprovals = new Map();
 
 chrome.runtime.onStartup.addListener(connectNative);
 chrome.runtime.onInstalled.addListener(connectNative);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== RECONNECT_ALARM) return;
+  reconnectScheduled = false;
+  if (!nativePort) connectNative();
+});
 connectNative();
 
 function connectNative() {
   if (nativePort) return;
   try {
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-    nativePort.onMessage.addListener(onNativeMessage);
-    nativePort.onDisconnect.addListener(() => {
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    nativePort = port;
+    port.onMessage.addListener(onNativeMessage);
+    port.onDisconnect.addListener(() => {
+      if (nativePort !== port) return;
       nativePort = undefined;
       bridgeReady = false;
       expectedAccountHandle = undefined;
@@ -45,11 +57,21 @@ function connectNative() {
       allowWrites = false;
       inFlightWrites.clear();
       writeApprovals.clear();
+      scheduleReconnect();
     });
-    nativePort.postMessage({ kind: "hello", version: 1 });
+    port.postMessage({ kind: "hello", version: 1 });
   } catch {
     nativePort = undefined;
+    scheduleReconnect();
   }
+}
+
+function scheduleReconnect() {
+  if (reconnectScheduled || nativePort) return;
+  reconnectScheduled = true;
+  reconnectAttempts = Math.min(reconnectAttempts + 1, 16);
+  const delayMs = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(reconnectAttempts - 1, 4));
+  chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delayMs / 60_000 });
 }
 
 async function onNativeMessage(message) {
@@ -61,6 +83,9 @@ async function onNativeMessage(message) {
     accountBinding = message.accountBinding;
     expectedAccountHandle = message.expectedAccountHandle;
     allowWrites = message.allowWrites;
+    reconnectAttempts = 0;
+    reconnectScheduled = false;
+    void chrome.alarms.clear(RECONNECT_ALARM);
     return;
   }
   if (message.kind === "heartbeat") return;

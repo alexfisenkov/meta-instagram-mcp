@@ -14,7 +14,7 @@ MCP для работы с собственным Instagram-аккаунтом �
 
 ## Установка
 
-Инсталлятор принимает полный commit SHA из опубликованного release, собирает кандидат до переключения и оставляет отдельную резервную копию при обновлении. Версия `0.2.0` предварительная, пока release не опубликован. Сначала прочитайте [установку, обновление и rollback](docs/install.md), затем [матрицу готовности](docs/capabilities.md).
+Опубликован release [`v0.2.0`](https://github.com/alexfisenkov/meta-instagram-mcp/releases/tag/v0.2.0). Инсталлятор принимает полный commit SHA из опубликованного release, собирает кандидат до переключения и оставляет отдельную резервную копию при обновлении. Сначала прочитайте [установку, обновление и rollback](docs/install.md), затем [матрицу готовности](docs/capabilities.md).
 
 Для разработки из чистого checkout:
 
@@ -52,11 +52,11 @@ npm run test:native-registration
 - `meta_create_media_container` - создает контейнер публикации по публичной ссылке на медиа и читает его `status_code`. Ничего не публикует.
 - `meta_publish_media` - публикует готовый контейнер. Требует `confirm: true` и `META_INSTAGRAM_WRITE=true`.
 
-Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
+Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. По умолчанию `tools/run.mjs` запускает локальный MCP по stdio. Если задан любой `INSTAGRAM_MCP_REMOTE_*`, wrapper запускает stdio-proxy к настроенному HTTPS MCP; при ошибке remote-конфигурации он завершается и не создаёт локальное ядро. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
 
 Из приватного внешнего `.env` wrapper принимает только поддерживаемые `META_*` и `INSTAGRAM_MCP_*` имена; неизвестные ключи, включая `META_MCP_CONFIG_DIR`, завершают запуск с безопасным кодом ошибки. Значения читаются как текст без shell substitution. Переменные окружения процесса имеют приоритет над файлом. HTTP включается через `INSTAGRAM_MCP_TRANSPORT=http`; listener требует bearer secret и настраивается через `INSTAGRAM_MCP_HTTP_*`. API, browser и phone write gates независимы: `META_INSTAGRAM_WRITE`, `INSTAGRAM_MCP_BROWSER_WRITES` и `INSTAGRAM_MCP_PHONE_WRITES`. Подробнее — [runtime-параметры](docs/install.md#runtime-параметры-и-transports).
 
-Layered tools включают `meta_capabilities`, `meta_read_source`, `meta_triage_inbox`, `meta_read_inbox`, `meta_analyze_inbox`, `meta_begin_oauth`, `meta_prepare_action`, `meta_execute_action` и read-only `meta_reconcile_action` (27 MCP tools всего: 18 legacy и 9 layered/mutation). `meta_triage_inbox` по умолчанию проверяет Direct; для комментариев передайте ограниченный список точных `commentTargets` публикаций. `meta_capabilities` сообщает runtime status; он не подтверждает Meta access, пользовательский Chrome login, физическую готовность телефона или production release. Смотрите [матрицу возможностей](docs/capabilities.md).
+Нативный stdio/HTTP runtime регистрирует 27 инструментов: 18 legacy и 9 layered/mutation. Доступная отдельно cloud allowlist содержит 18 legacy tools; наличие cloud-каталога не подтверждает поддержку layered routing или companions в этом контуре. Для объединённого чтения Direct используйте `meta_read_inbox`: он проверяет API, затем подключённый browser и phone в порядке приоритета. Зарегистрированный, но ещё не проверенный browser проходит bounded `account.inspect` preflight перед обычным чтением; вход в Instagram и передача cookies автоматически не выполняются. `meta_capabilities` показывает readiness, а не доказывает успешный live read. Смотрите [матрицу возможностей](docs/capabilities.md) и [операционный runbook](docs/operations-runbook.md).
 
 ## Публикация
 

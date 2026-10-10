@@ -1,18 +1,19 @@
 # Карта проекта
 
-Обновлено: 2026-10-06.
+Обновлено: 2026-10-10.
 
 ## Как читать репозиторий
 
 Для публичного и переиспользуемого контекста начинайте с этих файлов:
 
 1. `README.md` - обзор, быстрый старт, список tools, граница public/private.
-2. `docs/install.md` - установка с нуля и OAuth setup.
-3. `docs/operations-runbook.md` - команды и процедуры для auth, smoke checks, token refresh.
-4. `docs/architecture.md` - устройство системы и OAuth modes.
-5. `docs/meta-setup.md` - Meta Dashboard и OAuth setup notes.
-6. `src/server.ts` и `src/tools.ts` - MCP surface и поведение tools.
-7. `queries/README.md` - локальный формат сохраненных Instagram-запросов и отчетов.
+2. `docs/install.md` - установка, OAuth setup, stdio/HTTP и remote proxy.
+3. `docs/operations-runbook.md` - текущая диагностика инструментов, readiness и Direct read.
+4. `docs/ios-appium-operator-runbook.md` - подключение optional iPhone companion через Appium/WDA.
+5. `docs/architecture.md` - устройство системы и OAuth modes.
+6. `docs/meta-setup.md` - Meta Dashboard и OAuth setup notes.
+7. `src/server.ts` и `src/tools.ts` - MCP surface и поведение tools.
+8. `queries/README.md` - локальный формат сохраненных Instagram-запросов и отчетов.
 
 Не начинайте с browser history, screenshots или старого chat context, если эти файлы отвечают на вопрос. Account-specific handoff/evidence files остаются local-only и игнорируются git.
 
@@ -35,9 +36,10 @@
 | Путь | Назначение | Заметки |
 |---|---|---|
 | `docs/install.md` | Установка с нуля и OAuth setup. | Для новой машины или GitHub onboarding. |
+| `docs/ios-appium-operator-runbook.md` | Операторская инструкция для optional iPhone/Appium companion. | Когда phone source нужен для чтения Instagram UI. |
 | `docs/architecture.md` | Architecture, OAuth modes, security boundaries, runtime state. | Первый файл перед изменением слоев. |
 | `docs/meta-setup.md` | Meta Dashboard setup и OAuth notes. | Диагностика `Invalid platform app` и direct-user-id fallback. |
-| `docs/operations-runbook.md` | Операционные команды для checks, OAuth re-auth, token refresh, common failures. | Когда нужно понять, как запустить или проверить сейчас. |
+| `docs/operations-runbook.md` | Текущая диагностика MCP, API/browser/phone readiness, Direct read и remote proxy. | Когда нужно понять, как проверить доступ сейчас. |
 | `docs/security-notes.md` | Правила secret handling, rotation и logging. | Перед работой с `.env`, token-store, app secret или browser auth. |
 | `docs/file-map.md` | Этот файл. | Быстро найти нужную зону проекта. |
 | `docs/verification-log.md` | Local/private redacted proof live OAuth/Graph checks. Игнорируется git. | Evidence history, не fresh proof. |
@@ -137,7 +139,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 
 ### Где проверить, что работает?
 
-Используйте `docs/operations-runbook.md` -> "Проверить текущий доступ" и "Live read smoke".
+Используйте `docs/operations-runbook.md` -> «Локально проверить установленный MCP» и «Получить Direct из доступного источника».
 
 ### Где обновлять текущую правду?
 

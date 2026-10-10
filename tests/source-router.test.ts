@@ -70,6 +70,40 @@ describe("SourceRouter", () => {
     expect(api.read).not.toHaveBeenCalled();
   });
 
+  it("preflights a registered browser before an automatic read and then rechecks operation readiness", async () => {
+    const api = provider("api", observation("api"));
+    api.status = async () => ({ source: "api", availability: "missing_scope", capabilities: [], reason: "Direct scope missing" });
+    const browser = provider("browser", observation("browser"));
+    let browserReady = false;
+    const prepareRead = vi.fn(async () => { browserReady = true; });
+    Object.assign(browser, {
+      prepareRead,
+      status: async () => ({ source: "browser", availability: browserReady ? "ready" as const : "offline" as const,
+        capabilities: browserReady ? ["inbox.list"] : [], reason: browserReady ? undefined : "registered, account verification pending" })
+    });
+    const router = createSourceRouter({ providers: [api, browser], timeoutMs: 100 });
+
+    const result = await router.read({ operation: "inbox.list", limit: 5 });
+
+    expect(prepareRead).toHaveBeenCalledOnce();
+    expect(result.triedSources).toEqual(["browser"]);
+    expect(result.observations).toEqual([observation("browser")]);
+  });
+
+  it("does not preflight or contact a browser that has no registered bridge", async () => {
+    const browser = provider("browser", observation("browser"));
+    const prepareRead = vi.fn();
+    browser.status = async () => ({ source: "browser", availability: "not_connected", capabilities: [], reason: "No bridge id" });
+    Object.assign(browser, { prepareRead });
+    const router = createSourceRouter({ providers: [browser], timeoutMs: 100 });
+
+    const result = await router.read({ operation: "inbox.list", limit: 5 });
+
+    expect(prepareRead).toHaveBeenCalledOnce();
+    expect(result.triedSources).toEqual([]);
+    expect(browser.read).not.toHaveBeenCalled();
+  });
+
   it("accepts an exact Instagram URL as a selected native target", async () => {
     const api = provider("api", observation("api", { nativeRef: "/direct/t/thread-1" }));
     const router = createSourceRouter({ providers: [api], timeoutMs: 100 });

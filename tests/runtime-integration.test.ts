@@ -280,7 +280,7 @@ describe("runtime composition", () => {
     }
   }, process.platform === "win32" ? 90_000 : 15_000);
 
-  it("bootstraps browser readiness from native account inspection through Hub, router, and MCP", async () => {
+  it("automatically verifies a registered browser before Direct inbox reads through Hub, router, and MCP", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-browser-bootstrap-")); dirs.push(dir);
     const hub = new CompanionHub({ storagePath: join(dir, "hub.json") });
     let bridgeToken = "";
@@ -304,8 +304,10 @@ describe("runtime composition", () => {
         frames.push(message);
         if (!isRecord(message) || message.kind !== "task" || !isRecord(message.task)) continue;
         const task = message.task as unknown as { id: string; contextHash?: string; operation: string };
-        const data = { username: "alexfisenkov", accountBinding: "instagram:42", loggedIn: true, surface: "instagram",
-          capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] };
+        const data = task.operation === "account.inspect"
+          ? { username: "alexfisenkov", accountBinding: "instagram:42", loggedIn: true, surface: "instagram",
+              capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] }
+          : { username: "alexfisenkov", items: [{ id: "thread-42", unread: true, unanswered: "unknown" }] };
         const result = { source: "browser", nativeRef: "/direct/inbox/", accountBinding: "instagram:42", capturedAt: new Date().toISOString(),
           availability: "ready", coverage: "complete", historyCompleteness: "not_applicable", data, errors: [] };
         input.write(encodeNativeFrame({ kind: "result", taskId: task.id, result, ...(task.contextHash ? { contextHash: task.contextHash } : {}) }));
@@ -326,9 +328,9 @@ describe("runtime composition", () => {
       server = runtime.createMcpServer();
       await server.connect(serverTransport);
       await client.connect(clientTransport);
-      const response = await client.callTool({ name: "meta_read_source", arguments: { operation: "account.inspect" } });
+      const response = await client.callTool({ name: "meta_read_inbox", arguments: { source: "auto", limit: 4 } });
       const result = JSON.parse(((response as { content: Array<{ text: string }> }).content[0]!).text);
-      expect(result).toMatchObject({ triedSources: ["browser"], observations: [{ source: "browser", availability: "ready", data: { username: "alexfisenkov" } }] });
+      expect(result).toMatchObject({ triedSources: ["browser"], items: [{ source: "browser", threadRef: { nativeId: "thread-42" } }], channelCoverage: { direct: "complete" } });
       expect(await hub.sourceStatus("browser", "instagram:42")).toMatchObject({ availability: "ready", accountHandle: "alexfisenkov", surface: "instagram", capabilities: expect.arrayContaining(["inbox.list"]) });
     } finally {
       await client.close(); await server?.close(); host.close(); input.end(); output.end();

@@ -37,6 +37,36 @@ describe("Browser Native Messaging host", () => {
     host.close();
   });
 
+  it("waits for account verification heartbeat before completing the bootstrap read", async () => {
+    const inspectTask = { ...readTask, id: "task-account", operation: "account.inspect", targetRefs: [], payload: {} } as unknown as BridgeTask;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let markHeartbeatStarted!: () => void;
+    let releaseHeartbeat!: () => void;
+    const heartbeatStarted = new Promise<void>((resolve) => { markHeartbeatStarted = resolve; });
+    const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
+    const client = bridgeClient([inspectTask]);
+    client.heartbeat = vi.fn().mockResolvedValueOnce(undefined).mockImplementationOnce(async () => { markHeartbeatStarted(); await heartbeatGate; });
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
+    const received = readFrames(output);
+    await host.start();
+    input.write(encodeNativeFrame({ kind: "hello", version: 1 }));
+    await waitFor(() => received.some((message) => isRecord(message) && message.kind === "task"));
+    input.write(encodeNativeFrame({ kind: "result", taskId: inspectTask.id, result: {
+      source: "browser", nativeRef: "/direct/inbox/", accountBinding, capturedAt: new Date().toISOString(),
+      availability: "ready", coverage: "complete", historyCompleteness: "not_applicable",
+      data: { username: "alexfisenkov", accountBinding, loggedIn: true, surface: "instagram",
+        capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] }, errors: []
+    }, contextHash: inspectTask.contextHash }));
+
+    await heartbeatStarted;
+    expect(client.submit).not.toHaveBeenCalled();
+    releaseHeartbeat();
+    await waitFor(() => vi.mocked(client.submit).mock.calls.length === 1);
+    expect(client.heartbeat).toHaveBeenCalledWith("bridge-1", expect.objectContaining({ availability: "ready", accountHandle: "alexfisenkov" }));
+    host.close();
+  });
+
   it("registers, sends only a bound semantic task, and submits a provenance-bound result once", async () => {
     const input = new PassThrough();
     const output = new PassThrough();

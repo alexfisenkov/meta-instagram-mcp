@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Local MCP server for official Meta Instagram API read-only analytics.",
+  "description": "Unified Instagram MCP with official Meta API and connected browser/phone companions.",
   "license": "MIT",
   "repository": {
     "type": "git",

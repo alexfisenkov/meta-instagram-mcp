@@ -6,7 +6,7 @@ import { MetaApiError, MetaTransportError, type MetaClient } from "./meta-client
 import type { ActionReadbackEvidence } from "./action-readback.js";
 
 export type ApiReadRequest =
-  | { operation: "account.inspect" }
+  | { operation: "account.inspect"; accountBinding?: string }
   | { operation: "inbox.list"; limit?: number; cursor?: string; triage?: boolean }
   | { operation: "conversation.read"; target: TargetRef; olderCursor?: string; limit?: number }
   | { operation: "comments.list"; target: TargetRef; cursor?: string; limit?: number; triage?: boolean }

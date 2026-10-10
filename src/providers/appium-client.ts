@@ -118,15 +118,17 @@ export class AppiumClient {
   }
 
   /** Fixed semantic controls only; row labels must come from a fresh unique UI observation. */
-  async clickSemantic(control: "profile_tab" | "insights_menu" | "insights_entry" | "selected_row" | "comment_like" | "comment_unlike", observedLabel?: string): Promise<void> {
-    const id = control === "profile_tab" ? "Profile"
+  async clickSemantic(control: "profile_tab" | "home_tab" | "inbox_tab" | "insights_menu" | "insights_entry" | "selected_row" | "comment_like" | "comment_unlike", observedLabel?: string): Promise<void> {
+    const id = control === "profile_tab" || control === "home_tab" || control === "inbox_tab" ? observedLabel
       : control === "insights_menu" ? "more-options-button"
         : control === "comment_like" ? "Like"
           : control === "comment_unlike" ? "Unlike"
             : control === "insights_entry" ? observedLabel
               : observedLabel;
-    if (!id || (control === "insights_entry" && !["View insights", "Insights"].includes(id))) throw new AppiumClientError("unsupported semantic control");
-    if ((control === "selected_row" || control === "insights_entry") && !validObservedLabel(id)) throw new AppiumClientError("invalid observed semantic label");
+    if (!id || (control === "profile_tab" && id !== "Profile") || (control === "home_tab" && id !== "Home") ||
+        (control === "insights_entry" && !["View insights", "Insights"].includes(id)) ||
+        (control === "inbox_tab" && !["Messages", "Inbox"].includes(id))) throw new AppiumClientError("unsupported semantic control");
+    if ((control === "profile_tab" || control === "home_tab" || control === "selected_row" || control === "insights_entry" || control === "inbox_tab") && !validObservedLabel(id)) throw new AppiumClientError("invalid observed semantic label");
     const session = this.requireSession();
     const found = await this.#request(this.sessionUrl(session.sessionId, "elements"), {
       method: "POST", body: { using: "accessibility id", value: id }

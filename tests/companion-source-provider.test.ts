@@ -40,6 +40,98 @@ describe("companion source provider", () => {
     }));
   });
 
+  it("probes a registered browser and verifies the exact account before allowing automatic reads", async () => {
+    const accountProbe = { ...observation("browser"), nativeRef: "/direct/inbox/", coverage: "complete" as const,
+      historyCompleteness: "not_applicable" as const,
+      data: { username: "owner", surface: "instagram", capabilities: ["inbox.list"] } };
+    const statuses = [
+      { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
+      { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
+      { source: "browser", availability: "ready", capabilities: ["account.inspect", "inbox.list"], accountBinding: "instagram:42",
+        bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }
+    ];
+    const hub = {
+      sourceStatus: vi.fn(async () => statuses.shift() ?? { source: "browser", availability: "ready", capabilities: ["inbox.list"],
+        accountBinding: "instagram:42", bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }),
+      enqueue: vi.fn(async () => ({ id: "account-inspect-task" })),
+      result: vi.fn(async () => ({ status: "complete", result: accountProbe }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+    const prepareRead = (provider as unknown as { prepareRead(request: unknown): Promise<void> }).prepareRead;
+    expect(prepareRead).toBeTypeOf("function");
+
+    await prepareRead.call(provider, { operation: "inbox.list", limit: 4 });
+
+    expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "account.inspect", accountBinding: "instagram:42" }));
+    expect(hub.sourceStatus).toHaveBeenCalledTimes(3);
+    expect(await provider.status("inbox.list")).toMatchObject({ availability: "ready", accountBinding: "instagram:42" });
+  });
+
+  it("keeps browser preflight bound to the selected conversation account", async () => {
+    const calls: Array<string | undefined> = [];
+    const ready = { source: "browser", availability: "ready", capabilities: ["conversation.read"], accountBinding: "instagram:42",
+      bridgeId: "bridge-selected", accountHandle: "owner", surface: "instagram" };
+    let sourceStatusCalls = 0;
+    const hub = {
+      sourceStatus: vi.fn(async (_source: string, accountBinding?: string) => {
+        calls.push(accountBinding);
+        sourceStatusCalls++;
+        if (sourceStatusCalls === 1 || sourceStatusCalls === 2) return { source: "browser", availability: "offline", capabilities: [],
+          accountBinding: "instagram:42", bridgeId: "bridge-selected" };
+        return ready;
+      }),
+      enqueue: vi.fn(async (input: { accountBinding: string; operation: string }) => {
+        expect(input.accountBinding).toBe("instagram:42");
+        expect(input.operation).toBe("account.inspect");
+        return { id: "account-inspect-selected" };
+      }),
+      result: vi.fn(async () => ({ status: "complete", result: { ...observation("browser"),
+        data: { username: "owner", surface: "instagram", capabilities: ["conversation.read"] } } }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", waitMs: 50, pollMs: 5 });
+    const prepareRead = (provider as unknown as { prepareRead(request: unknown): Promise<void> }).prepareRead;
+
+    await prepareRead.call(provider, { operation: "conversation.read", target: { accountBinding: "instagram:42", nativeId: "thread-42" } });
+
+    expect(calls).toEqual(["instagram:42", "instagram:42", "instagram:42"]);
+    expect(hub.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("does not bootstrap when the browser is not registered", async () => {
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "not_connected", capabilities: [], reason: "No live companion." })),
+      enqueue: vi.fn()
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser" });
+    const prepareRead = (provider as unknown as { prepareRead(request: unknown): Promise<void> }).prepareRead;
+    expect(prepareRead).toBeTypeOf("function");
+
+    await prepareRead.call(provider, { operation: "inbox.list", limit: 4 });
+
+    expect(hub.sourceStatus).toHaveBeenCalledOnce();
+    expect(hub.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("rejects a browser probe whose verified account handle differs", async () => {
+    const accountProbe = { ...observation("browser"), data: { username: "other-account", surface: "instagram", capabilities: ["inbox.list"] } };
+    const statuses = [
+      { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
+      { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
+      { source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42",
+        bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }
+    ];
+    const hub = {
+      sourceStatus: vi.fn(async () => statuses.shift() ?? { source: "browser", availability: "ready", capabilities: ["inbox.list"],
+        accountBinding: "instagram:42", bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }),
+      enqueue: vi.fn(async () => ({ id: "account-inspect-task" })),
+      result: vi.fn(async () => ({ status: "complete", result: accountProbe }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+    const prepareRead = (provider as unknown as { prepareRead(request: unknown): Promise<void> }).prepareRead;
+
+    await expect(prepareRead.call(provider, { operation: "inbox.list", limit: 4 })).rejects.toThrow(/did not verify/i);
+  });
+
   it("translates an issued target-bound browser cursor into one bounded scroll page and rejects forged context", async () => {
     const target = { accountBinding: "instagram:42", nativeId: "thread-42" };
     let current = { ...observation("browser"), nativeRef: "/direct/t/thread-42/", data: { username: "fixture", messages: [], olderAvailable: true } };
@@ -63,6 +155,24 @@ describe("companion source provider", () => {
     const forged = await provider.read({ operation: "conversation.read", target: { ...target, nativeId: "thread-other" }, limit: 12, olderCursor: cursor });
     expect(forged.errors[0]?.code).toBe("invalid_older_cursor");
     expect(vi.mocked(hub.enqueue)).toHaveBeenCalledTimes(before);
+  });
+
+  it.each([
+    [{ operation: "inbox.list", limit: 5, cursor: "api-cursor-next" }, "inbox.list"],
+    [{ operation: "comments.list", target: { accountBinding: "instagram:42", nativeId: "media-1" }, cursor: "api-cursor-next" }, "comments.list"],
+    [{ operation: "comments.replies", target: { accountBinding: "instagram:42", nativeId: "comment-1" }, cursor: "api-cursor-next" }, "comments.replies"]
+  ] as const)("fails closed when browser does not implement %s pagination", async (request, operation) => {
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: [operation], accountBinding: "instagram:42" })),
+      enqueue: vi.fn(async () => ({ id: "unexpected-task" })),
+      result: vi.fn(async () => ({ status: "complete", result: observation("browser") }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+
+    const result = await provider.read(request as never);
+
+    expect(result).toMatchObject({ availability: "unsupported", coverage: "unknown", errors: [{ code: "unsupported_cursor" }] });
+    expect(hub.enqueue).not.toHaveBeenCalled();
   });
 
   it("keeps phone older-history cursors explicitly unsupported", async () => {

@@ -11,6 +11,7 @@ import { NativeFrameDecoder, encodeNativeFrame } from "../../src/companion/nativ
 import { createUiApprovalAuthority, verifyUiApproval } from "../../src/ui-approval.js";
 
 const source = await readFile(resolve(process.cwd(), "browser-extension/service-worker.js"), "utf8");
+const manifest = JSON.parse(await readFile(resolve(process.cwd(), "browser-extension/manifest.json"), "utf8")) as { permissions: string[] };
 const accountBinding = "owner:alex";
 const approvalDirs: string[] = [];
 
@@ -19,6 +20,27 @@ afterEach(async () => {
 });
 
 describe("Instagram extension service worker protocol", () => {
+  it("reconnects a disconnected native host through one bounded MV3 alarm", async () => {
+    expect(manifest.permissions).toContain("alarms");
+    const fixture = workerFixture();
+    expect(fixture.connectNative).toHaveBeenCalledOnce();
+
+    fixture.disconnect(0);
+
+    expect(fixture.alarms.create).toHaveBeenCalledWith("instagram-native-reconnect", { delayInMinutes: 0.5 });
+    fixture.disconnect(0);
+    expect(fixture.alarms.create).toHaveBeenCalledTimes(1);
+    expect(fixture.connectNative).toHaveBeenCalledOnce();
+
+    await fixture.fireAlarm("instagram-native-reconnect");
+    expect(fixture.connectNative).toHaveBeenCalledTimes(2);
+    await fixture.fireAlarm("instagram-native-reconnect");
+    expect(fixture.connectNative).toHaveBeenCalledTimes(2);
+
+    fixture.disconnect(1);
+    expect(fixture.alarms.create).toHaveBeenLastCalledWith("instagram-native-reconnect", { delayInMinutes: 1 });
+  });
+
   it("routes account inspection and one approved write lease to fixed content operations", async () => {
     const fixture = workerFixture();
     await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: true });
@@ -127,24 +149,39 @@ describe("Instagram extension service worker protocol", () => {
 });
 
 function workerFixture(options: { response?: unknown; onPostMessage?: (message: unknown) => void } = {}) {
-  const listeners: Array<(message: unknown) => unknown> = [];
+  const listeners: Array<Array<(message: unknown) => unknown>> = [];
+  const disconnectListeners: Array<Array<() => void>> = [];
+  const alarmListeners: Array<(alarm: { name: string }) => unknown> = [];
   const sendMessage = vi.fn(async () => options.response ?? ({ status: "OUTCOME_UNKNOWN", requestId: "request-123456789012", contextHash: "a".repeat(64) }));
   const postMessage = vi.fn((message: unknown) => options.onPostMessage?.(message));
-  const port = {
-    onMessage: { addListener: (listener: (message: unknown) => unknown) => listeners.push(listener) },
-    onDisconnect: { addListener: vi.fn() }, postMessage
-  };
+  const connectNative = vi.fn(() => {
+    const portIndex = listeners.length;
+    listeners.push([]);
+    disconnectListeners.push([]);
+    return {
+      onMessage: { addListener: (listener: (message: unknown) => unknown) => listeners[portIndex]!.push(listener) },
+      onDisconnect: { addListener: (listener: () => void) => disconnectListeners[portIndex]!.push(listener) }, postMessage
+    };
+  });
+  const alarms = { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: { addListener: (listener: (alarm: { name: string }) => unknown) => alarmListeners.push(listener) } };
   const chrome = {
     runtime: {
       onStartup: { addListener: vi.fn() }, onInstalled: { addListener: vi.fn() },
-      connectNative: vi.fn(() => port)
+      connectNative
     },
+    alarms,
     tabs: {
       query: vi.fn(async () => [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
     }
   };
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Array, Promise, RegExp, String, Number, Boolean });
-  return { sendMessage, postMessage, startupMessages: postMessage.mock.calls.map(([message]) => message), nativeMessage: async (message: unknown) => { await listeners[0](message); } };
+  return {
+    sendMessage, postMessage, connectNative, alarms,
+    startupMessages: postMessage.mock.calls.map(([message]) => message),
+    nativeMessage: async (message: unknown, portIndex = 0) => { await listeners[portIndex]?.[0]?.(message); },
+    disconnect: (portIndex: number) => { for (const listener of disconnectListeners[portIndex] ?? []) listener(); },
+    fireAlarm: async (name: string) => { for (const listener of alarmListeners) await listener({ name }); }
+  };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

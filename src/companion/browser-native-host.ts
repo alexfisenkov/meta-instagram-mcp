@@ -111,8 +111,12 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
       liveReadiness = validProbe && capabilities.includes("inbox.list")
         ? { availability: "ready", capabilities: [...new Set(capabilities)], accountHandle: options.expectedAccountHandle }
         : { availability: isRecord(result) && typeof result.availability === "string" ? result.availability : "offline", capabilities: [] };
-      void options.client.heartbeat(bridgeId, { ...liveReadiness, accountBinding: options.accountBinding, surface: "instagram" }).catch(() => {});
-      lastHubHeartbeatAt = Date.now();
+      try {
+        await options.client.heartbeat(bridgeId, { ...liveReadiness, accountBinding: options.accountBinding, surface: "instagram" });
+        lastHubHeartbeatAt = Date.now();
+      } catch {
+        log("browser account verification heartbeat failed");
+      }
     }
     try { await options.client.submit(bridgeId, task.id, result, contextHash); }
     catch (error) {

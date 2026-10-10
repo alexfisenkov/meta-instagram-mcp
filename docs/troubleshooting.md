@@ -32,10 +32,12 @@
 
 ## Browser и телефон
 
-- `browser: not_connected`/`offline`: проверьте extension и Native Host registration, точный 32-character extension ID в `allowed_origins`, стабильный host path, Chrome profile выбранного узла и его сеть. First login выполняется владельцем в browser profile узла; не копируйте cookies с другой машины.
+- `browser: not_connected`/`offline`: проверьте extension и Native Host registration, точный 32-character extension ID в `allowed_origins`, стабильный host path, Chrome profile выбранного узла и его сеть. При потере native port extension повторяет соединение через один именованный MV3 alarm с ограниченным backoff. Первый login выполняется владельцем в browser profile узла; не копируйте cookies с другой машины.
+- Зарегистрированный browser без verified heartbeat может пройти ограниченный `account.inspect` при `meta_read_inbox`; browser без live bridge ID не открывается автоматическим preflight.
 - Если server не имеет desktop session или разрешённого owner login, оставьте browser gated. Документированный profile не создаёт display server и не подтверждает Instagram UI.
 - `phone: offline`/`needs_selection`: телефонный bridge и выбранное устройство — отдельная readiness condition. iOS требует Mac с Xcode/WDA/Appium; Android нужен отдельно настроенный UiAutomator2.
-- Локальный fake UI тест не доказывает live app compatibility. Не называйте UI capability `ready`, пока не выполнены соответствующие live checks.
+- Phone inbox navigation сейчас покрыта fixtures только для accessibility IDs `Profile`, `Home`, `Messages`, `Inbox`. Эти labels и переходы ещё не проверены на физическом устройстве; при неизвестном или неоднозначном UI reader завершает работу с `unsupported_ui_version`.
+- Локальные browser/phone fixtures не доказывают live app compatibility. Не называйте UI capability `ready`, пока не выполнены соответствующие live checks. Для телефонной процедуры смотрите [iPhone/Appium runbook](ios-appium-operator-runbook.md).
 
 ## Неизвестный исход действия
 

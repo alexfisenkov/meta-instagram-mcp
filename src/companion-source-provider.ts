@@ -22,8 +22,25 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
     throw new Error("invalid companion source wait budget");
   }
 
-  return {
+  const provider: SourceProvider = {
     source: options.source,
+    async prepareRead(request) {
+      if (options.source !== "browser" || request.operation === "account.inspect") return;
+      const target = "target" in request ? request.target : undefined;
+      const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding);
+      if (initial.availability !== "offline" || !initial.bridgeId || !initial.accountBinding) return;
+
+      const probe = await provider.read({ operation: "account.inspect", accountBinding: initial.accountBinding });
+      const probeData = isRecord(probe.data) ? probe.data : undefined;
+      const verified = await options.hub.sourceStatus(options.source, initial.accountBinding);
+      const accountHandle = verified.accountHandle?.toLowerCase();
+      if (probe.availability !== "ready" || probe.accountBinding !== initial.accountBinding ||
+          !probeData || typeof probeData.username !== "string" || !accountHandle ||
+          probeData.username.toLowerCase() !== accountHandle || verified.availability !== "ready" ||
+          verified.accountBinding !== initial.accountBinding || verified.surface !== "instagram") {
+        throw new Error("Registered browser companion did not verify the selected Instagram account.");
+      }
+    },
     async status(operation) {
       const status = await options.hub.sourceStatus(options.source, options.accountBinding);
       if (operation && status.availability === "ready" && !status.capabilities.includes(operation)) {
@@ -33,11 +50,13 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
     },
     async read(request) {
       const target = "target" in request ? request.target : undefined;
-      if (options.source === "phone" && ((request.operation === "inbox.list" && request.cursor) ||
-          (request.operation === "conversation.read" && request.olderCursor) ||
-          ((request.operation === "comments.list" || request.operation === "comments.replies") && request.cursor))) {
+      const requestedAccountBinding = "accountBinding" in request ? request.accountBinding : undefined;
+      if (((options.source === "phone" || options.source === "browser") &&
+          ((request.operation === "inbox.list" && request.cursor) ||
+           ((request.operation === "comments.list" || request.operation === "comments.replies") && request.cursor))) ||
+          (options.source === "phone" && request.operation === "conversation.read" && request.olderCursor)) {
         return unavailable(options.source, target?.accountBinding ?? options.accountBinding ?? "unresolved", "unsupported",
-          "The phone companion does not support this cursor operation.", "unsupported_cursor");
+          `The ${options.source} companion does not support this cursor operation.`, "unsupported_cursor");
       }
       let browserPageBudget = 0;
       if (request.operation === "conversation.read" && request.olderCursor && options.source === "browser") {
@@ -50,12 +69,13 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         }
         browserPageBudget = cursor.pageBudget;
       }
-      const status = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding);
-      const accountBinding = target?.accountBinding ?? status.accountBinding;
+      const accountBinding = target?.accountBinding ?? requestedAccountBinding ?? options.accountBinding;
+      const status = await options.hub.sourceStatus(options.source, accountBinding);
+      const resolvedAccountBinding = accountBinding ?? status.accountBinding;
       const bootstrap = request.operation === "account.inspect" && options.source === "browser" && Boolean(status.bridgeId);
-      if ((status.availability !== "ready" && !bootstrap) || !accountBinding ||
+      if ((status.availability !== "ready" && !bootstrap) || !resolvedAccountBinding ||
           (status.availability === "ready" && !status.capabilities.includes(request.operation))) {
-        return unavailable(options.source, accountBinding ?? "unresolved", status.availability === "ready" ? "unsupported" : status.availability,
+        return unavailable(options.source, resolvedAccountBinding ?? "unresolved", status.availability === "ready" ? "unsupported" : status.availability,
           status.reason ?? `The connected companion does not report ${request.operation}.`, status.availability);
       }
       const operation: BridgeOperation = request.operation;
@@ -68,15 +88,15 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       else payload = {};
       let task;
       try {
-        task = await options.hub.enqueue({ kind: "read", source: options.source, accountBinding, operation, payload, targetRefs, ttlMs: waitMs + pollMs * 2 });
+        task = await options.hub.enqueue({ kind: "read", source: options.source, accountBinding: resolvedAccountBinding, operation, payload, targetRefs, ttlMs: waitMs + pollMs * 2 });
       } catch (error) {
-        return unavailable(options.source, accountBinding, "offline", safeReason(error), "enqueue_failed");
+        return unavailable(options.source, resolvedAccountBinding, "offline", safeReason(error), "enqueue_failed");
       }
       const deadline = now() + waitMs;
       while (now() < deadline) {
         const result = await options.hub.result(task.id);
         if (result.status === "complete") {
-          if (!isObservation(result.result)) return unavailable(options.source, accountBinding, "unsupported_ui_version", "Companion returned an invalid observation.", "invalid_result");
+          if (!isObservation(result.result)) return unavailable(options.source, resolvedAccountBinding, "unsupported_ui_version", "Companion returned an invalid observation.", "invalid_result");
           const observation = result.result;
           if (options.source === "browser" && request.operation === "conversation.read" && target && browserPageBudget < 5 &&
               isRecord(observation.data) && observation.data.olderAvailable === true) {
@@ -88,11 +108,11 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
           return observation;
         }
         if (["expired", "outcome_unknown"].includes(result.status)) {
-          return unavailable(options.source, accountBinding, result.status === "expired" ? "offline" : "offline", "Companion read task did not complete before its lease expired.", result.status);
+          return unavailable(options.source, resolvedAccountBinding, "offline", "Companion read task did not complete before its lease expired.", result.status);
         }
         await delay(Math.min(pollMs, Math.max(1, deadline - now())));
       }
-      return unavailable(options.source, accountBinding, "offline", "Companion read exceeded its bounded wait budget.", "timeout");
+      return unavailable(options.source, resolvedAccountBinding, "offline", "Companion read exceeded its bounded wait budget.", "timeout");
     },
     async refreshContext(intent: MutationIntent) {
       if (options.source !== "phone" || intent.source !== "phone" || intent.target.accountBinding !== intent.accountBinding ||
@@ -126,6 +146,7 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       return { target: intent.target, contextHash: "", availability: "offline" };
     }
   };
+  return provider;
 }
 
 function stableTarget(target: TargetRef): string { return JSON.stringify(Object.fromEntries(Object.entries(target).sort(([a], [b]) => a.localeCompare(b)))); }

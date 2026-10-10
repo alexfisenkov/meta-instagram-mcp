@@ -1,179 +1,56 @@
 # Операционный runbook
 
-Обновлено: 2026-05-30.
+Обновлено: 2026-10-10.
 
-## Правила
+## Контракты и границы
 
-- Использовать только официальный Meta OAuth и Graph API.
-- Держать MCP read-only, пока отдельная будущая задача явно не добавит write tools.
-- Не печатать raw access tokens, app secrets, OAuth codes, callback URLs с `code=`, cookies или browser storage.
-- Считать `.env`, `app secret.md.rtf` и `~/.config/meta-instagram-mcp/token.json` чувствительными локальными файлами.
-- Хранить live evidence и account-specific notes в local/private files, не в публичном репозитории.
+- Нативные stdio и Streamable HTTP server регистрируют 27 инструментов: 18 legacy и 9 layered/mutation. Cloud allowlist отдельно содержит 18 legacy tools; не считайте его каталогом нативного runtime.
+- Для объединённого чтения Direct используйте `meta_read_inbox` или `meta_read_source`. Они маршрутизируют чтение API → browser → phone и возвращают источники, coverage, ограничения и ошибки.
+- `meta_capabilities` показывает текущий runtime status. Он сам не проверяет содержимое Instagram, не запускает OAuth и не доказывает, что live read сработал.
+- Неподключённый, неподдержанный или неавторизованный источник пропускается. При отсутствии подтверждённых наблюдений результат имеет `coverage: unknown`; пустой список не означает пустой inbox.
+- Запись в API, browser и phone остаётся отдельным подтверждаемым путём. Read fallback не переключает запись между источниками и не повторяет `OUTCOME_UNKNOWN`.
 
-## Проверить текущий доступ
+## Локально проверить установленный MCP
+
+Из каталога установки запустите:
 
 ```bash
-cd /absolute/path/to/meta-instagram-mcp
 npm run build
-codex mcp get meta-instagram-local
+node tools/doctor.mjs
 ```
 
-Запустить redacted token metadata check:
+Doctor делает локальные MCP initialize/listTools и read-only status checks. `toolCount` относится к подключённому runtime, а статусы источников не доказывают доступ Meta, авторизацию Chrome, готовность физического телефона или опубликованный серверный deployment. Если Codex использует локальный сервер, отдельно проверьте его подключение в настройках MCP-клиента.
 
-```bash
-node --input-type=module - <<'NODE'
-import { loadConfig } from './dist/config.js';
-import { loadStoredToken } from './dist/token-store.js';
-const config = loadConfig();
-const token = await loadStoredToken(config.tokenStorePath);
-console.log(JSON.stringify({
-  authMode: token?.authMode,
-  tokenType: token?.tokenType,
-  hasAccessToken: Boolean(token?.accessToken),
-  expiresAt: token?.expiresAt,
-  hasUserId: Boolean(token?.userId),
-  username: token?.username,
-  hasPageId: Boolean(token?.pageId),
-}, null, 2));
-NODE
-```
+Секреты, OAuth-коды, cookies, browser storage и полные account identifiers не копируйте в логи, issues или этот репозиторий. Конфигурация и token-store должны оставаться во внешнем приватном каталоге.
 
-Ожидаемая форма:
+## Получить Direct из доступного источника
 
-```json
-{
-  "authMode": "facebook",
-  "tokenType": "bearer",
-  "hasAccessToken": true,
-  "hasUserId": true,
-  "username": "<your_username>"
-}
-```
+Сначала вызовите `meta_read_inbox` с ограниченным `limit`. Вызов автоматически проверит доступные источники API → browser → phone. Если API сообщает `missing_scope`, `permission_blocked` или временную недоступность, роутер попробует следующий готовый источник.
 
-## Live read smoke
+Browser companion, который уже зарегистрирован, но ещё не прошёл проверку аккаунта, получает один ограниченный `account.inspect` preflight перед обычным чтением. Companion должен подтвердить ожидаемый username и Instagram surface. Эта проверка не выполняет вход в аккаунт и не переносит cookies. Если browser не зарегистрирован, его статус `not_connected` и автоматический preflight не запускается.
 
-Используйте это, чтобы подтвердить, что MCP читает реальные Meta data без раскрытия секретов:
+Если очередь содержит выбранный диалог, используйте его `accountBinding` и native ID в `meta_read_source` с `operation: "conversation.read"`. Чтение через browser или phone может пометить открытый диалог просмотренным; результат отдельно сообщает этот возможный side effect. Направление сообщения, непрочитанное состояние и ответ остаются `unknown`, если источник их не подтверждает.
 
-```bash
-node --input-type=module - <<'NODE'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+История ограничена возможностями источника: API использует Graph cursors и ограниченное окно; browser older-history cursor привязан к точному диалогу и ограниченной прокрутке; phone older-history cursor не поддерживается. Cursor одного источника нельзя переносить на другой. Повтор той же страницы должен либо явно сообщить `unsupported_cursor`, либо выполняться источником, который выдал cursor.
 
-const transport = new StdioClientTransport({
-  command: 'node',
-  args: ['/absolute/path/to/meta-instagram-mcp/dist/server.js'],
-});
-const client = new Client({ name: 'manual-smoke-client', version: '0.0.1' });
+`meta_triage_inbox` применяет те же правила чтения Direct. Комментарии включаются только для переданных точных media targets; без них account-wide сканирования комментариев нет.
 
-try {
-  await client.connect(transport);
-  const tools = await client.listTools();
-  const account = await client.callTool({ name: 'meta_get_account_info', arguments: {} });
-  const accountJson = JSON.parse(account.content?.[0]?.text ?? '{}');
-  const media = await client.callTool({ name: 'meta_list_media', arguments: { limit: 2 } });
-  const mediaJson = JSON.parse(media.content?.[0]?.text ?? '{}');
-  const insights = await client.callTool({ name: 'meta_get_user_insights', arguments: {} });
-  const insightsJson = JSON.parse(insights.content?.[0]?.text ?? '{}');
+## Разобрать недоступность API Direct
 
-  console.log(JSON.stringify({
-    toolCount: tools.tools.length,
-    account: {
-      username: accountJson.username,
-      followersCountPresent: typeof accountJson.followers_count === 'number',
-      mediaCountPresent: typeof accountJson.media_count === 'number',
-    },
-    media: {
-      count: Array.isArray(mediaJson.data) ? mediaJson.data.length : 0,
-      hasPaging: Boolean(mediaJson.paging),
-    },
-    userInsights: {
-      count: Array.isArray(insightsJson.data) ? insightsJson.data.length : 0,
-      metrics: Array.isArray(insightsJson.data) ? insightsJson.data.map((metric) => metric.name) : [],
-    },
-  }, null, 2));
-} finally {
-  await client.close();
-}
-NODE
-```
+В `meta_capabilities` смотрите статус отдельно для `inbox.list` и `conversation.read`:
 
-Ожидаемая форма:
+- `missing_scope` означает, что подтверждённого permission или обязательного Page task нет. Для Facebook Login Direct нужен разрешённый Page token и задача `MESSAGING`; scopes должны совпасть с выбранным auth mode.
+- `permission_blocked` означает, что permission status не удалось подтвердить или Meta отклонила запрос. Не делайте вывод об исправной авторизации только по наличию token-файла.
+- `offline` означает транспортную или runtime ошибку. Browser/phone могут быть fallback только если у них есть собственный проверенный источник.
 
-```json
-{
-  "toolCount": 16,
-  "account": {
-    "username": "<your_username>",
-    "followersCountPresent": true,
-    "mediaCountPresent": true
-  },
-  "media": {
-    "count": 2,
-    "hasPaging": true
-  },
-  "userInsights": {
-    "count": 1,
-    "metrics": ["reach"]
-  }
-}
-```
+Официальный OAuth flow описан в [Meta setup](meta-setup.md), а callback и token refresh — в [установке](install.md). Повторный consent, права Meta App, доступ Page и подтверждение аккаунта выполняет владелец. Cloud allowlist с legacy API tools не добавляет browser/phone fallback.
 
-## Повторный OAuth
+## Подключить источник
 
-Используйте только если token отсутствует, expired, revoked или scopes нужно запросить заново:
+Настройку browser Native Messaging и удалённого Hub выполняйте по [установке](install.md). После регистрации проверьте `meta_capabilities`, затем вызовите `meta_read_inbox`; runtime перепроверит зарегистрированный, но ещё не подтверждённый browser аккаунт перед Direct чтением.
 
-```bash
-cd /absolute/path/to/meta-instagram-mcp
-npm run build
-npm run meta:callback
-```
+Для телефона используйте отдельную [инструкцию Appium/WDA](ios-appium-operator-runbook.md). Phone read проверяет ожидаемый профиль, затем проходит через точные accessibility IDs `Home` и `Messages` или `Inbox`. Этот маршрут покрыт fixtures, но ещё не подтверждён на реальном устройстве и текущей локали Instagram; если label/control не совпадает, источник закрывается со статусом `unsupported_ui_version`.
 
-Откройте напечатанный Login URL в Chrome и пройдите consent. Callback должен прийти на страницу:
+## Remote stdio proxy
 
-```text
-Meta token saved
-```
-
-Не копируйте полный callback URL после redirect, потому что он содержит `code=`.
-
-После OAuth сохраните IG account:
-
-```bash
-# Если Page scopes granted:
-# call MCP tool meta_resolve_instagram_account with {}
-
-# Если Page scopes declined, но direct IG access работает:
-# call MCP tool meta_resolve_instagram_account with {"userId":"<IG_USER_ID>"}
-```
-
-## Обновить token
-
-Обновляйте long-lived tokens до expiration:
-
-```json
-{"tool":"meta_refresh_token","arguments":{"save":true}}
-```
-
-После этого повторите live read smoke и обновите local/private handoff notes с новой expiration date.
-
-## Если `/me/accounts` пустой
-
-Проверьте permission metadata через `meta_auth_status`. Если Meta вернула:
-
-```text
-pages_show_list=declined
-pages_read_engagement=declined
-```
-
-Не считайте token сломанным, если direct account/media/insights продолжают работать. Используйте direct IG user-id resolve.
-
-## Если появляется `Invalid platform app`
-
-Обычно это означает, что URL использует Instagram Login со стандартным Facebook app id. Для стандартного Meta App используйте:
-
-```text
-META_AUTH_MODE=facebook
-https://www.facebook.com/v25.0/dialog/oauth
-```
-
-Не используйте `https://www.instagram.com/oauth/authorize`, если нет отдельной Instagram Login app configuration.
+Portable `tools/run.mjs` по умолчанию запускает локальный MCP. Любой непустой `INSTAGRAM_MCP_REMOTE_CONFIG`, `INSTAGRAM_MCP_REMOTE_URL` или `INSTAGRAM_MCP_REMOTE_BEARER_TOKEN` направляет stdio к `remote-proxy`; некорректная конфигурация завершает запуск без перехода на локальное ядро. Настройте HTTPS origin и bearer token в приватном внешнем `.env` или укажите приватный файл конфигурации. Публичный URL, account credentials и bearer token в репозиторий не добавляйте.

@@ -6,7 +6,8 @@ import { applyExternalConfig } from "./run.mjs";
 
 const entries = {
   "auth-url": "auth-url.js",
-  callback: "callback.js"
+  callback: "callback.js",
+  "remote-proxy": "remote-proxy.js"
 };
 
 const selected = process.argv[2];
@@ -18,7 +19,8 @@ if (!entries[selected]) {
     applyExternalConfig();
     const target = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli", entries[selected]);
     if (!existsSync(target)) throw new Error("BUILD_MISSING");
-    await import(pathToFileURL(target).href);
+    const command = await import(pathToFileURL(target).href);
+    if (selected === "remote-proxy") await command.startRemoteProxy();
   } catch (error) {
     const code = error instanceof Error && /^[A-Z0-9_]+$/.test(error.message) ? error.message : "START_FAILED";
     process.stderr.write(`meta-instagram-mcp: ${code}\n`);

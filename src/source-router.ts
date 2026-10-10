@@ -6,6 +6,8 @@ export type ReadRequest = ApiReadRequest;
 export interface SourceProvider {
   readonly source: Exclude<SourceId, "user_supplied">;
   status(operation?: ReadRequest["operation"]): Promise<{ source: SourceId; availability: Availability; capabilities: string[]; reason?: string; accountBinding?: string }>;
+  /** Optional bounded, read-only source bootstrap before the requested read. */
+  prepareRead?(request: ReadRequest): Promise<void>;
   read(request: ReadRequest): Promise<Observation<unknown>>;
   refreshContext?(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string; availability?: Availability; sideEffects?: Array<"may_mark_seen"> }>;
 }
@@ -35,7 +37,7 @@ const PRIORITY: ReadonlyArray<SourceProvider["source"]> = ["api", "browser", "ph
 
 /** Bounded read-only fallback. Observations stay attributed; this router never merges records. */
 export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
-  const timeoutMs = options.timeoutMs ?? (process.platform === "win32" ? 30_000 : 5_000);
+  const timeoutMs = options.timeoutMs ?? (process.platform === "win32" ? 30_000 : 12_000);
   const maxProviders = options.maxProviders ?? PRIORITY.length;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error("invalid source router timeout");
   if (!Number.isInteger(maxProviders) || maxProviders < 1 || maxProviders > PRIORITY.length) throw new Error("invalid source router provider limit");
@@ -66,10 +68,23 @@ export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
 
       const ordered = PRIORITY.map((source) => bySource.get(source)).filter((item): item is SourceProvider => Boolean(item)).slice(0, maxProviders);
       for (const provider of ordered) {
-        const remaining = deadline - Date.now();
+        let remaining = deadline - Date.now();
         if (remaining <= 0) {
           skippedSources.push({ source: provider.source, reason: "The shared read budget expired." });
           continue;
+        }
+        if (provider.prepareRead) {
+          try {
+            await withTimeout(provider.prepareRead(request), remaining);
+          } catch (error) {
+            const code = error instanceof TimeoutError ? "preflight_timeout" : "preflight_failed";
+            errors.push({ source: provider.source, code, message: safeReason(error) });
+          }
+          remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            skippedSources.push({ source: provider.source, reason: "The shared read budget expired during source preflight." });
+            continue;
+          }
         }
         let sourceStatus;
         try { sourceStatus = await withTimeout(provider.status(request.operation), remaining); }
