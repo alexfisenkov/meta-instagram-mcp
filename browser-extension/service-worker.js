@@ -38,6 +38,7 @@ const inboxRowTabs = new Map();
 const knownManagedReadTabs = new Set();
 const revokedManagedReadTabs = new Set();
 const activationRevocations = new Map();
+let managedSurfaceStorageMutation = Promise.resolve();
 let pendingBootstrap;
 
 chrome.runtime.onStartup.addListener(connectNative);
@@ -275,7 +276,12 @@ function tabSelectionFailure(code, message) { return { selectionFailure: { code,
 async function resolveManagedReadSurface(task, context) {
   const read = await readManagedSurfaceMarker();
   if (!read.ok) return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface could not be verified" };
-  if (read.marker === undefined) return { found: false };
+  if (read.marker === undefined) {
+    if (revokedManagedReadTabs.size > 0) {
+      return { found: true, code: "browser_managed_surface_unavailable", message: "a previously managed read surface was revoked in this extension session" };
+    }
+    return { found: false };
+  }
   const marker = read.marker;
   if (!managedSurfaceMarkerMatches(marker, task, context.assignment)) {
     return { found: true, code: "browser_managed_surface_unavailable", message: "the managed read surface does not match this browser assignment" };
@@ -386,12 +392,33 @@ async function verifyManagedReadSurfaceForDispatch(task, tabId, context) {
 async function revokeManagedReadSurface(tabId) {
   if (knownManagedReadTabs.has(tabId)) revokedManagedReadTabs.add(tabId);
   const read = await readManagedSurfaceMarker();
-  if (!read.ok || !isRecord(read.marker) || read.marker.tabId !== tabId) return;
+  if (!read.ok || !isRecord(read.marker) || read.marker.tabId !== tabId ||
+      typeof read.marker.accountBinding !== "string" || !/^[a-zA-Z0-9:_-]{1,128}$/.test(read.marker.accountBinding) ||
+      (read.marker.state !== undefined && !["owned", "revoked"].includes(read.marker.state))) return;
+  const accountBinding = read.marker.accountBinding;
   knownManagedReadTabs.add(tabId);
   revokedManagedReadTabs.add(tabId);
-  if (read.marker.state === "revoked") return;
-  try { await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: { ...read.marker, state: "revoked" } }); }
-  catch { /* this worker stays fail-closed; session persistence may recover on a later read */ }
+  await serializeManagedSurfaceMutation(async () => {
+    const current = await readManagedSurfaceMarker();
+    if (!current.ok || !isRecord(current.marker) || current.marker.tabId !== tabId ||
+        current.marker.accountBinding !== accountBinding || current.marker.state === "revoked") return;
+    try {
+      await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: { ...current.marker, state: "revoked" } });
+    } catch {
+      const afterFailure = await readManagedSurfaceMarker();
+      if (!afterFailure.ok || !isRecord(afterFailure.marker) || afterFailure.marker.tabId !== tabId ||
+          afterFailure.marker.accountBinding !== accountBinding || afterFailure.marker.state === "revoked" ||
+          (afterFailure.marker.state !== undefined && afterFailure.marker.state !== "owned")) return;
+      try { await chrome.storage.session.remove(MANAGED_INBOX_SESSION_KEY); }
+      catch { /* only this worker's in-memory revocation is guaranteed */ }
+    }
+  });
+}
+
+function serializeManagedSurfaceMutation(mutation) {
+  const next = managedSurfaceStorageMutation.then(mutation, mutation);
+  managedSurfaceStorageMutation = next.then(() => undefined, () => undefined);
+  return next;
 }
 
 function canBootstrapReadSurface(task, assignment) {
@@ -643,16 +670,16 @@ function isDirectInboxUrl(value) {
 }
 
 async function storeManagedSurface(tab, task) {
-  try {
-    await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: {
-      tabId: tab.id, accountBinding: task.accountBinding, state: "owned"
-    } });
-    knownManagedReadTabs.add(tab.id);
-    revokedManagedReadTabs.delete(tab.id);
-    return true;
-  } catch {
-    return false;
-  }
+  return serializeManagedSurfaceMutation(async () => {
+    try {
+      await chrome.storage.session.set({ [MANAGED_INBOX_SESSION_KEY]: {
+        tabId: tab.id, accountBinding: task.accountBinding, state: "owned"
+      } });
+      knownManagedReadTabs.add(tab.id);
+      revokedManagedReadTabs.delete(tab.id);
+      return true;
+    } catch { return false; }
+  });
 }
 
 function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }

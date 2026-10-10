@@ -227,6 +227,86 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.createTab).not.toHaveBeenCalled();
   });
 
+  it("removes the exact owned marker after a revoke write failure and stays ambiguous after worker restart", async () => {
+    const managedTab = { id: 42, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: false };
+    const otherTab = { id: 43, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false };
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, accountBinding, state: "owned" }]]);
+    const options = {
+      sessionStorage,
+      onTabsQuery: async () => [managedTab, otherTab],
+      onGetTab: async (tabId: number) => [managedTab, otherTab].find((tab) => tab.id === tabId),
+      onStorageSet: async (values: Record<string, any>) => {
+        if (values.managedReadSurface?.state === "revoked") throw new Error("session set failed");
+      }
+    };
+    const firstWorker = workerFixture(options);
+    managedTab.active = true;
+    await firstWorker.activateTab(42);
+    await waitFor(() => !sessionStorage.has("managedReadSurface"));
+    expect(firstWorker.storageRemove).toHaveBeenCalledOnce();
+    expect(firstWorker.storageRemove).toHaveBeenCalledWith("managedReadSurface");
+    expect(firstWorker.removeTab).not.toHaveBeenCalled();
+
+    managedTab.active = false;
+    const restartedWorker = workerFixture(options);
+    await restartedWorker.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await restartedWorker.nativeMessage({ kind: "task", task: {
+      id: "revoked-marker-removed-after-restart", kind: "read", source: "browser", bridgeId: "bridge-2", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(restartedWorker.createTab).not.toHaveBeenCalled();
+    expect(restartedWorker.sendMessage).not.toHaveBeenCalled();
+    expect(restartedWorker.tabsUpdate).not.toHaveBeenCalled();
+    expect(restartedWorker.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "revoked-marker-removed-after-restart", result: expect.objectContaining({ availability: "needs_selection", errors: [{ code: "browser_tab_selection_ambiguous", message: expect.any(String) }] })
+    }));
+  });
+
+  it("never removes a changed session marker after a revoke write failure", async () => {
+    const managedTab = { id: 42, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: false };
+    const replacementMarker = { tabId: 99, accountBinding: "owner:replacement", state: "owned" };
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, accountBinding, state: "owned" }]]);
+    let rejectSet!: () => void;
+    const revokeSetRejected = new Promise<void>((resolve) => { rejectSet = resolve; });
+    const fixture = workerFixture({ sessionStorage, onTabsQuery: async () => [managedTab], onGetTab: async () => managedTab,
+      onStorageSet: async (values: Record<string, any>) => {
+        if (values.managedReadSurface?.state === "revoked") {
+          sessionStorage.set("managedReadSurface", replacementMarker);
+          rejectSet();
+          throw new Error("session set failed after reassignment");
+        }
+      } });
+    managedTab.active = true;
+    await fixture.activateTab(42);
+    await revokeSetRejected;
+    for (let step = 0; step < 20; step += 1) await Promise.resolve();
+    expect(sessionStorage.get("managedReadSurface")).toEqual(replacementMarker);
+    expect(fixture.storageRemove).not.toHaveBeenCalled();
+  });
+
+  it("keeps an in-memory revocation fail-closed when marker set and removal both fail", async () => {
+    const managedTab = { id: 42, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: false };
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, accountBinding, state: "owned" }]]);
+    const fixture = workerFixture({ sessionStorage, onTabsQuery: async () => [managedTab], onGetTab: async () => managedTab,
+      onStorageSet: async (values: Record<string, any>) => {
+        if (values.managedReadSurface?.state === "revoked") throw new Error("session set failed");
+      },
+      onStorageRemove: async () => { throw new Error("session remove failed"); } });
+    managedTab.active = true;
+    await fixture.activateTab(42);
+    managedTab.active = false;
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "revocation-storage-double-failure", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(sessionStorage.get("managedReadSurface")).toEqual({ tabId: 42, accountBinding, state: "owned" });
+    expect(fixture.storageRemove).toHaveBeenCalledOnce();
+    expect(fixture.tabsUpdate).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.createTab).not.toHaveBeenCalled();
+  });
+
   it("rechecks ownership after content readiness ping before dispatching read data", async () => {
     const managedTab = { id: 42, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false };
     const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, bridgeId: "bridge-1", accountBinding }]]);
@@ -978,6 +1058,7 @@ function workerFixture(options: {
   onGetTab?: (tabId: number) => Promise<{ id: number; url: string; status: string; pendingUrl?: string; active?: boolean } | undefined>;
   onUpdateTab?: (tabId: number, properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string; pendingUrl?: string; active?: boolean }>;
   onRemoveTab?: (tabId: number) => Promise<void>;
+  onStorageRemove?: (key: string) => Promise<void>;
   onStorageGet?: (key: string) => Promise<void>;
   onStorageSet?: (values: Record<string, unknown>) => Promise<void>;
   sessionStorage?: Map<string, unknown>;
@@ -1043,7 +1124,7 @@ function workerFixture(options: {
     storage: { session: {
       get: vi.fn(async (key: string) => { await options.onStorageGet?.(key); return { [key]: sessionStorage.get(key) }; }),
       set: vi.fn(async (values: Record<string, unknown>) => { await options.onStorageSet?.(values); for (const [key, value] of Object.entries(values)) sessionStorage.set(key, value); }),
-      remove: vi.fn(async (key: string) => { sessionStorage.delete(key); })
+      remove: vi.fn(async (key: string) => { await options.onStorageRemove?.(key); sessionStorage.delete(key); })
     } },
     alarms,
     tabs: {
@@ -1058,6 +1139,7 @@ function workerFixture(options: {
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Map, Array, Promise, RegExp, String, Number, Boolean, setTimeout, clearTimeout });
   return {
     sendMessage, postMessage, connectNative, alarms, scripting, portMessages, createTab, getTab, tabsUpdate: updateTab, removeTab, sessionStorage,
+    storageRemove: chrome.storage.session.remove,
     get updatedListenerCount() { return updatedListeners.size; },
     updateTab(tabId: number, changeInfo: Partial<{ url: string; status: string; pendingUrl?: string }>) {
       const previous = tabsById.get(tabId) ?? { id: tabId, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
