@@ -181,7 +181,7 @@ Extension ID должен оставаться стабильным между �
 
 ### Companion с подключённым телефоном
 
-Для обязательных prerequisites, loopback readiness checks и безопасного Direct smoke используйте отдельный [iPhone/Appium operator runbook](ios-appium-operator-runbook.md). Сценарии ниже описывают формат внешней phone-конфигурации и bridge contract.
+Ниже приведены поддержанные prerequisites, формат внешней phone-конфигурации и bridge contract. Setup examples не доказывают live readiness реального устройства.
 
 Телефонный companion запускается на том же компьютере, где доступны выбранное устройство и настроенный Appium. Для iOS нужны Xcode, Appium, WebDriverAgent (WDA) и Instagram; для Android — Appium с UiAutomator2 и Instagram. Конфигурация хранится вне каталога приложения и содержит секрет Hub и идентификатор выбранного устройства — не коммитьте её и не пересылайте вместе с логами.
 

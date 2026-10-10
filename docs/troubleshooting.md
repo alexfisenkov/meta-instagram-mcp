@@ -46,7 +46,7 @@
 - Если server не имеет desktop session или разрешённого owner login, оставьте browser gated. Документированный profile не создаёт display server и не подтверждает Instagram UI.
 - `phone: offline`/`needs_selection`: телефонный bridge и выбранное устройство — отдельная readiness condition. iOS требует Mac с Xcode/WDA/Appium; Android нужен отдельно настроенный UiAutomator2.
 - Phone inbox navigation сейчас покрыта fixtures только для accessibility IDs `Profile`, `Home`, `Messages`, `Inbox`. Эти labels и переходы ещё не проверены на физическом устройстве; при неизвестном или неоднозначном UI reader завершает работу с `unsupported_ui_version`.
-- Локальные browser/phone fixtures не доказывают live app compatibility. Не называйте UI capability `ready`, пока не выполнены соответствующие live checks. Для телефонной процедуры смотрите [iPhone/Appium runbook](ios-appium-operator-runbook.md).
+- Локальные browser/phone fixtures не доказывают live app compatibility. Не называйте UI capability `ready`, пока не выполнены соответствующие live checks. Телефонный setup описан в публичной [инструкции установки](install.md); реальное устройство и текущая локаль отдельно не подтверждены.
 
 ## Неизвестный исход действия
 

@@ -7,13 +7,12 @@
 Для публичного и переиспользуемого контекста начинайте с этих файлов:
 
 1. `README.md` - обзор, быстрый старт, список tools, граница public/private.
-2. `docs/install.md` - установка, OAuth setup, stdio/HTTP и remote proxy.
+2. `docs/install.md` - установка, OAuth setup, stdio/HTTP, remote proxy и optional phone companion setup.
 3. `docs/operations-runbook.md` - текущая диагностика инструментов, readiness и Direct read.
-4. `docs/ios-appium-operator-runbook.md` - подключение optional iPhone companion через Appium/WDA.
-5. `docs/architecture.md` - устройство системы и OAuth modes.
-6. `docs/meta-setup.md` - Meta Dashboard и OAuth setup notes.
-7. `src/server.ts` и `src/tools.ts` - MCP surface и поведение tools.
-8. `queries/README.md` - локальный формат сохраненных Instagram-запросов и отчетов.
+4. `docs/architecture.md` - устройство системы и OAuth modes.
+5. `docs/meta-setup.md` - Meta Dashboard и OAuth setup notes.
+6. `src/server.ts` и `src/tools.ts` - MCP surface и поведение tools.
+7. `queries/README.md` - локальный формат сохраненных Instagram-запросов и отчетов.
 
 Не начинайте с browser history, screenshots или старого chat context, если эти файлы отвечают на вопрос. Account-specific handoff/evidence files остаются local-only и игнорируются git.
 
@@ -35,8 +34,7 @@
 
 | Путь | Назначение | Заметки |
 |---|---|---|
-| `docs/install.md` | Установка с нуля и OAuth setup. | Для новой машины или GitHub onboarding. |
-| `docs/ios-appium-operator-runbook.md` | Операторская инструкция для optional iPhone/Appium companion. | Когда phone source нужен для чтения Instagram UI. |
+| `docs/install.md` | Установка с нуля, OAuth setup и сценарии optional phone companion. | Для новой машины, GitHub onboarding или настройки Appium companion. |
 | `docs/architecture.md` | Architecture, OAuth modes, security boundaries, runtime state. | Первый файл перед изменением слоев. |
 | `docs/meta-setup.md` | Meta Dashboard setup и OAuth notes. | Диагностика `Invalid platform app` и direct-user-id fallback. |
 | `docs/operations-runbook.md` | Текущая диагностика MCP, API/browser/phone readiness, Direct read и remote proxy. | Когда нужно понять, как проверить доступ сейчас. |
