@@ -184,6 +184,12 @@
       expectedId = target.nativeId.slice(0, 256);
       const currentId = directThreadIdFromPath();
       if (!currentId || currentId !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation does not match the requested reference");
+      const provenRows = Array.from(inboxRowRefs.values()).filter((record) => hasVerifiedThreadProof(record, accountBinding, currentId));
+      if (provenRows.length !== 1) {
+        return failure(accountBinding, "needs_selection", "a fresh browser inbox reference is required to prove this native thread target", "browser_thread_proof_missing");
+      }
+      rowRefProof = provenRows[0];
+      operation.freshContentNodes = rowRefProof.threadProof.nodes;
     } else if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)) {
       const rowRef = target.explicitOwnerRef;
       const record = inboxRowRefs.get(rowRef);
@@ -198,8 +204,7 @@
         if (!currentId || currentId !== record.openedNativeId) {
           return failure(accountBinding, "needs_selection", "the selected inbox row was already opened in another route", "stale_inbox_row_ref");
         }
-        if (!record.threadProof || record.threadProof.document !== document || record.threadProof.accountBinding !== accountBinding ||
-            record.threadProof.ownerProof !== verifiedOwnProfileProof || record.threadProof.routeId !== currentId) {
+        if (!hasVerifiedThreadProof(record, accountBinding, currentId)) {
           inboxRowRefs.delete(rowRef);
           return failure(accountBinding, "needs_selection", "a fresh inbox reference is required to re-establish this thread proof", "stale_inbox_row_ref");
         }
@@ -249,8 +254,7 @@
       scroller = findMessageScroller();
     }
     observeRouteChange();
-    if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) &&
-        inboxRowRefs.get(target.explicitOwnerRef) !== rowRefProof) {
+    if (rowRefProof && !Array.from(inboxRowRefs.values()).includes(rowRefProof)) {
       return readSideEffectFailure(accountBinding, "needs_selection", "the browser inbox proof changed during conversation read", "stale_inbox_row_ref");
     }
     if (directThreadIdFromPath() !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation route changed before the read completed", "conversation_route_changed");
@@ -285,9 +289,6 @@
       if (text) visibleEntries.push({ text, type: "unknown" });
     }
     if (!messages.length && !visibleEntries.length) {
-      if (typeof target.nativeId === "string" && currentEventNodes.length > 0) {
-        return failure(accountBinding, "needs_selection", "visible event entries need a fresh browser inbox reference for this thread", "browser_thread_proof_missing");
-      }
       return readSideEffectFailure(accountBinding, "offline", "no supported visible message or event entries were found", "conversation_content_unclassified");
     }
     const itemCount = messages.length + visibleEntries.length;
@@ -303,7 +304,7 @@
       result.nativeRef = target.explicitOwnerRef;
       if (rowRefProof) {
         rowRefProof.navigationStarted = false;
-        rowRefProof.threadProof = { document, accountBinding, ownerProof: verifiedOwnProfileProof, routeId: expectedId,
+        rowRefProof.threadProof = { document, accountBinding, ownerProof: verifiedOwnProfileProof, routeId: expectedId, main: uniqueVisibleMain(),
           nodes: (Array.isArray(operation.freshContentNodes) ? operation.freshContentNodes : [...currentMessageNodes, ...currentEventNodes])
             .filter((node) => currentMessageNodes.includes(node) || currentEventNodes.includes(node)) };
       }
@@ -323,6 +324,13 @@
       }
       if (record.openedNativeId && (!nextThreadId || nextThreadId !== record.openedNativeId)) inboxRowRefs.delete(reference);
     }
+  }
+
+  function hasVerifiedThreadProof(record, accountBinding, routeId) {
+    const proof = record?.threadProof;
+    return record?.expiresAt > Date.now() && record.openedNativeId === routeId && proof?.document === document &&
+      proof.accountBinding === accountBinding && proof.ownerProof === verifiedOwnProfileProof && proof.routeId === routeId &&
+      proof.main && proof.main === uniqueVisibleMain() && Array.isArray(proof.nodes);
   }
 
   async function readComments(accountBinding, username, operation) {

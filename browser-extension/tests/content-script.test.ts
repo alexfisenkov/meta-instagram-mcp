@@ -205,23 +205,21 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(switched.clicks).toBe(0);
   });
 
-  it("reads only the selected thread and marks the possible mark-seen side effect", async () => {
+  it("requires a verified inbox-row proof before a native target can read the same thread", async () => {
+    const { conversationNative } = await runInboxRowContractFixture({ nativeTargetReadAfterProof: true });
+    expect(conversationNative).toMatchObject({ availability: "ready", source: "browser", sideEffects: ["may_mark_seen"],
+      data: { threadNativeId: "observed-thread-7", unread: "unknown", unanswered: "unknown", messages: [{ nativeId: "msg-1", text: "One message" }] } });
+  });
+
+  it("fails closed on a native thread URL with visible data IDs but no verified row proof", async () => {
     const result = await runFixture("thread.html", "https://www.instagram.com/direct/t/thread-7/", {
       op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 10
     });
-    expect(result).toMatchObject({
-      availability: "ready", source: "browser", sideEffects: ["may_mark_seen"],
-      data: { threadNativeId: "thread-7", unread: "unknown", unanswered: "unknown", messages: [
-        { nativeId: "msg-101", direction: "inbound" }, { nativeId: "msg-102", direction: "outbound" }
-      ] }
-    });
-    const wrongTarget = await runFixture("thread.html", "https://www.instagram.com/direct/t/thread-7/", {
-      op: "thread.read", target: { accountBinding, nativeId: "thread-8" }
-    });
-    expect(wrongTarget.availability).toBe("needs_selection");
+    expect(result).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "browser_thread_proof_missing" }] });
+    expect(result.data).toBeUndefined();
   });
 
-  it("reads only visible message nodes inside the selected thread main", async () => {
+  it("fails closed instead of reading visible IDs from an unproven current main", async () => {
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/", settings: { disableJavaScriptEvaluation: false } });
     page.document.write('<!doctype html><html><body><main><div data-message-id="current-message">Current conversation message</div><div data-mid="hidden-message" style="display:none">Hidden stale message</div></main><aside><div data-message-id="other-thread-message">Other thread message</div></aside></body></html>');
     page.document.close();
@@ -237,13 +235,14 @@ describe("Instagram content script against DOM fixtures", () => {
     try {
       const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         operation: { op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 5 } });
-      expect(result.data.messages).toEqual([{ nativeId: "current-message", text: "Current conversation message", direction: "unknown", timestamp: "unknown" }]);
+      expect(result).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "browser_thread_proof_missing" }] });
+      expect(result.data).toBeUndefined();
     } finally { page.happyDOM.abort(); }
   });
 
   it("does not attribute stale role-article nodes to an unproven native target", async () => {
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-8/", settings: { disableJavaScriptEvaluation: false } });
-    page.document.write('<!doctype html><html><body><main role="main"><div role="article">Older history is unavailable</div><div role="article">A story was shared</div></main></body></html>');
+    page.document.write('<!doctype html><html><body><main role="main"><div role="article" data-message-id="stale-message">Older history is unavailable</div><div role="article">A story was shared</div></main></body></html>');
     page.document.close();
     makeVisible(page.document.querySelector("main")!);
     for (const node of page.document.querySelectorAll('div[role="article"]')) makeVisible(node);
@@ -297,12 +296,12 @@ describe("Instagram content script against DOM fixtures", () => {
     try {
       const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         operation: { op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 2 } });
-      expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "conversation_content_unclassified" }] });
+      expect(result).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "browser_thread_proof_missing" }] });
       expect(result.data).toBeUndefined();
     } finally { page.happyDOM.abort(); }
   });
 
-  it("scrolls the exact selected thread by the bounded older-history page budget", async () => {
+  it("does not scroll a native target without verified thread proof", async () => {
     const html = await readFile(resolve(root, "browser-extension/tests/fixtures/thread.html"), "utf8");
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
     page.document.write(html); page.document.close();
@@ -317,13 +316,18 @@ describe("Instagram content script against DOM fixtures", () => {
     try {
       const first = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         operation: { op: "thread.scroll_older", target: { accountBinding, nativeId: "thread-7" }, pages: 2, limit: 10 } });
-      expect(scroller.scrollTop).toBe(300);
-      expect(first).toMatchObject({ availability: "ready", data: { olderAvailable: true } });
-      const second = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
-        operation: { op: "thread.scroll_older", target: { accountBinding, nativeId: "thread-7" }, pages: 2, limit: 10 } });
-      expect(scroller.scrollTop).toBe(0);
-      expect(second.data.olderAvailable).toBe(false);
+      expect(scroller.scrollTop).toBe(800);
+      expect(first).toMatchObject({ availability: "needs_selection", errors: [{ code: "browser_thread_proof_missing" }] });
     } finally { page.happyDOM.abort(); }
+  });
+
+  it("keeps bounded older scrolling after a fresh row read proves the native thread", async () => {
+    const { conversationNative, scroller, clicks } = await runInboxRowContractFixture({
+      nativeTargetReadAfterProof: { op: "thread.scroll_older", pages: 2 }, scrollFixture: true
+    });
+    expect(conversationNative).toMatchObject({ availability: "ready", data: { threadNativeId: "observed-thread-7", olderAvailable: true } });
+    expect(scroller?.scrollTop).toBe(300);
+    expect(clicks).toBe(1);
   });
 
   it("reads comment and reply native IDs only on the exact selected post", async () => {
@@ -353,13 +357,38 @@ describe("Instagram content script against DOM fixtures", () => {
   });
 
   it("executes one fixed message send only with an exact approved request and fresh context", async () => {
-    const html = await readFile(resolve(root, "browser-extension/tests/fixtures/thread.html"), "utf8");
-    const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
-    page.document.write(html);
+    const inboxUrl = "https://www.instagram.com/direct/inbox/";
+    const page = new Window({ url: inboxUrl, settings: { disableJavaScriptEvaluation: false } });
+    page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
     page.document.close();
-    makeVisible(page.document.querySelector("main")!);
-    for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
-    installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
+    const main = page.document.querySelector("main")!;
+    makeVisible(main);
+    const nav = page.document.createElement("nav");
+    const accountLink = page.document.createElement("a");
+    accountLink.href = "/alexfisenkov/";
+    nav.append(accountLink);
+    main.append(nav);
+    makeVisible(nav); makeVisible(accountLink);
+    const list = page.document.createElement("div");
+    for (const name of ["target conversation", "other conversation"]) {
+      const row = makeInboxRowCard(page.document, name);
+      const wrapper = page.document.createElement("div");
+      wrapper.append(row);
+      makeVisible(wrapper);
+      list.append(wrapper);
+      if (name === "target conversation") row.addEventListener("click", (event) => {
+        event.preventDefault();
+        page.history.pushState({}, "", "/direct/t/thread-7/");
+        const message = page.document.createElement("div");
+        message.setAttribute("data-message-id", "msg-1");
+        message.textContent = "One message";
+        main.append(message);
+        makeVisible(message);
+      });
+    }
+    main.append(list);
+    makeVisible(list);
+    installOwnProfileControlFixture(page, inboxUrl);
     const form = page.document.createElement("form");
     const input = page.document.createElement("textarea");
     input.setAttribute("aria-label", "Message");
@@ -375,7 +404,11 @@ describe("Instagram content script against DOM fixtures", () => {
     page.eval(contentScript);
     const requestId = "request-123456789012";
     const target = { accountBinding, nativeId: "thread-7" };
+    const inbox = await invoke(listener, { kind: "observe", operation: { op: "inbox.list", limit: 2 }, accountBinding, expectedAccountHandle: "alexfisenkov" });
+    const rowRead = await invoke(listener, { kind: "observe", operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 }, accountBinding, expectedAccountHandle: "alexfisenkov" });
+    expect(rowRead.availability).toBe("ready");
     const observation = await invoke(listener, { kind: "observe", operation: { op: "thread.read", target, limit: 50 }, accountBinding, expectedAccountHandle: "alexfisenkov" });
+    expect(observation.availability).toBe("ready");
     const contextHash = observation.data.contextHash;
     const intent = { source: "browser", bridgeId: "bridge-1", accountBinding, action: "message.send",
       payload: { kind: "message.send", text: "Точный ответ" }, target, contextHash };
@@ -473,7 +506,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
   changeRouteAwayAndBackBeforeReuse?: boolean;
   duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean;
-  loadEventEntries?: boolean } = {}) {
+  loadEventEntries?: boolean; nativeTargetReadAfterProof?: boolean | { op: string; pages?: number }; scrollFixture?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
@@ -481,6 +514,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
   makeVisible(page.document.querySelector("main")!);
   let staleToReveal: HTMLElement | undefined;
   let staleToMove: HTMLElement | undefined;
+  let scroller: HTMLElement | undefined;
   if (options.preexistingStaleMessage || options.hiddenStaleMessageRevealed) {
     const stale = page.document.createElement("div");
     stale.setAttribute("data-message-id", "stale-pre-click");
@@ -538,6 +572,13 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
             page.document.querySelector("main")?.append(message);
             makeVisible(message);
           }
+          if (options.loadMessages !== false && options.scrollFixture) {
+            scroller = page.document.createElement("div");
+            scroller.setAttribute("role", "log");
+            page.document.querySelector("main")?.append(scroller);
+            Object.defineProperties(scroller, { scrollHeight: { value: 1_000 }, clientHeight: { value: 200 }, scrollTop: { value: 800, writable: true } });
+            makeVisible(scroller);
+          }
         });
         const wrapper1 = page.document.createElement("div");
         const wrapper2 = page.document.createElement("div");
@@ -571,6 +612,14 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
     const [conversation, conversationDuplicate] = options.duplicateRead
       ? await Promise.all([invoke(listener, readMessage), invoke(listener, readMessage)])
       : [await invoke(listener, readMessage), undefined];
+    let conversationNative;
+    if (options.nativeTargetReadAfterProof) {
+      const nativeOperation = typeof options.nativeTargetReadAfterProof === "object"
+        ? { ...options.nativeTargetReadAfterProof, target: { accountBinding, nativeId: "observed-thread-7" }, limit: 2 }
+        : { op: "thread.read", target: { accountBinding, nativeId: "observed-thread-7" }, limit: 2 };
+      conversationNative = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: nativeOperation });
+    }
     let conversationAgain;
     if (options.reuseReadRef) {
       if (options.changeRouteBeforeReuse) page.history.pushState({}, "", "/direct/t/another-thread/");
@@ -585,7 +634,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
       conversationAgain = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } });
     }
-    return { inbox, conversation, conversationAgain, conversationDuplicate, clicks, url: page.location.href };
+    return { inbox, conversation, conversationAgain, conversationDuplicate, conversationNative, scroller, clicks, url: page.location.href };
   } finally { page.happyDOM.abort(); }
 }
 
