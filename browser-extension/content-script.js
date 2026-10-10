@@ -77,6 +77,10 @@
   }
 
   function readInbox(accountBinding, username, requestedLimit) {
+    const inboxPath = location.pathname.replace(/\/+$/, "") || "/";
+    if (inboxPath !== "/direct/inbox" && !directThreadIdFromPath()) {
+      return failure(accountBinding, "unsupported_ui_version", "Direct sidebar rows are supported only on Inbox and conversation routes", "inbox_route_unsupported");
+    }
     const limit = boundedInteger(requestedLimit, 1, MAX_LIMIT, 50);
     const currentThreadId = directThreadIdFromPath();
     const retainedRows = new Map();

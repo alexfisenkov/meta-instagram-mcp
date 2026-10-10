@@ -122,6 +122,25 @@ describe("Instagram content script against DOM fixtures", () => {
     });
   });
 
+  it("does not extract legacy Direct anchors from a non-Inbox, non-thread page", async () => {
+    const url = "https://www.instagram.com/p/post-1/";
+    const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
+    page.document.write('<!doctype html><html><body><main><a href="/direct/t/unrelated-thread/">Unrelated Direct link</a></main></body></html>');
+    page.document.close();
+    makeVisible(page.document.querySelector("main")!);
+    makeVisible(page.document.querySelector("main a")!);
+    installOwnProfileControlFixture(page, url);
+    let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+    Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+    page.eval(contentScript);
+    try {
+      const result = await invoke(listener, { kind: "observe", operation: { op: "inbox.list", limit: 5 }, accountBinding,
+        expectedAccountHandle: "alexfisenkov", taskExpiresAt: new Date(Date.now() + 5_000).toISOString() });
+      expect(result).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "inbox_route_unsupported" }] });
+      expect(result.data).toBeUndefined();
+    } finally { page.happyDOM.abort(); }
+  });
+
   it("returns ephemeral read-only refs for the observed Direct row cards and opens only the requested row", async () => {
     const { inbox, conversation, conversationAgain, clicks, url } = await runInboxRowContractFixture({ reuseReadRef: true });
     const item = inbox.data.items[0];
