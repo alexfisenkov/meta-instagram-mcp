@@ -34,11 +34,17 @@ export interface SourceRouter {
 }
 
 const PRIORITY: ReadonlyArray<SourceProvider["source"]> = ["api", "browser", "phone"];
+const WINDOWS_DEFAULT_READ_BUDGET_MS = 50_000;
+
+/** Returns the default shared provider budget; Windows leaves room before the MCP client's 60s request timeout. */
+export function defaultSourceRouterTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32" ? WINDOWS_DEFAULT_READ_BUDGET_MS : 12_000;
+}
 
 /** Bounded read-only fallback. Observations stay attributed; this router never merges records. */
 export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
-  // Windows companion tasks can each wait 30s; auto-read may need one account probe plus one actual read.
-  const timeoutMs = options.timeoutMs ?? (process.platform === "win32" ? 60_000 : 12_000);
+  // Keep the shared Windows read result ahead of the MCP SDK's 60s client request deadline.
+  const timeoutMs = options.timeoutMs ?? defaultSourceRouterTimeoutMs();
   const maxProviders = options.maxProviders ?? PRIORITY.length;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error("invalid source router timeout");
   if (!Number.isInteger(maxProviders) || maxProviders < 1 || maxProviders > PRIORITY.length) throw new Error("invalid source router provider limit");

@@ -299,11 +299,13 @@ describe("runtime composition", () => {
     const output = new PassThrough();
     const decoder = new NativeFrameDecoder();
     const frames: unknown[] = [];
+    const taskOperations: string[] = [];
     output.on("data", (chunk) => {
       for (const message of decoder.push(chunk)) {
         frames.push(message);
         if (!isRecord(message) || message.kind !== "task" || !isRecord(message.task)) continue;
         const task = message.task as unknown as { id: string; contextHash?: string; operation: string };
+        taskOperations.push(task.operation);
         const data = task.operation === "account.inspect"
           ? { username: "alexfisenkov", accountBinding: "instagram:42", loggedIn: true, surface: "instagram",
               capabilities: ["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies"] }
@@ -316,7 +318,8 @@ describe("runtime composition", () => {
     const host = createBrowserNativeHost({ client: bridgeClient, accountBinding: "instagram:42", expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
     const runtime = createRuntime({
       existingHandlers: fixtureHandlers(), config: { authMode: "instagram", graphApiVersion: "v25.0", tokenStorePath: join(dir, "token.json"), publishLogPath: join(dir, "publish.jsonl") },
-      hub, providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: process.platform === "win32" ? 30_000 : 2_000, pollMs: 25 })]
+      hub, ...(process.platform === "win32" ? { sourceRouterTimeoutMs: 60_000 } : {}),
+      providers: [createCompanionSourceProvider({ hub, source: "browser", waitMs: process.platform === "win32" ? 30_000 : 2_000, pollMs: 25 })]
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "browser-bootstrap", version: "1.0.0" });
@@ -332,6 +335,7 @@ describe("runtime composition", () => {
         { timeout: process.platform === "win32" ? 75_000 : undefined });
       const result = JSON.parse(((response as { content: Array<{ text: string }> }).content[0]!).text);
       expect(result).toMatchObject({ triedSources: ["browser"], items: [{ source: "browser", threadRef: { nativeId: "thread-42" } }], channelCoverage: { direct: "complete" } });
+      expect(taskOperations).toEqual(["account.inspect", "inbox.list"]);
       expect(await hub.sourceStatus("browser", "instagram:42")).toMatchObject({ availability: "ready", accountHandle: "alexfisenkov", surface: "instagram", capabilities: expect.arrayContaining(["inbox.list"]) });
     } finally {
       await client.close(); await server?.close(); host.close(); input.end(); output.end();

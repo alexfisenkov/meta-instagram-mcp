@@ -41,6 +41,8 @@ export interface RuntimeOptions {
   readbackPath?: string;
   /** Narrow runtime seam for deterministic integration tests and custom source adapters. */
   mutationExecutors?: readonly MutationExecutor[];
+  /** Narrow integration-test seam for exercising slow companion workflows against a finite route budget. */
+  sourceRouterTimeoutMs?: number;
   hostAnalysis?: HostAnalysisPort;
   oauth?: { service: OAuthCallbackService; redirectUri: string; path?: string };
   webhook?: { receiver: WebhookReceiver; path?: string };
@@ -66,7 +68,7 @@ export function createRuntime(options: RuntimeOptions = {}): InstagramRuntime {
     createCompanionSourceProvider({ hub, source: "browser" }),
     createCompanionSourceProvider({ hub, source: "phone" })
   ];
-  const router = createSourceRouter({ providers });
+  const router = createSourceRouter({ providers, ...(options.sourceRouterTimeoutMs !== undefined ? { timeoutMs: options.sourceRouterTimeoutMs } : {}) });
   const readbackPath = options.readbackPath ?? join(dirname(config.tokenStorePath), "mutation-readback.json");
   assertPrivatePath(readbackPath);
   const readbackStore = new FileActionReadbackStore(readbackPath);

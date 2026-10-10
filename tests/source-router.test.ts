@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSourceRouter, type SourceProvider } from "../src/source-router.js";
+import { createSourceRouter, defaultSourceRouterTimeoutMs, type SourceProvider } from "../src/source-router.js";
 import type { Observation } from "../src/domain-types.js";
 
 const observation = (source: Observation<unknown>["source"], overrides: Partial<Observation<unknown>> = {}): Observation<unknown> => ({
@@ -14,6 +14,43 @@ const provider = (source: "api" | "browser" | "phone", result: Observation<unkno
 });
 
 describe("SourceRouter", () => {
+  it("keeps the Windows shared read budget below the MCP client's default request deadline", () => {
+    expect(defaultSourceRouterTimeoutMs("win32")).toBe(50_000);
+    expect(defaultSourceRouterTimeoutMs("win32")).toBeLessThan(60_000);
+    expect(defaultSourceRouterTimeoutMs("darwin")).toBe(12_000);
+  });
+
+  it("uses one shared budget across preflight, read, and later providers", async () => {
+    vi.useFakeTimers();
+    const browser = provider("browser", observation("browser"));
+    const prepareRead = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 30)));
+    const status = vi.fn(async () => ({ source: "browser", availability: "ready" as const, capabilities: ["inbox.list"], accountBinding: "acct:fixture" }));
+    const read = vi.fn(() => new Promise<Observation<unknown>>((resolve) => setTimeout(() => resolve(observation("browser")), 30)));
+    Object.assign(browser, { prepareRead, status, read });
+    const phone = provider("phone", observation("phone"));
+    const phoneStatus = vi.fn(phone.status);
+    Object.assign(phone, { status: phoneStatus });
+    const router = createSourceRouter({ providers: [browser, phone], timeoutMs: 50 });
+    try {
+      const pending = router.read({ operation: "inbox.list", limit: 5 });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(prepareRead).toHaveBeenCalledOnce();
+      expect(status).toHaveBeenCalledOnce();
+      expect(read).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      const result = await pending;
+      expect(result.triedSources).toEqual(["browser"]);
+      expect(result.observations).toMatchObject([{ availability: "offline", coverage: "unknown", errors: [{ code: "timeout" }] }]);
+      expect(result.coverage).toBe("unknown");
+      expect(phoneStatus).not.toHaveBeenCalled();
+      expect(phone.read).not.toHaveBeenCalled();
+      expect(result.skippedSources).toContainEqual({ source: "phone", reason: "The shared read budget expired." });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses API first and stops after complete coverage", async () => {
     const api = provider("api", observation("api"));
     const browser = provider("browser", observation("browser"));
