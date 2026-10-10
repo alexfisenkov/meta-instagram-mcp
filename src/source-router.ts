@@ -74,12 +74,16 @@ export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
           continue;
         }
         if (provider.prepareRead) {
+          let preflightFailed = false;
           try {
             await withTimeout(provider.prepareRead(request), remaining);
           } catch (error) {
+            preflightFailed = true;
             const code = error instanceof TimeoutError ? "preflight_timeout" : "preflight_failed";
             errors.push({ source: provider.source, code, message: safeReason(error) });
+            skippedSources.push({ source: provider.source, reason: "Source did not pass its required read preflight." });
           }
+          if (preflightFailed) continue;
           remaining = deadline - Date.now();
           if (remaining <= 0) {
             skippedSources.push({ source: provider.source, reason: "The shared read budget expired during source preflight." });

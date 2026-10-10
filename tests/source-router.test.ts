@@ -104,6 +104,42 @@ describe("SourceRouter", () => {
     expect(browser.read).not.toHaveBeenCalled();
   });
 
+  it("skips a stale-ready browser after preflight identity mismatch and falls back to another provider", async () => {
+    const api = provider("api", observation("api"));
+    api.status = async () => ({ source: "api", availability: "missing_scope", capabilities: [], reason: "Direct scope missing" });
+    const browser = provider("browser", observation("browser"));
+    const status = vi.fn(async () => ({ source: "browser", availability: "ready" as const, capabilities: ["inbox.list"], accountBinding: "acct:fixture" }));
+    const read = vi.fn(async () => observation("browser"));
+    Object.assign(browser, { status, read, prepareRead: async () => { throw new Error("verified account does not match browser session"); } });
+    const phone = provider("phone", observation("phone"));
+    const router = createSourceRouter({ providers: [api, browser, phone], timeoutMs: 100 });
+
+    const result = await router.read({ operation: "inbox.list", limit: 5 });
+
+    expect(browser.status).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(result.triedSources).toEqual(["phone"]);
+    expect(result.observations).toEqual([observation("phone")]);
+    expect(result.errors).toContainEqual(expect.objectContaining({ source: "browser", code: "preflight_failed" }));
+  });
+
+  it("does not call a provider status or read after its account preflight times out", async () => {
+    const browser = provider("browser", observation("browser"));
+    const prepareRead = vi.fn(() => new Promise<void>(() => {}));
+    const status = vi.fn(async () => ({ source: "browser", availability: "ready" as const, capabilities: ["inbox.list"] }));
+    const read = vi.fn(async () => observation("browser"));
+    Object.assign(browser, { prepareRead, status, read });
+    const router = createSourceRouter({ providers: [browser], timeoutMs: 10 });
+
+    const result = await router.read({ operation: "inbox.list", limit: 5 });
+
+    expect(status).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(result.triedSources).toEqual([]);
+    expect(result.coverage).toBe("unknown");
+    expect(result.errors).toContainEqual(expect.objectContaining({ source: "browser", code: "preflight_timeout" }));
+  });
+
   it("accepts an exact Instagram URL as a selected native target", async () => {
     const api = provider("api", observation("api", { nativeRef: "/direct/t/thread-1" }));
     const router = createSourceRouter({ providers: [api], timeoutMs: 100 });

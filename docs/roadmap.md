@@ -31,5 +31,5 @@
 ## Release/branch guardrails
 
 - Не выполнять Meta mutations, публикацию, server deploy, owner client-config update или GitHub release из CI.
-- `package.json` version `0.2.0` предварительная; точный опубликованный version/SHA задаётся после integrated acceptance.
+- `v0.2.0` опубликован и остаётся текущей версией для установки. `package.json` version `0.2.1` обозначает текущий кандидат; tag/release и installable SHA появятся только после integrated acceptance.
 - Предыдущие инсталляции, token-store, OAuth state и backup-каталоги остаются восстановимыми; cleanup выполняется только отдельной явно заданной операцией.
