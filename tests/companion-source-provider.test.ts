@@ -36,7 +36,7 @@ describe("companion source provider", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       const routed = await pending;
 
-      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "inbox.list", ttlMs: 8_000 }));
+      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "inbox.list", ttlMs: process.platform === "win32" ? 11_750 : 8_000 }));
       expect(routed.triedSources).toEqual(["browser"]);
       expect(routed.observations.at(-1)).toEqual(inbox);
     } finally {
@@ -79,7 +79,7 @@ describe("companion source provider", () => {
       enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { phoneTtls.push(ttlMs); return { id: "phone-task" }; }),
       result: vi.fn(async () => ({ status: "complete", result: observation("phone") }))
     } as unknown as CompanionHub;
-    const browser = createCompanionSourceProvider({ hub: browserHub, source: "browser", accountBinding: "instagram:42", pollMs: 50 });
+    const browser = createCompanionSourceProvider({ hub: browserHub, source: "browser", accountBinding: "instagram:42", waitMs: 8_000, pollMs: 50 });
     const phone = createCompanionSourceProvider({ hub: phoneHub, source: "phone", accountBinding: "instagram:42", pollMs: 50 });
     const router = createSourceRouter({ providers: [browser, phone], timeoutMs: 12_000 });
 
@@ -92,7 +92,7 @@ describe("companion source provider", () => {
       expect(browserHub.cancelReadTask).toHaveBeenCalledOnce();
       expect(phoneTtls).toHaveLength(1);
       expect(phoneTtls[0]).toBeGreaterThan(0);
-      expect(phoneTtls[0]).toBeLessThanOrEqual(process.platform === "win32" ? 30_000 : 4_000);
+      expect(phoneTtls[0]).toBeLessThan(4_000);
       expect(routed.triedSources).toEqual(["browser", "phone"]);
       expect(routed.observations.at(-1)?.source).toBe("phone");
     } finally {

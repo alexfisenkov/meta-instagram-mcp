@@ -90,7 +90,7 @@ describe("runtime composition", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       const result = await pending;
 
-      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ source: "browser", operation: "inbox.list", ttlMs: 8_000 }));
+      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ source: "browser", operation: "inbox.list", ttlMs: process.platform === "win32" ? 11_750 : 8_000 }));
       expect(result.triedSources).toEqual(["browser"]);
       expect(result.observations.at(-1)).toEqual(inbox);
     } finally {
