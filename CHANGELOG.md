@@ -15,6 +15,7 @@
 - Общий read deadline теперь передаётся через browser preflight и companion queue. По expiry queued/leased read помечается отменённым в Hub; если браузер уже получил task, service worker не начинает UI-чтение после его expiry. Уже начатое UI-действие отмена не откатывает.
 - Companion readiness selection is pinned to one bridge ID through preflight, status checks, and task enqueue; an expired selected bridge is not silently replaced by another same-account companion.
 - For UI layouts without Direct href rows, the browser reads only visible, uniquely grouped semantic row cards. It returns short-lived bridge/tab/document-bound read-only refs; one explicit conversation.read may open one row and returns unknown rather than empty if the thread does not load. Operation-specific readiness prefers a ready capable same-account bridge; an existing row ref stays pinned to its origin.
+- Layered inbox formatting preserves a bounded visible row preview alongside the browser-only ref; unread/unanswered remain unknown without an exact UI marker.
 - Операционный runbook различает 27 нативных tools и 18 cloud allowlisted legacy tools, показывает текущие readiness boundaries и вводит iPhone/Appium runbook. Live browser/phone readiness остаётся отдельной runtime-проверкой.
 
 Устанавливайте только commit SHA, опубликованный в [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest).

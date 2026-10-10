@@ -9,6 +9,7 @@ export interface ReviewQueueItem {
   source: SourceId;
   sourceRefs?: Array<{ source: SourceId; nativeRef: string }>;
   coverage: Coverage;
+  preview?: string;
   latestInbound?: { nativeId: string; capturedAt?: string; direction: "inbound" | "unknown"; text?: string };
   unread: Truth;
   unanswered: Truth;
@@ -166,6 +167,7 @@ function observationToItems(observation: Observation<unknown>, kind: "direct" | 
     const explicitUnanswered = truth(raw.unanswered);
     const unanswered: Truth = explicitUnanswered ?? deriveUnanswered(latestRaw, observation.historyCompleteness);
     output.push({ ...(target ? isComment ? { commentRef: target } : { threadRef: target } : {}), source: observation.source,
+      ...(kind === "direct" && typeof raw.label === "string" && raw.label.length ? { preview: raw.label.slice(0, 600) } : {}),
       sourceRefs: [{ source: observation.source, nativeRef: observation.nativeRef }],
       coverage: observation.coverage, ...(latestInbound ? { latestInbound } : {}), unread: truth(raw.unread) ?? "unknown", unanswered,
       state: unanswered === true ? "needs_review" : unanswered === false ? "answered" : "unknown" });

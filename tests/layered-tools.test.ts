@@ -34,7 +34,7 @@ describe("layered tools", () => {
       .triageInbox({ source: "auto", limit: 2 });
 
     expect(queue.items).toMatchObject([{ threadRef: { accountBinding: "instagram:42", explicitOwnerRef: rowRef },
-      source: "browser", unread: "unknown", unanswered: "unknown", state: "unknown" }]);
+      source: "browser", preview: "A visible preview", unread: "unknown", unanswered: "unknown", state: "unknown" }]);
     expect(queue.channelCoverage.direct).toBe("partial");
   });
 
