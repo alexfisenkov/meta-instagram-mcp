@@ -2,6 +2,14 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
+## 0.2.4 — 2026-10-11
+
+- MCP initialize metadata now reports the product version from package metadata; the version remains consistent in source and compiled distribution.
+- Browser targetless `inbox.list` can prepare one inactive, session-managed Inbox tab when the sole Instagram tab is already a Direct thread. The managed surface follows the same account binding across Native Host bridge registration changes, while existing row refs remain pinned to their original bridge.
+- Managed-tab activation revokes ownership. Ownership and inactive state are checked around bounded route navigation and immediately before data dispatch. If writing the revoked marker fails, the reader rechecks the exact tab/account assignment and makes one bounded removal attempt; if both writes fail, revocation is not durable across a later service-worker restart. Chrome provides no atomic compare-and-navigate operation, so a narrow activation race remains.
+- Phone setup references now point to the tracked install guide. Device/UI readiness remains unverified on a physical device; the phone fixtures and these documentation fixes do not establish live compatibility.
+- The previous live conversation-read failure remains unverified as a production cause; source tests do not prove a live account read.
+
 ## 0.2.3 — 2026-10-11
 
 - Browser Direct row navigation waits for a verified thread-route transition within the remaining Hub read-task deadline. Expiry or an unchanged route remains unknown; the operation does not click again. This source-level regression does not establish the cause of any earlier live failure or a live account read.
