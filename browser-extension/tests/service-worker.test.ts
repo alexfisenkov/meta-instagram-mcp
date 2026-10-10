@@ -72,6 +72,49 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id)).toBe(true);
   });
 
+  it("bootstraps a zero-tab account inspection through the actual Native Host ready frame", async () => {
+    const task: BridgeTask = { id: "task-native-ready-bootstrap", kind: "read", source: "browser", bridgeId: "bridge-native-bootstrap",
+      operation: "account.inspect", accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    let delivered = false;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = { register: vi.fn(async () => ({ bridgeId: task.bridgeId })), heartbeat: vi.fn(async () => {}),
+      poll: vi.fn(async () => { if (delivered) return []; delivered = true; return [task]; }), submit: vi.fn(async () => {}) };
+    const tab = { id: 97, url: "https://www.instagram.com/direct/inbox/", status: "complete" };
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 30_000, log: vi.fn() });
+    let worker: ReturnType<typeof workerFixture> | undefined;
+    let forwardWorkerMessages = false;
+    const decoder = new NativeFrameDecoder();
+    output.on("data", (chunk) => {
+      for (const message of decoder.push(chunk)) if (worker) void worker.nativeMessage(message);
+    });
+    try {
+      await host.start();
+      worker = workerFixture({
+        onPostMessage: (message) => { if (forwardWorkerMessages) input.write(encodeNativeFrame(message)); },
+        onTabsQuery: async () => [], onCreateTab: async () => tab,
+        onSendMessage: async (_tabId, message) => {
+          if (message.kind === "ping") return { kind: "pong", version: 1 };
+          return { source: "browser", nativeRef: "/direct/inbox/", accountBinding, capturedAt: new Date().toISOString(),
+            availability: "ready", coverage: "complete", historyCompleteness: "not_applicable",
+            data: { username: "alexfisenkov", accountBinding, loggedIn: true, surface: "instagram", capabilities: ["account.inspect", "inbox.list"] }, errors: [] };
+        }
+      });
+      forwardWorkerMessages = true;
+      for (const message of worker.startupMessages) input.write(encodeNativeFrame(message));
+      await waitFor(() => vi.mocked(client.submit).mock.calls.length === 1);
+
+      expect(worker.createTab).toHaveBeenCalledWith({ url: "https://www.instagram.com/direct/inbox/", active: false });
+      expect(worker.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+      expect(worker.sendMessage).toHaveBeenLastCalledWith(97, expect.objectContaining({ kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", operation: { op: "account.inspect" } }));
+      expect(client.submit).toHaveBeenCalledWith(task.bridgeId, task.id, expect.objectContaining({ availability: "ready", accountBinding }), undefined);
+    } finally {
+      await host.close();
+      input.end();
+      output.end();
+    }
+  });
+
   it("shares one in-flight tab creation across concurrent inspect reads", async () => {
     let markCreateStarted!: () => void;
     let releaseCreate!: (tab: { id: number; url: string; status: string }) => void;
@@ -144,6 +187,10 @@ describe("Instagram extension service worker protocol", () => {
     await fixture.nativeMessage({ kind: "task", task: conversation });
     expect(fixture.createTab).not.toHaveBeenCalled();
     expect(fixture.sendMessage).not.toHaveBeenCalled();
+    for (const task of [preview, conversation]) {
+      expect(fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result.errors[0]?.code)
+        .toBe("browser_bootstrap_not_eligible");
+    }
   });
 
   it("does not create a tab when Instagram tab selection is ambiguous", async () => {
@@ -158,6 +205,34 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.createTab).not.toHaveBeenCalled();
     expect(fixture.sendMessage).not.toHaveBeenCalled();
     expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id && message.result?.availability === "needs_selection")).toBe(true);
+    expect(fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result.errors[0]?.code)
+      .toBe("browser_tab_selection_ambiguous");
+  });
+
+  it("reports a fixed non-PII stage when tab creation is refused", async () => {
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => { throw new Error("private browser detail"); } });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "task-bootstrap-create-failed", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    await fixture.nativeMessage({ kind: "task", task });
+    const result = fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result;
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "browser_bootstrap_create_failed" }] });
+    expect(JSON.stringify(result)).not.toContain("private browser detail");
+  });
+
+  it("reports a fixed load stage and removes the tab listener when load fails", async () => {
+    const tab = { id: 98, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => tab,
+      onGetTab: async () => { throw new Error("private tab detail"); } });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "task-bootstrap-load-failed", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    await fixture.nativeMessage({ kind: "task", task });
+    const result = fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result;
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "browser_bootstrap_load_failed" }] });
+    expect(JSON.stringify(result)).not.toContain("private tab detail");
+    expect(fixture.updatedListenerCount).toBe(0);
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
   });
 
   it("stops waiting for an unready login tab at the task deadline and preserves needs_selection", async () => {

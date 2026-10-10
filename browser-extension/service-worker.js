@@ -116,11 +116,16 @@ async function onNativeMessage(message, sourcePort = nativePort) {
   }
   const tab = await selectUniqueTab(task, { sourcePort, assignment, isCurrent });
   if (!isCurrent()) return;
+  if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
+    sendResult(task, unavailable("offline", "the read task expired while preparing the browser tab", "task_deadline_expired"), sourcePort, assignment);
+    return;
+  }
+  if (tab?.selectionFailure) {
+    sendResult(task, unavailable("needs_selection", tab.selectionFailure.message, tab.selectionFailure.code), sourcePort, assignment);
+    return;
+  }
   if (!tab) {
-    const deadlineExpired = task.kind === "read" && Date.parse(task.expiresAt) <= Date.now();
-    sendResult(task, deadlineExpired
-      ? unavailable("offline", "the read task expired while preparing the browser tab", "task_deadline_expired")
-      : unavailable("needs_selection", "an exact Instagram tab could not be selected"), sourcePort, assignment);
+    sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected", "browser_tab_selection_failed"), sourcePort, assignment);
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
@@ -201,7 +206,9 @@ async function selectUniqueTab(task, context) {
     ? target.explicitOwnerRef : undefined;
   if (rowRef) {
     const selected = inboxRowTabs.get(rowRef);
-    if (!selected || selected.expiresAt <= Date.now() || selected.bridgeId !== task.bridgeId || selected.accountBinding !== task.accountBinding) return undefined;
+    if (!selected || selected.expiresAt <= Date.now() || selected.bridgeId !== task.bridgeId || selected.accountBinding !== task.accountBinding) {
+      return tabSelectionFailure("browser_bootstrap_not_eligible", "the assigned browser tab is not available for this read reference");
+    }
     eligible = eligible.filter((tab) => tab.id === selected.tabId);
   }
   const targetId = task.targetRefs.length === 1 ? task.targetRefs[0].nativeId : undefined;
@@ -225,8 +232,12 @@ async function selectUniqueTab(task, context) {
   if (eligible.length === 0 && canBootstrapReadSurface(task, context.assignment)) {
     return bootstrapReadSurface(task, context);
   }
-  return eligible.length === 1 ? eligible[0] : undefined;
+  if (eligible.length === 1) return eligible[0];
+  if (eligible.length > 1) return tabSelectionFailure("browser_tab_selection_ambiguous", "more than one Instagram tab matches the browser read");
+  return tabSelectionFailure("browser_bootstrap_not_eligible", "this read cannot open a new Instagram tab automatically");
 }
+
+function tabSelectionFailure(code, message) { return { selectionFailure: { code, message } }; }
 
 function canBootstrapReadSurface(task, assignment) {
   return task.kind === "read" && ["account.inspect", "inbox.list"].includes(task.operation) && task.targetRefs.length === 0 &&
@@ -238,7 +249,9 @@ async function bootstrapReadSurface(task, context) {
   const { sourcePort, assignment, isCurrent } = context;
   if (pendingBootstrap) {
     if (pendingBootstrap.sourcePort !== sourcePort || pendingBootstrap.accountBinding !== assignment.accountBinding ||
-        pendingBootstrap.expectedAccountHandle !== assignment.expectedAccountHandle) return undefined;
+        pendingBootstrap.expectedAccountHandle !== assignment.expectedAccountHandle) {
+      return tabSelectionFailure("browser_bootstrap_not_eligible", "another browser assignment is preparing a tab");
+    }
     return awaitBootstrapForTask(pendingBootstrap.promise, task.expiresAt, isCurrent);
   }
 
@@ -271,13 +284,15 @@ async function bootstrapReadSurface(task, context) {
       return undefined;
     }
     pending.createPending = false;
-    if (outcome.failed) return undefined;
+    if (outcome.failed) return tabSelectionFailure("browser_bootstrap_create_failed", "the fixed Direct Inbox tab could not be created");
     const created = outcome.tab;
     if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now() ||
-        !Number.isInteger(created?.id) || !isInstagramUrl(created.url)) return undefined;
+        !Number.isInteger(created?.id)) return undefined;
+    if (!isInstagramUrl(created.url)) return tabSelectionFailure("browser_bootstrap_load_failed", "the fixed Direct Inbox tab did not stay on Instagram");
     const loaded = await waitForTabComplete(created, task.expiresAt, isCurrent, (cancel) => { pending.cancelLoad = cancel; });
     pending.cancelLoad = undefined;
-    if (!loaded || !isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
+    if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
+    if (!loaded) return tabSelectionFailure("browser_bootstrap_load_failed", "the fixed Direct Inbox tab did not finish loading");
     return loaded;
   }).catch(() => undefined).finally(() => {
     pending.completed = true;
