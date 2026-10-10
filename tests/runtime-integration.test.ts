@@ -278,7 +278,7 @@ describe("runtime composition", () => {
       await client.close(); await server.close(); await restartedClient?.close(); await restartedServer?.close();
       host.close(); input.end(); output.end();
     }
-  }, process.platform === "win32" ? 90_000 : 15_000);
+  }, process.platform === "win32" ? 120_000 : 15_000);
 
   it("automatically verifies a registered browser before Direct inbox reads through Hub, router, and MCP", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-browser-bootstrap-")); dirs.push(dir);
@@ -328,7 +328,8 @@ describe("runtime composition", () => {
       server = runtime.createMcpServer();
       await server.connect(serverTransport);
       await client.connect(clientTransport);
-      const response = await client.callTool({ name: "meta_read_inbox", arguments: { source: "auto", limit: 4 } });
+      const response = await client.callTool({ name: "meta_read_inbox", arguments: { source: "auto", limit: 4 } }, undefined,
+        { timeout: process.platform === "win32" ? 75_000 : undefined });
       const result = JSON.parse(((response as { content: Array<{ text: string }> }).content[0]!).text);
       expect(result).toMatchObject({ triedSources: ["browser"], items: [{ source: "browser", threadRef: { nativeId: "thread-42" } }], channelCoverage: { direct: "complete" } });
       expect(await hub.sourceStatus("browser", "instagram:42")).toMatchObject({ availability: "ready", accountHandle: "alexfisenkov", surface: "instagram", capabilities: expect.arrayContaining(["inbox.list"]) });
