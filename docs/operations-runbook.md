@@ -23,6 +23,10 @@ Doctor делает локальные MCP initialize/listTools и read-only sta
 
 Секреты, OAuth-коды, cookies, browser storage и полные account identifiers не копируйте в логи, issues или этот репозиторий. Конфигурация и token-store должны оставаться во внешнем приватном каталоге.
 
+## Остановить companion
+
+`Ctrl+C` или штатный `SIGTERM` прекращает новые browser/phone polls. `close()` ждёт уже начатые registration, heartbeat/poll, task и receipt submission, затем закрывает Appium session; повторный вызов `close()` возвращает ту же операцию завершения. Это drain уже принятой работы, а не отмена UI-действия: открытая переписка может успеть пометиться просмотренной, а результат уже начатого write не откатывается. Для writes остаются действующими отсутствие автоматического повтора и `OUTCOME_UNKNOWN` при неопределённом исходе.
+
 ## Получить Direct из доступного источника
 
 Сначала вызовите `meta_read_inbox` с ограниченным `limit`. Вызов автоматически проверит доступные источники API → browser → phone. Если API сообщает `missing_scope`, `permission_blocked` или временную недоступность, роутер попробует следующий готовый источник.

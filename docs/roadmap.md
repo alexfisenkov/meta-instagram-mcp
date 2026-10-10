@@ -32,7 +32,7 @@
 
 - A sanitized Mac DOM observation identified one visible own-profile avatar control with no `nav`, `header`, `aside`, or `main` ancestor and no `aria-label`/`title`, plus the authenticated own-profile `/accounts/edit/` control. Fixtures exercise those predicates with a neutral wrapper. A configured live bridge/read has not yet verified the flow end to end.
 - A bounded read deadline can expire after a browser/phone companion has already received or started a UI task. The Hub rejects a canceled task receipt and browser/phone checks expiry before beginning a task, but an action already underway cannot be reliably stopped or rolled back; UI reads may also mark a conversation seen. Verify behavior on attached hardware before claiming cancellation of active UI work.
-- `PhoneCompanion.close()` stops future interval polls but does not await a pump already in progress. Reproduction: run the full suite or `tests/companion-phone.test.ts` while its context-refresh test removes the temporary Hub directory immediately after `close()`; a delayed Hub write can make cleanup fail with `ENOTEMPTY`. The isolated test passed; the full local suite reproduced the race twice, and a later full-suite rerun passed. Track a close/drain contract and regression before relying on immediate Hub-directory removal during shutdown.
+- Graceful close now drains admitted browser/phone work and receipt submission before transport/Appium teardown. It does not cancel or roll back UI actions already dispatched; callers must retain the existing `OUTCOME_UNKNOWN`/no-write-retry handling.
 
 ## Release/branch guardrails
 

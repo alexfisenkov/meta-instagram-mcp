@@ -69,7 +69,7 @@
 | `src/api-provider.ts`, `src/direct.ts`, `src/comments.ts` | API provider/domain | Per-operation Meta permission status, Direct conversations/messages and comment/reply operations; bounded API triage cancellation preserves unread rows as unknown. |
 | `src/source-router.ts`, `src/layered-tools.ts` | Layered reads and analysis | One shared API → browser → phone read deadline, fallback reserve, provider cancellation context, coverage/provenance, inbox triage/read and selected-observation host analysis. |
 | `src/runtime.ts`, `src/mcp-server.ts`, `src/server.ts` | Runtime composition and transports | Shared runtime factory for legacy + layered + mutation tools; stdio or Streamable HTTP selected by config. |
-| `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Host read tasks stay locally active until a receipt submit attempt settles; rejected read receipts may be redelivered. Expired queued/leased reads are canceled in the Hub. Presence in checkout does not prove registered/live devices. |
+| `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Graceful close stops polling and drains admitted work/receipt attempts before transport or Appium teardown; rejected read receipts may be redelivered. Expired queued/leased reads are canceled in the Hub. Presence in checkout does not prove registered/live devices. |
 | `src/cli/auth-url.ts` | CLI helper | Печатает текущий OAuth login URL из local config. |
 | `src/cli/callback.ts` | CLI helper | Запускает localhost OAuth callback server. |
 
