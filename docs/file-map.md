@@ -58,17 +58,18 @@
 | Путь | Слой | Назначение |
 |---|---|---|
 | `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes, находит token store path, редактирует tokens. |
+| `src/read-context.ts` | Read execution context | Carries an advisory provider deadline/signal; underlying cancellation is operation-specific (currently Direct triage and companion queue reads). |
 | `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
 | `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с приватными POSIX mode или Windows ACL. |
 | `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook login URLs, меняет auth code на long-lived token, refreshes token, задает scope presets. |
 | `src/callback-server.ts` | Local OAuth helper | Стартует localhost callback, обрабатывает Meta redirect, меняет `code`, сохраняет token. |
-| `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | правка сетевого слоя, отладка отказов DNS |
-| `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token. |
+| `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | Правка сетевого слоя, отладка отказов DNS, отмена активного read-only запроса без запуска следующего маршрута. |
+| `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token, прокидывает read cancellation signal. |
 | `src/tools.ts` | Legacy API use cases | Реализует auth, account/media/comments/insights, page list, resolver, raw GET и legacy publish handlers. |
-| `src/api-provider.ts`, `src/direct.ts`, `src/comments.ts` | API provider/domain | Per-operation Meta permission status, Direct conversations/messages and comment/reply operations. |
-| `src/source-router.ts`, `src/layered-tools.ts` | Layered reads and analysis | Bounded API → browser → phone routing, coverage/provenance, inbox triage/read and selected-observation host analysis. |
+| `src/api-provider.ts`, `src/direct.ts`, `src/comments.ts` | API provider/domain | Per-operation Meta permission status, Direct conversations/messages and comment/reply operations; bounded API triage cancellation preserves unread rows as unknown. |
+| `src/source-router.ts`, `src/layered-tools.ts` | Layered reads and analysis | One shared API → browser → phone read deadline, fallback reserve, provider cancellation context, coverage/provenance, inbox triage/read and selected-observation host analysis. |
 | `src/runtime.ts`, `src/mcp-server.ts`, `src/server.ts` | Runtime composition and transports | Shared runtime factory for legacy + layered + mutation tools; stdio or Streamable HTTP selected by config. |
-| `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Presence in checkout does not prove registered/live devices. |
+| `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Host read tasks stay locally active until a receipt submit attempt settles; rejected read receipts may be redelivered. Expired queued/leased reads are canceled in the Hub. Presence in checkout does not prove registered/live devices. |
 | `src/cli/auth-url.ts` | CLI helper | Печатает текущий OAuth login URL из local config. |
 | `src/cli/callback.ts` | CLI helper | Запускает localhost OAuth callback server. |
 
@@ -107,9 +108,15 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 | `tests/token-store.test.ts` | Token store write/read behavior and file mode. |
 | `tests/oauth.test.ts` | Instagram and Facebook OAuth URL/exchange/refresh logic. |
 | `tests/meta-client.test.ts` | Graph URL construction and token-safe error normalization. |
+| `tests/http-json.test.ts`, `tests/account-context.test.ts` | Active read cancellation stops HTTPS route retries and reaches Facebook Page/permission lookup. |
 | `tests/callback-server.test.ts` | Callback parsing and redacted callback HTML rendering. |
+| `tests/api-provider.test.ts`, `tests/direct.test.ts` | Direct triage cancellation stops later message GETs, threads signal through repeated context resolution, and preserves remaining conversations as unknown. |
 | `tests/tools.test.ts` | Tool handlers, Facebook Login URL, account resolver, safe defaults, ranking. |
-| `tests/source-router.test.ts`, `tests/layered-tools.test.ts`, `tests/runtime-integration.test.ts` | Bounded source fallback, coverage/analysis contracts and shared runtime wiring. |
+| `tests/source-router.test.ts`, `tests/layered-tools.test.ts`, `tests/runtime-integration.test.ts` | Shared source deadlines and context, triage cancellation/fallback, coverage/analysis contracts and runtime read receipts. |
+| `tests/direct.test.ts`, `tests/api-provider.test.ts`, `tests/meta-client.test.ts`, `tests/http-json.test.ts` | Direct API triage stops after cancellation, preserves unknown conversations and cancels in-flight HTTP without route retry. Other Graph GET domains use an advisory context and do not claim transport cancellation. |
+| `tests/companion-hub.test.ts`, `tests/companion-source-provider.test.ts` | Hub cancellation is limited to queued/leased read tasks; companion queue exits on abort/deadline and stops polling. |
+| `tests/browser-native-host.test.ts`, `browser-extension/tests/service-worker.test.ts`, `tests/companion-phone.test.ts` | Browser receipts may safely redeliver reads after rejection; expired browser/phone UI reads do not start after task expiry. |
+| `browser-extension/tests/content-script.test.ts` | Own-profile account verification requires the observed unique avatar control, verified Edit profile marker, same-tab restoration and stable identity on subsequent reads. |
 | `tools/test-installer.mjs` | Portable install/update/rollback fixture and external config wrapper smoke. |
 | `tools/test-native-registration.mjs` | Native Messaging manifest, launcher and registry staging fixtures without changing the user's browser registration. |
 

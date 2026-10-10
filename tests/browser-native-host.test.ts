@@ -67,6 +67,75 @@ describe("Browser Native Messaging host", () => {
     host.close();
   });
 
+  it("does not redispatch a leased read while Hub receipt submission is in flight", async () => {
+    const inspectTask = { ...readTask, id: "task-account", operation: "account.inspect", targetRefs: [], payload: {} } as unknown as BridgeTask;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = bridgeClient([inspectTask]);
+    let submitted = false;
+    let markSubmitStarted!: () => void;
+    let releaseSubmit!: () => void;
+    const submitStarted = new Promise<void>((resolve) => { markSubmitStarted = resolve; });
+    const submitGate = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+    client.poll = vi.fn(async () => submitted ? [] : [inspectTask]);
+    client.submit = vi.fn(async () => { markSubmitStarted(); await submitGate; submitted = true; });
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
+    const received = readFrames(output);
+    try {
+      await host.start();
+      input.write(encodeNativeFrame({ kind: "hello", version: 1 }));
+      await waitFor(() => received.some((message) => isRecord(message) && message.kind === "task"));
+      input.write(encodeNativeFrame({ kind: "result", taskId: inspectTask.id, result: {
+        source: "browser", nativeRef: "/direct/inbox/", accountBinding, capturedAt: new Date().toISOString(),
+        availability: "ready", coverage: "complete", historyCompleteness: "not_applicable",
+        data: { username: "alexfisenkov", accountBinding, loggedIn: true, surface: "instagram",
+          capabilities: ["account.inspect", "inbox.list"] }, errors: []
+      }, contextHash: inspectTask.contextHash }));
+      await submitStarted;
+      await waitFor(() => vi.mocked(client.poll).mock.calls.length >= 2);
+      expect(received.filter((message) => isRecord(message) && message.kind === "task")).toHaveLength(1);
+      expect(client.submit).toHaveBeenCalledOnce();
+      releaseSubmit();
+      await waitFor(() => submitted);
+    } finally {
+      releaseSubmit();
+      host.close();
+      input.end();
+      output.end();
+    }
+  });
+
+  it("allows a read to be redelivered after its receipt submission is rejected", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = bridgeClient([readTask]);
+    client.poll = vi.fn(async () => vi.mocked(client.submit).mock.calls.length < 2 ? [readTask] : []);
+    client.submit = vi.fn().mockRejectedValueOnce(new Error("receipt connection failed")).mockResolvedValue(undefined);
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 250, log: vi.fn() });
+    const received = readFrames(output);
+    const result = {
+      source: "browser", nativeRef: "/direct/t/thread-7/", accountBinding, capturedAt: new Date().toISOString(),
+      availability: "ready", coverage: "partial", historyCompleteness: "limited",
+      data: { username: "alexfisenkov", messages: [] }, errors: []
+    };
+    try {
+      await host.start();
+      input.write(encodeNativeFrame({ kind: "hello", version: 1 }));
+      await waitFor(() => received.filter((message) => isRecord(message) && message.kind === "task").length === 1);
+      input.write(encodeNativeFrame({ kind: "result", taskId: readTask.id, result, contextHash: readTask.contextHash }));
+      await waitFor(() => vi.mocked(client.submit).mock.calls.length === 1);
+      await waitFor(() => received.filter((message) => isRecord(message) && message.kind === "task").length === 2);
+      expect(client.submit).toHaveBeenCalledTimes(1);
+      input.write(encodeNativeFrame({ kind: "result", taskId: readTask.id, result, contextHash: readTask.contextHash }));
+      await waitFor(() => vi.mocked(client.submit).mock.calls.length === 2);
+      expect(client.submit).toHaveBeenCalledTimes(2);
+    } finally {
+      host.close();
+      input.end();
+      output.end();
+    }
+  });
+
   it("registers, sends only a bound semantic task, and submits a provenance-bound result once", async () => {
     const input = new PassThrough();
     const output = new PassThrough();

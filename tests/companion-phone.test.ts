@@ -92,6 +92,23 @@ describe("standalone phone companion", () => {
     } finally { await phone.close(); }
   });
 
+  it("does not start a phone UI read after its Hub task expired", async () => {
+    const client = bridge();
+    const ui = provider();
+    const phone = createPhoneCompanion({ appium: appium(), client, provider: ui, accountBinding: "acct:fixture", expectedAccountHandle: "fixture" });
+    try {
+      await phone.start();
+      vi.mocked(ui.observe).mockClear();
+      await phone.handleTask({
+        ...task("preview"), id: "task-expired-phone-read", kind: "read", operation: "inbox.list", targetRefs: [], payload: { limit: 5 },
+        expiresAt: new Date(Date.now() - 1_000).toISOString()
+      });
+
+      expect(ui.observe).not.toHaveBeenCalled();
+      expect(client.submissions).toMatchObject([{ taskId: "task-expired-phone-read", result: { status: "FAILED" } }]);
+    } finally { await phone.close(); }
+  });
+
   it("rejects stale writes and submits an uncertain one-shot action only once", async () => {
     const device = appium();
     const client = bridge();

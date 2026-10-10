@@ -4,6 +4,7 @@ import { createDirectDomain, ensureScope, ensureScopes, hashContext, messagingCl
 import type { MutationIntent, MutationResult, Observation, TargetRef } from "./domain-types.js";
 import { MetaApiError, MetaTransportError, type MetaClient } from "./meta-client.js";
 import type { ActionReadbackEvidence } from "./action-readback.js";
+import type { SourceReadContext } from "./read-context.js";
 
 export type ApiReadRequest =
   | { operation: "account.inspect"; accountBinding?: string }
@@ -23,8 +24,8 @@ export type ApiActionReadRequest =
 
 export interface ApiProvider {
   readonly source: "api";
-  status(operation?: ApiReadRequest["operation"]): Promise<{ source: "api"; availability: "ready" | "missing_scope" | "permission_blocked" | "unsupported"; capabilities: string[]; reason?: string; accountBinding?: string; scopes: { requested: string[]; confirmed?: string[]; status: "confirmed" | "unknown" } }>;
-  read(request: ApiReadRequest): Promise<Observation<unknown>>;
+  status(operation?: ApiReadRequest["operation"], context?: SourceReadContext): Promise<{ source: "api"; availability: "ready" | "missing_scope" | "permission_blocked" | "unsupported"; capabilities: string[]; reason?: string; accountBinding?: string; scopes: { requested: string[]; confirmed?: string[]; status: "confirmed" | "unknown" } }>;
+  read(request: ApiReadRequest, context?: SourceReadContext): Promise<Observation<unknown>>;
   readForAction(request: ApiActionReadRequest): Promise<ActionReadbackEvidence>;
   refreshContext(intent: MutationIntent): Promise<{ target: TargetRef; contextHash: string }>;
   execute(intent: MutationIntent, requestId: string, contextHash: string): Promise<MutationResult>;
@@ -52,9 +53,9 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
     source: "api",
     direct,
     comments,
-    async status(operation) {
+    async status(operation, context) {
       try {
-        const ctx = await options.resolveContext();
+        const ctx = context ? await options.resolveContext(context) : await options.resolveContext();
         const availabilityFor = (scopes: readonly string[], clientReady = true): "ready" | "missing_scope" | "permission_blocked" => {
           if (!ctx.confirmedScopes) return "permission_blocked";
           if (!clientReady || scopes.some((scope) => !ctx.confirmedScopes!.includes(scope))) return "missing_scope";
@@ -91,18 +92,18 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
         return { source: "api", availability: "permission_blocked", capabilities: [], reason: safeReason(error), scopes: { requested: [], status: "unknown" } };
       }
     },
-    async read(request) {
+    async read(request, context) {
       let ctx: ApiAccountContext | undefined;
       try {
-        ctx = await options.resolveContext();
+        ctx = context ? await options.resolveContext(context) : await options.resolveContext();
         if (request.operation === "conversation.read" && request.olderCursor?.startsWith("browser-older:")) {
           return failureObservation(ctx, request.operation, "unsupported", new Error("Browser history cursors are scoped to the browser companion."));
         }
         if (request.operation === "account.inspect") return failureObservation(ctx, request.operation, "unsupported", new Error("Account inspection is supplied by a verified local companion."));
         if (request.operation === "inbox.list") return request.triage
-          ? await direct.listUnanswered(request)
-          : await listConversationsWithContext(ctx, request);
-        if (request.operation === "conversation.read") return await readConversationWithContext(ctx, request.target, { limit: request.limit, olderCursor: request.olderCursor });
+          ? await direct.listUnanswered(request, context?.signal)
+          : await listConversationsWithContext(ctx, request, context?.signal);
+        if (request.operation === "conversation.read") return await readConversationWithContext(ctx, request.target, { limit: request.limit, olderCursor: request.olderCursor }, context?.signal);
         if (request.operation === "comments.list") return request.triage
           ? await comments.listUnanswered(request.target, request)
           : await listCommentsWithContext(ctx, request.target, request);

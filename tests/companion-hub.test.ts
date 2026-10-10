@@ -45,6 +45,38 @@ describe("CompanionHub", () => {
     expect(await hub.result(task.id)).toMatchObject({ status: "complete", result: { items: [] } });
   });
 
+  it("cancels only queued or leased read tasks and never changes a write lease", async () => {
+    const hub = await makeHub();
+    const { bridgeId, bridgeToken } = await hub.register(registration);
+    const queued = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] });
+
+    expect(await hub.cancelReadTask(queued.id)).toBe(true);
+    expect(await hub.result(queued.id)).toMatchObject({ status: "expired" });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toEqual([]);
+
+    const leased = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: leased.id }]);
+    expect(await hub.cancelReadTask(leased.id)).toBe(true);
+    expect(await hub.result(leased.id)).toMatchObject({ status: "expired" });
+    await expect(hub.submit(bridgeId, leased.id, { items: [] }, undefined, bridgeToken)).rejects.toThrow(/expired/i);
+
+    const write = await enqueueWrite(hub, { source: "browser", accountBinding: "acct:one", operation: "message.send", payload: { text: "approved" }, targetRefs: [{ accountBinding: "acct:one", nativeId: "thread-1" }], contextHash: "0123456789abcdef" });
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: write.id }]);
+    expect(await hub.cancelReadTask(write.id)).toBe(false);
+    expect(await hub.result(write.id)).toMatchObject({ status: "leased" });
+  });
+
+  it("honors a shorter read task TTL so a late poll cannot lease it", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now });
+    const { bridgeId, bridgeToken } = await hub.register(registration);
+    const task = await hub.enqueue({ kind: "read", source: "browser", accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [], ttlMs: 100 });
+    now += 101;
+
+    expect(await hub.poll(bridgeId, 1, bridgeToken)).toEqual([]);
+    expect(await hub.result(task.id)).toMatchObject({ status: "expired" });
+  });
+
   it("publishes the verifier key and requires an account-bound Instagram surface before reporting readiness", async () => {
     const hub = await makeHub();
     const phoneRegistration = { mode: "phone_standalone" as const, source: "phone" as const, accountBinding: "acct:one", capabilities: ["inbox.list", "comment.like"] };

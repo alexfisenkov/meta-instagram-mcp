@@ -2,6 +2,7 @@ import type { MetaInstagramConfig } from "./config.js";
 import { MetaClient, type FacebookPageClient } from "./meta-client.js";
 import { defaultScopesForAuthMode, type AuthMode } from "./oauth.js";
 import { loadStoredToken, type StoredInstagramToken } from "./token-store.js";
+import type { SourceReadContext } from "./read-context.js";
 
 export interface AccountContextTokenStore {
   load(): Promise<StoredInstagramToken | undefined>;
@@ -29,7 +30,7 @@ export interface AccountContextResolverOptions {
   clientFactory?: (accessToken: string, authMode: AuthMode) => MetaClient;
 }
 
-export type AccountContextResolver = () => Promise<ApiAccountContext>;
+export type AccountContextResolver = (context?: SourceReadContext) => Promise<ApiAccountContext>;
 
 /** Resolves the active account without returning bearer credentials in metadata. */
 export function createAccountContextResolver(options: AccountContextResolverOptions): AccountContextResolver {
@@ -40,7 +41,8 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
     baseUrl: authMode === "facebook" ? "https://graph.facebook.com" : "https://graph.instagram.com"
   }));
 
-  return async () => {
+  return async (context) => {
+    const signal = context?.signal;
     const stored = await store.load();
     const useEnvironmentToken = Boolean(options.config.accessToken);
     const accessToken = options.config.accessToken ?? stored?.accessToken;
@@ -55,7 +57,9 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
     let pageResolutionStatus: ApiAccountContext["pageResolutionStatus"];
     if (authMode === "facebook" && facebookPageId) {
       try {
-        const page = await userClient.forFacebookPage(facebookPageId);
+        const page = signal
+          ? await userClient.forFacebookPage(facebookPageId, { signal })
+          : await userClient.forFacebookPage(facebookPageId);
         if (page.instagramUserId && page.instagramUserId !== instagramUserId) {
           throw new Error("Resolved Facebook Page belongs to a different Instagram account.");
         }
@@ -71,7 +75,7 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
       ? stored.permissions.filter((item): item is string => typeof item === "string")
       : undefined;
     if (!confirmedScopes && authMode === "facebook") {
-      try { confirmedScopes = await readGrantedPermissions(userClient); }
+      try { confirmedScopes = await readGrantedPermissions(userClient, signal); }
       catch { confirmedScopes = undefined; }
     }
     return {
@@ -99,8 +103,8 @@ function isOptionalPageUnavailable(error: unknown): boolean {
   );
 }
 
-async function readGrantedPermissions(client: MetaClient): Promise<string[] | undefined> {
-  const response: unknown = await client.get("/me/permissions");
+async function readGrantedPermissions(client: MetaClient, signal?: AbortSignal): Promise<string[] | undefined> {
+  const response: unknown = signal ? await client.get("/me/permissions", {}, { signal }) : await client.get("/me/permissions");
   if (!isRecord(response) || !Array.isArray(response.data)) return undefined;
   const rows = response.data;
   if (!rows.length || rows.some((item) => !isRecord(item) || typeof item.permission !== "string" ||

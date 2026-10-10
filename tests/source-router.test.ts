@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSourceRouter, defaultSourceRouterTimeoutMs, type SourceProvider } from "../src/source-router.js";
+import { createSourceRouter, defaultSourceRouterTimeoutMs, sourceRouterTriageFallbackReserveMs, type SourceProvider } from "../src/source-router.js";
 import type { Observation } from "../src/domain-types.js";
 
 const observation = (source: Observation<unknown>["source"], overrides: Partial<Observation<unknown>> = {}): Observation<unknown> => ({
@@ -18,6 +18,8 @@ describe("SourceRouter", () => {
     expect(defaultSourceRouterTimeoutMs("win32")).toBe(50_000);
     expect(defaultSourceRouterTimeoutMs("win32")).toBeLessThan(60_000);
     expect(defaultSourceRouterTimeoutMs("darwin")).toBe(12_000);
+    expect(sourceRouterTriageFallbackReserveMs("linux")).toBe(8_000);
+    expect(sourceRouterTriageFallbackReserveMs("win32")).toBe(35_000);
   });
 
   it("uses one shared budget across preflight, read, and later providers", async () => {
@@ -45,6 +47,63 @@ describe("SourceRouter", () => {
       expect(phoneStatus).not.toHaveBeenCalled();
       expect(phone.read).not.toHaveBeenCalled();
       expect(result.skippedSources).toContainEqual({ source: "phone", reason: "The shared read budget expired." });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes one signal and deadline context through provider preflight, status, and read", async () => {
+    const browser = provider("browser", observation("browser"));
+    const prepareRead = vi.fn(async (_request: unknown, _context?: { signal?: AbortSignal; deadlineAt?: number }) => {});
+    const status = vi.fn(async (_operation?: string, _context?: { signal?: AbortSignal; deadlineAt?: number }) => ({ source: "browser" as const, availability: "ready" as const, capabilities: ["inbox.list"] }));
+    const read = vi.fn(async (_request: unknown, _context?: { signal?: AbortSignal; deadlineAt?: number }) => observation("browser"));
+    Object.assign(browser, { prepareRead, status, read });
+    const router = createSourceRouter({ providers: [browser], timeoutMs: 500 });
+
+    await router.read({ operation: "inbox.list", limit: 5 });
+
+    const prepareContext = prepareRead.mock.calls[0]?.[1];
+    expect(prepareContext).toMatchObject({ signal: expect.any(AbortSignal), deadlineAt: expect.any(Number) });
+    expect(status.mock.calls[0]?.[1]).toBe(prepareContext);
+    expect(read.mock.calls[0]?.[1]).toBe(prepareContext);
+  });
+
+  it("aborts a slow API inbox-triage read within its share and completes browser fallback in the reserved budget", async () => {
+    vi.useFakeTimers();
+    const api = provider("api", observation("api", { coverage: "partial", historyCompleteness: "unknown", data: { items: [{ conversationId: "thread-1", unanswered: "unknown" }] } }));
+    let apiSignal: AbortSignal | undefined;
+    const apiRead = vi.fn((_request: unknown, context?: { signal?: AbortSignal }) => {
+      apiSignal = context?.signal;
+      return new Promise<Observation<unknown>>((resolve) => {
+        apiSignal?.addEventListener("abort", () => resolve(observation("api", {
+          availability: "ready", coverage: "partial", historyCompleteness: "unknown",
+          data: { items: [{ conversationId: "thread-1", unanswered: "unknown" }] },
+          errors: [{ code: "read_budget_exhausted", message: "remaining conversations unknown" }]
+        })), { once: true });
+      });
+    });
+    Object.assign(api, { read: apiRead });
+    const browser = provider("browser", observation("browser"));
+    const phone = provider("phone", observation("phone"));
+    const router = createSourceRouter({ providers: [api, browser, phone] });
+    const routeBudgetMs = defaultSourceRouterTimeoutMs();
+    const apiBudgetMs = routeBudgetMs - sourceRouterTriageFallbackReserveMs();
+    const abortAtMs = apiBudgetMs - Math.min(250, Math.floor(apiBudgetMs / 4));
+    try {
+      const startedAt = Date.now();
+      const pending = router.read({ operation: "inbox.list", limit: 5, triage: true });
+      await vi.advanceTimersByTimeAsync(abortAtMs);
+      const result = await pending;
+      expect(apiSignal?.aborted).toBe(true);
+      expect(apiRead).toHaveBeenCalledOnce();
+      expect(browser.read).toHaveBeenCalledOnce();
+      expect(phone.read).not.toHaveBeenCalled();
+      expect(result.triedSources).toEqual(["api", "browser"]);
+      expect(result.observations.map((item) => item.source)).toEqual(["api", "browser"]);
+      expect(result.observations[0]).toMatchObject({ coverage: "partial", data: { items: [{ unanswered: "unknown" }] } });
+      expect(result.coverage).toBe("complete");
+      expect(Date.now() - startedAt).toBeLessThan(60_000);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

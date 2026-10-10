@@ -91,6 +91,10 @@ async function onNativeMessage(message) {
   if (message.kind === "heartbeat") return;
   if (message.kind !== "task" || !bridgeReady || !validTask(message.task)) return;
   const task = message.task;
+  if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
+    sendResult(task, unavailable("offline", "the read task expired before browser UI execution"));
+    return;
+  }
   if (task.kind === "write" && (!allowWrites || !message.approval || !nativePort || !isApproval(task, message.approval))) {
     sendResult(task, { status: "FAILED", reason: "the assigned browser host did not approve this write lease" });
     return;
@@ -105,9 +109,17 @@ async function onNativeMessage(message) {
     sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected"));
     return;
   }
+  if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch"));
+    return;
+  }
   const operation = taskToOperation(task, message.approval);
   if (!operation) {
     sendResult(task, unavailable("unsupported", "the operation is not allowlisted"));
+    return;
+  }
+  if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch"));
     return;
   }
   try {
@@ -202,7 +214,8 @@ function unavailable(availability, message) {
 function validTask(value) {
   if (!isRecord(value) || !bridgeReady || value.accountBinding !== accountBinding || value.source !== "browser" ||
       !["read", "preview", "write"].includes(value.kind) || typeof value.id !== "string" || value.id.length > 128 ||
-      !Object.hasOwn(OPERATION_MAP, value.operation) || !Array.isArray(value.targetRefs) || value.targetRefs.length > 1 || !isRecord(value.payload)) return false;
+      !Object.hasOwn(OPERATION_MAP, value.operation) || !Array.isArray(value.targetRefs) || value.targetRefs.length > 1 ||
+      typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || !isRecord(value.payload)) return false;
   return value.targetRefs.every((target) => isRecord(target) && target.accountBinding === accountBinding &&
     Object.keys(target).every((key) => ["accountBinding", "nativeId", "instagramUrl", "explicitOwnerRef"].includes(key)) &&
     Object.values(target).every((entry) => typeof entry === "string" && entry.length <= 512));

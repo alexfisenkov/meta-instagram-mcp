@@ -35,6 +35,14 @@ describe("MetaClient request assembly", () => {
     expect(httpMock.mock.calls[0][1]?.method).toBe("GET");
   });
 
+  it("passes a read cancellation signal only to the Graph GET transport", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ data: [] }));
+    const controller = new AbortController();
+    await makeClient().get("/me/conversations", { limit: 2 }, { signal: controller.signal });
+
+    expect(httpMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
+
   it("does not prefix the api version twice and trims the base url", async () => {
     httpMock.mockResolvedValueOnce(jsonHttpResponse({ id: "17841400000000000" }));
 

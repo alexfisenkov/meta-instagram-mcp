@@ -40,6 +40,28 @@ describe("companion source provider", () => {
     }));
   });
 
+  it("cancels a queued read on abort and stops polling the Hub", async () => {
+    const controller = new AbortController();
+    let markFirstPoll!: () => void;
+    const firstPoll = new Promise<void>((resolve) => { markFirstPoll = resolve; });
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42" })),
+      enqueue: vi.fn(async () => ({ id: "task-cancel-me" })),
+      result: vi.fn(async () => { markFirstPoll(); return { status: "queued" }; }),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 500, pollMs: 50 });
+    const pending = provider.read({ operation: "inbox.list", limit: 5 }, { signal: controller.signal, deadlineAt: Date.now() + 500 });
+
+    await firstPoll;
+    controller.abort(new Error("caller read deadline expired"));
+    const result = await pending;
+
+    expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "cancelled" }] });
+    expect(hub.cancelReadTask).toHaveBeenCalledWith("task-cancel-me");
+    expect(hub.result).toHaveBeenCalledOnce();
+  });
+
   it("probes a registered browser and verifies the exact account before allowing automatic reads", async () => {
     const accountProbe = { ...observation("browser"), nativeRef: "/direct/inbox/", coverage: "complete" as const,
       historyCompleteness: "not_applicable" as const,

@@ -69,6 +69,42 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.sendMessage).toHaveBeenCalledTimes(3);
   });
 
+  it("does not start browser UI work for an expired read task", async () => {
+    const fixture = workerFixture();
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: true });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-expired-read", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "conversation.read",
+      accountBinding, targetRefs: [{ accountBinding, nativeId: "thread-7" }], payload: { limit: 20 },
+      expiresAt: new Date(Date.now() - 1_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "result", taskId: "task-expired-read", result: expect.objectContaining({ availability: "offline" })
+    }));
+  });
+
+  it("rechecks read expiry after asynchronous tab selection", async () => {
+    vi.useFakeTimers();
+    const expiresAt = new Date(Date.now() + 100).toISOString();
+    const fixture = workerFixture({ onTabsQuery: async () => {
+      await vi.advanceTimersByTimeAsync(200);
+      return [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }];
+    } });
+    try {
+      await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: true });
+      await fixture.nativeMessage({ kind: "task", task: {
+        id: "task-expiring-read", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "conversation.read",
+        accountBinding, targetRefs: [{ accountBinding, nativeId: "thread-7" }], payload: { limit: 20 }, expiresAt
+      } });
+
+      expect(fixture.sendMessage).not.toHaveBeenCalled();
+      expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        kind: "result", taskId: "task-expiring-read", result: expect.objectContaining({ availability: "offline" })
+      }));
+    } finally { vi.useRealTimers(); }
+  });
+
   it("does not dispatch when write gating is off or a signed approved task is stale", async () => {
     const fixture = workerFixture();
     await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
@@ -148,7 +184,7 @@ describe("Instagram extension service worker protocol", () => {
   });
 });
 
-function workerFixture(options: { response?: unknown; onPostMessage?: (message: unknown) => void } = {}) {
+function workerFixture(options: { response?: unknown; onPostMessage?: (message: unknown) => void; onTabsQuery?: () => Promise<Array<{ id: number; url: string }>> } = {}) {
   const listeners: Array<Array<(message: unknown) => unknown>> = [];
   const disconnectListeners: Array<Array<() => void>> = [];
   const alarmListeners: Array<(alarm: { name: string }) => unknown> = [];
@@ -171,7 +207,7 @@ function workerFixture(options: { response?: unknown; onPostMessage?: (message: 
     },
     alarms,
     tabs: {
-      query: vi.fn(async () => [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
+      query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
     }
   };
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Array, Promise, RegExp, String, Number, Boolean });

@@ -9,6 +9,7 @@
   const LIVE_CAPABILITIES = Object.freeze(["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies",
     "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"]);
   const executedRequests = new Set();
+  let verifiedOwnProfileProof;
   const MAX_LIMIT = 100;
   const MAX_SCROLL_PAGES = 5;
 
@@ -24,9 +25,9 @@
     if (!isInstagramPage() || !validBinding(accountBinding) || !validHandle(expectedAccountHandle) || !isRecord(operation) || typeof operation.op !== "string") {
       return failure(accountBinding, "unsupported_ui_version", "invalid Instagram page or operation");
     }
-    const username = findAccountHandle();
-    if (!username) return failure(accountBinding, "needs_selection", "current Instagram account could not be identified");
-    if (username.toLowerCase() !== expectedAccountHandle.toLowerCase()) return failure(accountBinding, "needs_selection", "current Instagram account does not match the assigned account");
+    if (!READ_OPS.has(operation.op) && !PREVIEW_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
+    if (!await verifyOwnAccount(expectedAccountHandle)) return failure(accountBinding, "needs_selection", "the signed-in owner account could not be proven from its own Profile control");
+    const username = expectedAccountHandle;
     if (PREVIEW_OPS.has(operation.op)) return previewResult(operation, accountBinding, username);
     if (!READ_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
 
@@ -313,6 +314,99 @@
       if (path && !RESERVED.has(path.toLowerCase())) candidates.add(path);
     }
     return candidates.size === 1 ? [...candidates][0] : "";
+  }
+
+  async function verifyOwnAccount(expectedHandle) {
+    const control = uniqueOwnProfileControl();
+    if (!control || control.handle.toLowerCase() !== expectedHandle.toLowerCase()) {
+      verifiedOwnProfileProof = undefined;
+      return false;
+    }
+    if (verifiedOwnProfileProof && verifiedOwnProfileProof.handle === expectedHandle.toLowerCase() &&
+        verifiedOwnProfileProof.element === control.element && verifiedOwnProfileProof.href === control.href && verifiedOwnProfileProof.alt === control.alt) return true;
+    if (isExpectedProfilePath(expectedHandle) && hasOwnEditProfileControl(expectedHandle)) {
+      verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: control.element, href: control.href, alt: control.alt };
+      return true;
+    }
+
+    const original = safeInstagramUrl(location.href);
+    if (!original) return false;
+    control.element.click();
+    const reachedOwnProfile = await waitUntil(() => isExpectedProfilePath(expectedHandle) && hasOwnEditProfileControl(expectedHandle), 1_500);
+    let restored = isSameUrl(original);
+    if (!restored) {
+      try { history.back(); } catch { return false; }
+      restored = await waitUntil(() => isSameUrl(original), 1_500);
+    }
+    if (!reachedOwnProfile || !restored) {
+      verifiedOwnProfileProof = undefined;
+      return false;
+    }
+    const currentControl = uniqueOwnProfileControl();
+    if (!currentControl || currentControl.href !== control.href || currentControl.alt !== control.alt ||
+        currentControl.handle.toLowerCase() !== expectedHandle.toLowerCase()) {
+      verifiedOwnProfileProof = undefined;
+      return false;
+    }
+    verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: currentControl.element, href: currentControl.href, alt: currentControl.alt };
+    return true;
+  }
+
+  function uniqueOwnProfileControl() {
+    const candidates = Array.from(document.querySelectorAll('a[role="link"]')).flatMap((element) => {
+      if (element.closest("nav, header, aside, main") || element.hasAttribute("aria-label") || element.hasAttribute("title") || !isVisible(element)) return [];
+      if (element.target && element.target.toLowerCase() !== "_self") return [];
+      const url = safeInstagramUrl(element.href);
+      const handle = url?.pathname.match(/^\/([^/]+)\/?$/)?.[1];
+      if (!url || url.username || url.password || url.port || !handle || RESERVED.has(handle.toLowerCase()) || url.search || url.hash) return [];
+      const images = Array.from(element.querySelectorAll("img[alt]")).filter(isVisible);
+      if (images.length !== 1) return [];
+      const alt = cleanText(images[0]?.getAttribute("alt"), 256);
+      if (!profileImageAltContainsHandle(alt, handle)) return [];
+      return [{ element, handle, href: `${url.origin}${url.pathname}`, alt }];
+    });
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
+  function profileImageAltContainsHandle(value, handle) {
+    const tokens = String(value || "").toLowerCase().match(/[a-z0-9][a-z0-9._]*/g) || [];
+    return tokens.includes(handle.toLowerCase());
+  }
+
+  function isExpectedProfilePath(handle) {
+    const url = safeInstagramUrl(location.href);
+    return Boolean(url && !url.search && !url.hash && url.pathname.replace(/\/$/, "").toLowerCase() === `/${handle.toLowerCase()}`);
+  }
+
+  function hasOwnEditProfileControl(handle) {
+    if (!isExpectedProfilePath(handle)) return false;
+    const controls = Array.from(document.querySelectorAll('header a[role="link"][href]')).filter((element) => {
+      if (!isVisible(element) || element.hasAttribute("aria-label") || element.hasAttribute("title")) return false;
+      const url = safeInstagramUrl(element.href);
+      return url && !url.username && !url.password && !url.port && url.pathname === "/accounts/edit/" && !url.search && !url.hash &&
+        cleanText(element.textContent, 128).toLowerCase() === "редактировать профиль";
+    });
+    return controls.length === 1;
+  }
+
+  function isVisible(element) {
+    if (!element.isConnected || element.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  }
+
+  function isSameUrl(url) {
+    try { return safeInstagramUrl(location.href)?.href === url.href; } catch { return false; }
+  }
+
+  async function waitUntil(predicate, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      if (predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    return Boolean(predicate());
   }
 
   function observation(accountBinding, data, availability, coverage, historyCompleteness, sideEffects, extras = {}) {

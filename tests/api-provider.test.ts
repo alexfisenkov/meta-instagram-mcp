@@ -34,6 +34,17 @@ describe("official API provider", () => {
     expect(status.capabilities).not.toContain("direct.read");
   });
 
+  it("passes router read context through the API readiness lookup", async () => {
+    const { ctx } = makeContext(["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"]);
+    const resolveContext = vi.fn(async () => ctx);
+    const provider = createApiProvider({ resolveContext });
+    const signal = new AbortController().signal;
+
+    await provider.status("inbox.list", { signal });
+
+    expect(resolveContext).toHaveBeenCalledWith({ signal });
+  });
+
   it("reports unknown grants as permission_blocked without claiming scopes are confirmed", async () => {
     const { ctx } = makeContext();
     const provider = createApiProvider({ resolveContext: async () => ctx });
@@ -161,6 +172,32 @@ describe("official API provider", () => {
     expect(comments.data).toMatchObject({ items: [{ commentId: "comment-1", unanswered: true, unread: "unknown" }] });
     expect(rawInbox.data).toMatchObject({ items: [{ id: "thread-1", unanswered: "unknown" }] });
     expect(rawInbox.coverage).toBe("unknown");
+  });
+
+  it("cancels in-flight API inbox triage without issuing later conversation GETs", async () => {
+    const { ctx, pageClient } = makeContext(["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"]);
+    const controller = new AbortController();
+    const get = vi.fn(async (path: string, _query?: unknown, options?: { signal?: AbortSignal }) => {
+      expect(options?.signal).toBe(controller.signal);
+      if (path === "/page-4/conversations") return { data: [{ id: "thread-1" }, { id: "thread-2" }] };
+      if (path === "/thread-1/messages") {
+        controller.abort();
+        throw new Error("request aborted");
+      }
+      throw new Error("triage started a GET after cancellation");
+    });
+    pageClient.get = get;
+    const provider = createApiProvider({ resolveContext: async () => ctx });
+
+    const result = await provider.read({ operation: "inbox.list", limit: 2, triage: true }, { signal: controller.signal });
+
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/page-4/conversations", "/thread-1/messages"]);
+    expect(result.coverage).toBe("partial");
+    expect(result.data).toMatchObject({ items: [
+      { conversationId: "thread-1", unread: "unknown", unanswered: "unknown" },
+      { conversationId: "thread-2", unread: "unknown", unanswered: "unknown" }
+    ] });
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: "read_budget_exhausted" }));
   });
 
   it("asks a ready browser source to complement API comment triage with unknown author identity", async () => {

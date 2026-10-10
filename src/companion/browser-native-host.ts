@@ -100,30 +100,34 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
   };
 
   const submitWithoutRetry = async (task: BridgeTask, result: unknown, contextHash?: string) => {
-    activeTasks.delete(task.id);
-    if (task.operation === "account.inspect" && task.kind === "read") {
-      const data = isRecord(result) && isRecord(result.data) ? result.data : undefined;
-      const validProbe = isRecord(result) && result.source === "browser" && result.accountBinding === options.accountBinding &&
-        result.availability === "ready" && data?.username?.toString().toLowerCase() === options.expectedAccountHandle.toLowerCase() &&
-        data.surface === "instagram" && Array.isArray(data.capabilities);
-      const rawCapabilities = Array.isArray(data?.capabilities) ? data.capabilities : [];
-      const capabilities = validProbe ? rawCapabilities.filter((item): item is string => typeof item === "string" && BROWSER_CAPABILITIES.has(item)) : [];
-      liveReadiness = validProbe && capabilities.includes("inbox.list")
-        ? { availability: "ready", capabilities: [...new Set(capabilities)], accountHandle: options.expectedAccountHandle }
-        : { availability: isRecord(result) && typeof result.availability === "string" ? result.availability : "offline", capabilities: [] };
-      try {
-        await options.client.heartbeat(bridgeId, { ...liveReadiness, accountBinding: options.accountBinding, surface: "instagram" });
-        lastHubHeartbeatAt = Date.now();
-      } catch {
-        log("browser account verification heartbeat failed");
+    try {
+      if (task.operation === "account.inspect" && task.kind === "read") {
+        const data = isRecord(result) && isRecord(result.data) ? result.data : undefined;
+        const validProbe = isRecord(result) && result.source === "browser" && result.accountBinding === options.accountBinding &&
+          result.availability === "ready" && data?.username?.toString().toLowerCase() === options.expectedAccountHandle.toLowerCase() &&
+          data.surface === "instagram" && Array.isArray(data.capabilities);
+        const rawCapabilities = Array.isArray(data?.capabilities) ? data.capabilities : [];
+        const capabilities = validProbe ? rawCapabilities.filter((item): item is string => typeof item === "string" && BROWSER_CAPABILITIES.has(item)) : [];
+        liveReadiness = validProbe && capabilities.includes("inbox.list")
+          ? { availability: "ready", capabilities: [...new Set(capabilities)], accountHandle: options.expectedAccountHandle }
+          : { availability: isRecord(result) && typeof result.availability === "string" ? result.availability : "offline", capabilities: [] };
+        try {
+          await options.client.heartbeat(bridgeId, { ...liveReadiness, accountBinding: options.accountBinding, surface: "instagram" });
+          lastHubHeartbeatAt = Date.now();
+        } catch {
+          log("browser account verification heartbeat failed");
+        }
       }
-    }
-    try { await options.client.submit(bridgeId, task.id, result, contextHash); }
-    catch (error) {
-      // A write submit failure can follow successful UI execution. Never resend it.
-      log(`bridge result submit failed (${task.kind}); request remains unresolved`);
-      if (task.kind === "write") writesDispatched.add(task.id);
-      void error;
+      try { await options.client.submit(bridgeId, task.id, result, contextHash); }
+      catch (error) {
+        // A write submit failure can follow successful UI execution. Never resend it.
+        log(`bridge result submit failed (${task.kind}); request remains unresolved`);
+        if (task.kind === "write") writesDispatched.add(task.id);
+        void error;
+      }
+    } finally {
+      // Keep a read lease active until the submit attempt settles; a rejected receipt may safely redeliver a read.
+      activeTasks.delete(task.id);
     }
   };
 

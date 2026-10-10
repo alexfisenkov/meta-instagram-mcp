@@ -7,7 +7,7 @@ export interface DirectQuery { limit?: number; cursor?: string; olderCursor?: st
 export interface DirectDomain {
   listConversations(q?: DirectQuery): Promise<Observation<unknown>>;
   readConversation(target: TargetRef, q?: DirectQuery): Promise<Observation<unknown>>;
-  listUnanswered(q?: DirectQuery): Promise<Observation<unknown>>;
+  listUnanswered(q?: DirectQuery, signal?: AbortSignal): Promise<Observation<unknown>>;
   prepareSend(target: TargetRef, text: string): Promise<MutationIntent>;
   prepareReaction(target: TargetRef, reaction: string): Promise<MutationIntent>;
 }
@@ -18,15 +18,17 @@ const OWNER_SCOPES: Record<ApiAccountContext["authMode"], string[]> = {
 const DEFAULT_FIELDS = "id,from,to,message,created_time";
 const MAX_UNANSWERED_CONVERSATIONS = 20;
 
-export async function readConversationWithContext(ctx: ApiAccountContext, target: TargetRef, q: DirectQuery = {}): Promise<Observation<unknown>> {
+export async function readConversationWithContext(ctx: ApiAccountContext, target: TargetRef, q: DirectQuery = {}, signal?: AbortSignal): Promise<Observation<unknown>> {
   ensureScopes(ctx, OWNER_SCOPES[ctx.authMode]);
   assertMessagingTask(ctx);
   ensureAccountTarget(target, ctx);
   const client = messagingClient(ctx);
   const limit = boundedMessageLimit(q.limit);
-  const result = await client.get(`/${encodeURIComponent(requireId(target.nativeId, "conversation"))}/messages`, {
+  const query = {
     fields: DEFAULT_FIELDS, limit, after: q.olderCursor ?? q.cursor
-  });
+  };
+  const path = `/${encodeURIComponent(requireId(target.nativeId, "conversation"))}/messages`;
+  const result = signal ? await client.get(path, query, { signal }) : await client.get(path, query);
   const page = graphPage(result);
   const normalized = normalizeMessagePage(page.items, ctx);
   return observation(ctx, `conversation:${target.nativeId}`, normalized, {
@@ -38,7 +40,7 @@ export async function readConversationWithContext(ctx: ApiAccountContext, target
   });
 }
 
-export async function listConversationsWithContext(ctx: ApiAccountContext, q: DirectQuery = {}): Promise<Observation<unknown>> {
+export async function listConversationsWithContext(ctx: ApiAccountContext, q: DirectQuery = {}, signal?: AbortSignal): Promise<Observation<unknown>> {
   ensureScopes(ctx, OWNER_SCOPES[ctx.authMode]);
   assertMessagingTask(ctx);
   const client = messagingClient(ctx);
@@ -46,9 +48,10 @@ export async function listConversationsWithContext(ctx: ApiAccountContext, q: Di
   const path = ctx.authMode === "facebook"
     ? `/${encodeURIComponent(requireId(ctx.facebookPageId, "Facebook Page"))}/conversations`
     : `/${encodeURIComponent(ctx.instagramUserId)}/conversations`;
-  const result = await client.get(path, {
+  const query = {
     platform: "instagram", fields: "id,updated_time,participants", limit, after: q.cursor
-  });
+  };
+  const result = signal ? await client.get(path, query, { signal }) : await client.get(path, query);
   const page = graphPage(result);
   return observation(ctx, "conversations", {
     items: page.items.map((item) => ({
@@ -66,7 +69,9 @@ export async function listConversationsWithContext(ctx: ApiAccountContext, q: Di
 }
 
 export function createDirectDomain(resolveContext: AccountContextResolver, now: () => Date = () => new Date()): DirectDomain {
-  async function context() { return resolveContext(); }
+  async function context(signal?: AbortSignal) {
+    return signal ? resolveContext({ signal }) : resolveContext();
+  }
   async function readConversation(target: TargetRef, q: DirectQuery = {}): Promise<Observation<unknown>> {
     return readConversationWithContext(await context(), target, q);
   }
@@ -76,16 +81,31 @@ export function createDirectDomain(resolveContext: AccountContextResolver, now: 
       return listConversationsWithContext(await context(), q);
     },
     readConversation,
-    async listUnanswered(q = {}) {
-      const ctx = await context();
+    async listUnanswered(q = {}, signal) {
+      const ctx = await context(signal);
       const limit = Math.min(MAX_UNANSWERED_CONVERSATIONS, boundedLimit(q.limit, MAX_UNANSWERED_CONVERSATIONS));
-      const list = await listConversationsWithContext(ctx, { ...q, limit });
+      const list = await listConversationsWithContext(ctx, { ...q, limit }, signal);
       const data = isRecord(list.data) && Array.isArray(list.data.items) ? list.data.items : [];
+      const conversations = data.slice(0, limit);
       const items = [];
-      for (const raw of data.slice(0, limit)) {
+      let interrupted = false;
+      for (let index = 0; index < conversations.length; index += 1) {
+        const raw = conversations[index];
         if (!isRecord(raw) || typeof raw.id !== "string") continue;
+        if (signal?.aborted) {
+          interrupted = true;
+          items.push(...unknownTriageItems(conversations.slice(index)));
+          break;
+        }
         const target: TargetRef = { accountBinding: ctx.accountBinding, nativeId: raw.id };
-        const conversation = await readConversationWithContext(ctx, target, { limit: 20 });
+        let conversation: Observation<unknown>;
+        try { conversation = await readConversationWithContext(ctx, target, { limit: 20 }, signal); }
+        catch (error) {
+          if (!signal?.aborted) throw error;
+          interrupted = true;
+          items.push(...unknownTriageItems(conversations.slice(index)));
+          break;
+        }
         const parsed = isRecord(conversation.data) ? conversation.data : {};
         const latest = Array.isArray(parsed.messages) ? parsed.messages[0] : undefined;
         const unanswered = isRecord(latest) && latest.direction === "inbound" && parsed.complete === true
@@ -93,7 +113,12 @@ export function createDirectDomain(resolveContext: AccountContextResolver, now: 
           : isRecord(latest) && latest.direction === "outbound" && parsed.complete === true ? false : "unknown";
         items.push({ conversationId: raw.id, unread: "unknown", unanswered, latestMessage: latest });
       }
-      return { ...list, coverage: "partial", data: { items, nextCursor: isRecord(list.data) ? list.data.nextCursor : undefined } };
+      return {
+        ...list,
+        coverage: "partial",
+        data: { items, nextCursor: isRecord(list.data) ? list.data.nextCursor : undefined },
+        ...(interrupted ? { errors: [...list.errors, { code: "read_budget_exhausted", message: "Remaining conversations were not read and stay unknown." }] } : {})
+      };
     },
     async prepareSend(target, text) {
       const ctx = await context();
@@ -136,6 +161,12 @@ export function createDirectDomain(resolveContext: AccountContextResolver, now: 
       return makeIntent(ctx, "message.react", { kind: "message.react", reaction }, target, hashContext(snapshot));
     }
   };
+}
+
+function unknownTriageItems(values: unknown[]): Array<{ conversationId: string; unread: "unknown"; unanswered: "unknown" }> {
+  return values.flatMap((value) => isRecord(value) && typeof value.id === "string"
+    ? [{ conversationId: value.id, unread: "unknown" as const, unanswered: "unknown" as const }]
+    : []);
 }
 
 export function normalizeMessagePage(items: Record<string, unknown>[], ctx: ApiAccountContext) {

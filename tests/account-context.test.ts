@@ -58,6 +58,25 @@ describe("API account context", () => {
     expect(context.scopeStatus).toBe("confirmed");
   });
 
+  it("passes an active read budget signal through Page and permission discovery", async () => {
+    const signal = new AbortController().signal;
+    const userClient = {
+      get: vi.fn().mockResolvedValue({ data: [{ permission: "instagram_manage_messages", status: "granted" }] }),
+      post: vi.fn(), postJson: vi.fn(), delete: vi.fn(),
+      forFacebookPage: vi.fn().mockResolvedValue({ client: {}, pageId: "page-9", instagramUserId: "ig-account-7", tasks: ["MESSAGING"] })
+    };
+    const resolve = createAccountContextResolver({
+      config,
+      tokenStore: { load: vi.fn().mockResolvedValue({ accessToken: "user-secret", authMode: "facebook", userId: "ig-account-7", pageId: "page-9" }) },
+      clientFactory: () => userClient as never
+    });
+
+    await resolve({ signal });
+
+    expect(userClient.forFacebookPage).toHaveBeenCalledWith("page-9", { signal });
+    expect(userClient.get).toHaveBeenCalledWith("/me/permissions", {}, { signal });
+  });
+
   it("keeps fresh user grants when an optional saved Page is no longer resolvable", async () => {
     const userClient = {
       get: vi.fn().mockResolvedValue({ data: [

@@ -1,6 +1,7 @@
 import type { CompanionHub, BridgeOperation, BridgeSource } from "./companion-hub.js";
 import type { Availability, Observation, TargetRef } from "./domain-types.js";
 import type { MutationIntent } from "./domain-types.js";
+import type { SourceReadContext } from "./read-context.js";
 import type { ReadRequest, SourceProvider } from "./source-router.js";
 
 export interface CompanionSourceProviderOptions {
@@ -24,15 +25,18 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
 
   const provider: SourceProvider = {
     source: options.source,
-    async prepareRead(request) {
+    async prepareRead(request, context) {
       if (options.source !== "browser" || request.operation === "account.inspect") return;
+      throwIfReadStopped(context, now);
       const target = "target" in request ? request.target : undefined;
       const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding);
+      throwIfReadStopped(context, now);
       if (initial.availability !== "offline" || !initial.bridgeId || !initial.accountBinding) return;
 
-      const probe = await provider.read({ operation: "account.inspect", accountBinding: initial.accountBinding });
+      const probe = await provider.read({ operation: "account.inspect", accountBinding: initial.accountBinding }, context);
       const probeData = isRecord(probe.data) ? probe.data : undefined;
       const verified = await options.hub.sourceStatus(options.source, initial.accountBinding);
+      throwIfReadStopped(context, now);
       const accountHandle = verified.accountHandle?.toLowerCase();
       if (probe.availability !== "ready" || probe.accountBinding !== initial.accountBinding ||
           !probeData || typeof probeData.username !== "string" || !accountHandle ||
@@ -41,16 +45,19 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         throw new Error("Registered browser companion did not verify the selected Instagram account.");
       }
     },
-    async status(operation) {
+    async status(operation, context) {
+      if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped before companion readiness check." };
       const status = await options.hub.sourceStatus(options.source, options.accountBinding);
+      if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped during companion readiness check." };
       if (operation && status.availability === "ready" && !status.capabilities.includes(operation)) {
         return { ...status, availability: "unsupported", reason: `The connected companion does not report ${operation}.` };
       }
       return status;
     },
-    async read(request) {
+    async read(request, context) {
       const target = "target" in request ? request.target : undefined;
       const requestedAccountBinding = "accountBinding" in request ? request.accountBinding : undefined;
+      if (isReadStopped(context, now)) return readStoppedObservation(options.source, target?.accountBinding ?? requestedAccountBinding ?? options.accountBinding ?? "unresolved", context, now);
       if (((options.source === "phone" || options.source === "browser") &&
           ((request.operation === "inbox.list" && request.cursor) ||
            ((request.operation === "comments.list" || request.operation === "comments.replies") && request.cursor))) ||
@@ -72,6 +79,7 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       const accountBinding = target?.accountBinding ?? requestedAccountBinding ?? options.accountBinding;
       const status = await options.hub.sourceStatus(options.source, accountBinding);
       const resolvedAccountBinding = accountBinding ?? status.accountBinding;
+      if (isReadStopped(context, now)) return readStoppedObservation(options.source, resolvedAccountBinding ?? "unresolved", context, now);
       const bootstrap = request.operation === "account.inspect" && options.source === "browser" && Boolean(status.bridgeId);
       if ((status.availability !== "ready" && !bootstrap) || !resolvedAccountBinding ||
           (status.availability === "ready" && !status.capabilities.includes(request.operation))) {
@@ -86,15 +94,27 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       else if (request.operation === "comments.list" || request.operation === "comments.replies") payload = { limit: request.limit ?? 25, ...(request.cursor ? { cursor: request.cursor } : {}) };
       else if (request.operation === "insights.read") payload = { period: request.period ?? "day" };
       else payload = {};
+      const deadline = Math.min(now() + waitMs, contextDeadline(context) ?? Number.POSITIVE_INFINITY);
+      const taskTtlMs = Math.floor(deadline - now());
+      if (taskTtlMs < 1 || context?.signal?.aborted) {
+        return readStoppedObservation(options.source, resolvedAccountBinding, context, now);
+      }
       let task;
       try {
-        task = await options.hub.enqueue({ kind: "read", source: options.source, accountBinding: resolvedAccountBinding, operation, payload, targetRefs, ttlMs: waitMs + pollMs * 2 });
+        task = await options.hub.enqueue({ kind: "read", source: options.source, accountBinding: resolvedAccountBinding, operation, payload, targetRefs, ttlMs: taskTtlMs });
       } catch (error) {
         return unavailable(options.source, resolvedAccountBinding, "offline", safeReason(error), "enqueue_failed");
       }
-      const deadline = now() + waitMs;
-      while (now() < deadline) {
+      if (isReadStopped(context, now)) {
+        await cancelReadTask(options.hub, task.id);
+        return readStoppedObservation(options.source, resolvedAccountBinding, context, now);
+      }
+      while (now() < deadline && !context?.signal?.aborted) {
         const result = await options.hub.result(task.id);
+        if (isReadStopped(context, now)) {
+          await cancelReadTask(options.hub, task.id);
+          return readStoppedObservation(options.source, resolvedAccountBinding, context, now);
+        }
         if (result.status === "complete") {
           if (!isObservation(result.result)) return unavailable(options.source, resolvedAccountBinding, "unsupported_ui_version", "Companion returned an invalid observation.", "invalid_result");
           const observation = result.result;
@@ -110,8 +130,10 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         if (["expired", "outcome_unknown"].includes(result.status)) {
           return unavailable(options.source, resolvedAccountBinding, "offline", "Companion read task did not complete before its lease expired.", result.status);
         }
-        await delay(Math.min(pollMs, Math.max(1, deadline - now())));
+        await delay(Math.min(pollMs, Math.max(1, deadline - now())), context?.signal);
       }
+      await cancelReadTask(options.hub, task.id);
+      if (context?.signal?.aborted) return readStoppedObservation(options.source, resolvedAccountBinding, context, now);
       return unavailable(options.source, resolvedAccountBinding, "offline", "Companion read exceeded its bounded wait budget.", "timeout");
     },
     async refreshContext(intent: MutationIntent) {
@@ -169,5 +191,38 @@ function isObservation(value: unknown): value is Observation<unknown> {
 }
 
 function safeReason(error: unknown): string { return error instanceof Error ? error.message.slice(0, 240) : "Companion queue rejected the read."; }
-function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function contextDeadline(context: SourceReadContext | undefined): number | undefined {
+  return typeof context?.deadlineAt === "number" && Number.isFinite(context.deadlineAt) ? context.deadlineAt : undefined;
+}
+
+function isReadStopped(context: SourceReadContext | undefined, now: () => number): boolean {
+  return Boolean(context?.signal?.aborted || (contextDeadline(context) !== undefined && now() >= contextDeadline(context)!));
+}
+
+function throwIfReadStopped(context: SourceReadContext | undefined, now: () => number): void {
+  if (!isReadStopped(context, now)) return;
+  if (context?.signal?.aborted && context.signal.reason instanceof Error) throw context.signal.reason;
+  throw new Error("Companion read deadline expired.");
+}
+
+function readStoppedObservation(source: BridgeSource, accountBinding: string, context: SourceReadContext | undefined, now: () => number): Observation<unknown> {
+  const cancelled = Boolean(context?.signal?.aborted);
+  const message = cancelled && context?.signal?.reason instanceof Error
+    ? context.signal.reason.message
+    : "Companion read deadline expired before completion.";
+  return unavailable(source, accountBinding, "offline", message, cancelled ? "cancelled" : "timeout");
+}
+
+async function cancelReadTask(hub: CompanionHub, taskId: string): Promise<void> {
+  try { await hub.cancelReadTask(taskId); } catch { /* cancellation must not replace the unknown read result */ }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+    if (signal?.aborted) finish();
+  });
+}
 import { randomUUID } from "node:crypto";

@@ -173,7 +173,9 @@ export class CompanionHub {
       this.prune(state);
       if (state.tasks.length >= this.options.maxTasks) throw new Error("hub queue is full");
       const now = this.now();
-      const maxTtlMs = input.kind === "write" ? Math.min(input.ttlMs ?? 30_000, 30_000, this.options.taskTtlMs) : this.options.taskTtlMs;
+      const maxTtlMs = input.kind === "write"
+        ? Math.min(input.ttlMs ?? 30_000, 30_000, this.options.taskTtlMs)
+        : Math.min(input.ttlMs ?? this.options.taskTtlMs, this.options.taskTtlMs);
       const task: StoredTask = {
         id: randomUUID(), kind: input.kind, source: input.source, bridgeId: bridge.id,
         operation: input.operation, accountBinding: input.accountBinding,
@@ -260,6 +262,18 @@ export class CompanionHub {
       if (!task) return { status: "unknown" };
       if (Date.parse(task.expiresAt) <= this.now() && task.status !== "complete") return { status: task.kind === "write" && task.status === "leased" ? "outcome_unknown" : "expired" };
       return { status: task.status, ...(task.status === "complete" ? { result: structuredClone(task.result) } : {}) };
+    });
+  }
+
+  /** Cancels only a queued/leased read; write attempts and completed tasks are never changed. */
+  async cancelReadTask(taskId: string): Promise<boolean> {
+    return this.change((state) => {
+      const task = state.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.kind !== "read" || !["queued", "leased"].includes(task.status)) return false;
+      task.status = "expired";
+      delete task.leaseUntil;
+      this.audit(state, "task.read_cancelled", task.bridgeId, task.id, "expired");
+      return true;
     });
   }
 
