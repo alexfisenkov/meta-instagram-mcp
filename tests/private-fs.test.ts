@@ -72,5 +72,6 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
       await ensurePrivateFile(path);
       await expect(assertPrivateFile(path)).resolves.toBeUndefined();
     }
-  }, 25_000);
+  // Six sequential ACL helper processes (20s each) plus the deny-rule fixture (10s).
+  }, 135_000);
 });
