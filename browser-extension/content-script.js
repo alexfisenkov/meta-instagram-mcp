@@ -257,12 +257,14 @@
         record.navigationStarted = true;
         try { record.row.click(); }
         catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
+        const routeDeadline = taskDeadline(taskExpiresAt);
+        const routeWaitMs = routeDeadline === undefined ? 1_500 : Math.max(0, routeDeadline - Date.now());
         const navigated = await waitUntil(() => {
           const routeId = directThreadIdFromPath();
           return Boolean(routeId && routeId !== priorThreadId);
-        }, 1_500, taskExpiresAt);
+        }, routeWaitMs, taskExpiresAt);
         const routeId = directThreadIdFromPath();
-        if (!navigated || !routeId || routeId === priorThreadId) {
+        if (!navigated || !routeId || routeId === priorThreadId || taskDeadlineReached(taskExpiresAt)) {
           return readSideEffectFailure(accountBinding, taskDeadlineReached(taskExpiresAt) ? "offline" : "needs_selection",
             "the selected inbox row did not reach a conversation route", taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_route_not_reached");
         }
