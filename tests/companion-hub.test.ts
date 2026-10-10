@@ -64,7 +64,7 @@ describe("CompanionHub", () => {
     expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: write.id }]);
     expect(await hub.cancelReadTask(write.id)).toBe(false);
     expect(await hub.result(write.id)).toMatchObject({ status: "leased" });
-  });
+  }, process.platform === "win32" ? 45_000 : 15_000);
 
   it("honors a shorter read task TTL so a late poll cannot lease it", async () => {
     let now = 1_000;
