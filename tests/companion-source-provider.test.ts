@@ -3,7 +3,7 @@ import { createCompanionSourceProvider } from "../src/companion-source-provider.
 import type { CompanionHub } from "../src/companion-hub.js";
 import { createSourceRouter, type SourceProvider } from "../src/source-router.js";
 
-function observation(source: "browser" | "phone", accountBinding = "instagram:42") {
+function observation(source: "api" | "browser" | "phone", accountBinding = "instagram:42") {
   return {
     source, nativeRef: `${source}:inbox`, accountBinding, capturedAt: "2026-10-06T00:00:00.000Z",
     availability: "ready" as const, coverage: "partial" as const, historyCompleteness: "limited" as const,
@@ -12,6 +12,123 @@ function observation(source: "browser" | "phone", accountBinding = "instagram:42
 }
 
 describe("companion source provider", () => {
+  it("uses the runtime browser default long enough for a cold inbox while respecting the shared router deadline", async () => {
+    vi.useFakeTimers();
+    const inbox = observation("browser");
+    let taskCreatedAt = 0;
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { taskCreatedAt = Date.now(); return { id: `task-${ttlMs}` }; }),
+      result: vi.fn(async () => Date.now() - taskCreatedAt >= 5_000 ? { status: "complete", result: inbox } : { status: "queued" }),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const api = {
+      source: "api" as const,
+      status: async () => ({ source: "api" as const, availability: "missing_scope" as const, capabilities: [], accountBinding: "instagram:42" }),
+      read: vi.fn(async () => ({ ...observation("api"), availability: "missing_scope" as const, coverage: "unknown" as const,
+        historyCompleteness: "unknown" as const, errors: [{ code: "missing_scope", message: "Direct scope unavailable." }] }))
+    } as unknown as SourceProvider;
+    const browser = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", pollMs: 50 });
+    const router = createSourceRouter({ providers: [api, browser], timeoutMs: 12_000 });
+
+    try {
+      const pending = router.read({ operation: "inbox.list", limit: 2 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const routed = await pending;
+
+      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "inbox.list", ttlMs: 8_000 }));
+      expect(routed.triedSources).toEqual(["browser"]);
+      expect(routed.observations.at(-1)).toEqual(inbox);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps explicit provider waits and the phone default unchanged", async () => {
+    const createHub = (source: "browser" | "phone", taskTtls: number[]) => ({
+      sourceStatus: vi.fn(async () => ({ source, availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: `${source}-bridge` })),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { taskTtls.push(ttlMs); return { id: `${source}-task` }; }),
+      result: vi.fn(async () => ({ status: "complete", result: observation(source) }))
+    } as unknown as CompanionHub);
+    const browserTtls: number[] = [];
+    const phoneTtls: number[] = [];
+
+    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", pollMs: 5 })
+      .read({ operation: "inbox.list", limit: 1 });
+    await createCompanionSourceProvider({ hub: createHub("phone", phoneTtls), source: "phone", pollMs: 5 })
+      .read({ operation: "inbox.list", limit: 1 });
+    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", waitMs: 4_000, pollMs: 5 })
+      .read({ operation: "inbox.list", limit: 1 });
+
+    expect(browserTtls).toEqual([process.platform === "win32" ? 30_000 : 8_000, 4_000]);
+    expect(phoneTtls).toEqual([process.platform === "win32" ? 30_000 : 4_000]);
+  });
+
+  it("gives phone fallback only the remaining shared deadline after the browser default expires", async () => {
+    vi.useFakeTimers();
+    const browserHub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "browser-bridge" })),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => ({ id: `browser-task-${ttlMs}` })),
+      result: vi.fn(async () => ({ status: "queued" })),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const phoneTtls: number[] = [];
+    const phoneHub = {
+      sourceStatus: vi.fn(async () => ({ source: "phone", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "phone-bridge" })),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { phoneTtls.push(ttlMs); return { id: "phone-task" }; }),
+      result: vi.fn(async () => ({ status: "complete", result: observation("phone") }))
+    } as unknown as CompanionHub;
+    const browser = createCompanionSourceProvider({ hub: browserHub, source: "browser", accountBinding: "instagram:42", pollMs: 50 });
+    const phone = createCompanionSourceProvider({ hub: phoneHub, source: "phone", accountBinding: "instagram:42", pollMs: 50 });
+    const router = createSourceRouter({ providers: [browser, phone], timeoutMs: 12_000 });
+
+    try {
+      const pending = router.read({ operation: "inbox.list", limit: 1 });
+      await vi.advanceTimersByTimeAsync(8_100);
+      const routed = await pending;
+
+      expect(browserHub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ ttlMs: 8_000 }));
+      expect(browserHub.cancelReadTask).toHaveBeenCalledOnce();
+      expect(phoneTtls).toHaveLength(1);
+      expect(phoneTtls[0]).toBeGreaterThan(0);
+      expect(phoneTtls[0]).toBeLessThanOrEqual(process.platform === "win32" ? 30_000 : 4_000);
+      expect(routed.triedSources).toEqual(["browser", "phone"]);
+      expect(routed.observations.at(-1)?.source).toBe("phone");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clips the browser default to a shorter caller deadline and cancels the task", async () => {
+    vi.useFakeTimers();
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "browser-bridge" })),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => ({ id: `browser-task-${ttlMs}` })),
+      result: vi.fn(async () => ({ status: "queued" })),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const browser = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", pollMs: 50 });
+    const router = createSourceRouter({ providers: [browser], timeoutMs: 2_000 });
+
+    try {
+      const pending = router.read({ operation: "inbox.list", limit: 1 });
+      await vi.advanceTimersByTimeAsync(2_000);
+      const routed = await pending;
+
+      expect(hub.enqueue).toHaveBeenCalledOnce();
+      const ttlMs = vi.mocked(hub.enqueue).mock.calls[0]?.[0].ttlMs;
+      expect(ttlMs).toBeGreaterThan(0);
+      expect(ttlMs).toBeLessThan(8_000);
+      expect(hub.cancelReadTask).toHaveBeenCalledOnce();
+      expect(routed.observations.at(-1)).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "cancelled" }] });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses live per-operation readiness instead of registration capabilities", async () => {
     const hub = {
       sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["comments.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" }))

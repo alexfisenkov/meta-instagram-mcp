@@ -16,6 +16,9 @@ export interface CompanionSourceProviderOptions {
 const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
 const BROWSER_INBOX_ROW_REF_TTL_MS = 5 * 60_000;
 const MAX_BROWSER_READINESS_CANDIDATES = 3;
+const WINDOWS_COMPANION_READ_WAIT_MS = 30_000;
+const BROWSER_COMPANION_READ_WAIT_MS = 8_000;
+const PHONE_COMPANION_READ_WAIT_MS = 4_000;
 
 function hasPinnedCompanion(context: SourceReadContext | undefined): boolean {
   return context?.companionBridgeSelection === "pinned" ||
@@ -24,7 +27,10 @@ function hasPinnedCompanion(context: SourceReadContext | undefined): boolean {
 
 /** Reads through the durable authenticated companion task queue; it never exposes writes. */
 export function createCompanionSourceProvider(options: CompanionSourceProviderOptions): SourceProvider {
-  const waitMs = options.waitMs ?? (process.platform === "win32" ? 30_000 : 4_000);
+  const defaultWaitMs = process.platform === "win32"
+    ? WINDOWS_COMPANION_READ_WAIT_MS
+    : options.source === "browser" ? BROWSER_COMPANION_READ_WAIT_MS : PHONE_COMPANION_READ_WAIT_MS;
+  const waitMs = options.waitMs ?? defaultWaitMs;
   const pollMs = options.pollMs ?? 50;
   const now = options.now ?? Date.now;
   const browserCursors = new Map<string, { accountBinding: string; targetKey: string; pageBudget: number; expiresAt: number }>();

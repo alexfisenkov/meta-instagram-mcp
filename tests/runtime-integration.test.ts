@@ -59,6 +59,46 @@ describe("runtime composition", () => {
     await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
+  it("uses the browser default for the assembled runtime provider while keeping its shared deadline", async () => {
+    vi.useFakeTimers();
+    const dir = await mkdtemp(join(tmpdir(), "instagram-runtime-browser-budget-")); dirs.push(dir);
+    const inbox = { ...fixtureObservation, coverage: "complete" as const, data: { items: [{ target: { accountBinding: "instagram:42", nativeId: "fixture-thread" } }] } };
+    let taskCreatedAt = 0;
+    const hub = {
+      sourceStatus: vi.fn(async (source: string) => ({ source, availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: `${source}-bridge` })),
+      enqueue: vi.fn(async ({ source, ttlMs }: { source: string; ttlMs: number }) => { if (source === "browser") taskCreatedAt = Date.now(); return { id: `${source}-${ttlMs}` }; }),
+      result: vi.fn(async (taskId: string) => taskId.startsWith("browser-")
+        ? Date.now() - taskCreatedAt >= 5_000 ? { status: "complete", result: inbox } : { status: "queued" }
+        : { status: "expired" }),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const apiProvider = {
+      source: "api" as const,
+      status: async () => ({ source: "api" as const, availability: "missing_scope" as const, capabilities: [], accountBinding: "instagram:42" }),
+      read: vi.fn(async () => ({ ...inbox, source: "api" as const, availability: "missing_scope" as const, coverage: "unknown" as const,
+        historyCompleteness: "unknown" as const, errors: [{ code: "missing_scope", message: "Direct scope unavailable." }] }))
+    };
+    const handlers = Object.assign(fixtureHandlers(), { apiProvider }) as ExistingToolHandlers;
+    const runtime = createRuntime({
+      existingHandlers: handlers,
+      config: { authMode: "instagram", graphApiVersion: "v25.0", tokenStorePath: join(dir, "token.json"), publishLogPath: join(dir, "publish.jsonl") },
+      hub, sourceRouterTimeoutMs: 12_000
+    });
+
+    try {
+      const pending = runtime.router.read({ operation: "inbox.list", limit: 2 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await pending;
+
+      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ source: "browser", operation: "inbox.list", ttlMs: 8_000 }));
+      expect(result.triedSources).toEqual(["browser"]);
+      expect(result.observations.at(-1)).toEqual(inbox);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("composes browser-only sources with MCP and Streamable HTTP while absent optional routes return 404", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-runtime-")); dirs.push(dir);
     const mutationCalls: string[] = [];
