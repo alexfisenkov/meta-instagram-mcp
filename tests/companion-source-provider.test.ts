@@ -120,7 +120,7 @@ describe("companion source provider", () => {
       expect(hub.enqueue).toHaveBeenCalledOnce();
       const ttlMs = vi.mocked(hub.enqueue).mock.calls[0]?.[0].ttlMs;
       expect(ttlMs).toBeGreaterThan(0);
-      expect(ttlMs).toBeLessThan(8_000);
+      expect(ttlMs).toBeLessThanOrEqual(2_000);
       expect(hub.cancelReadTask).toHaveBeenCalledOnce();
       expect(routed.observations.at(-1)).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "cancelled" }] });
     } finally {
