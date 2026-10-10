@@ -22,19 +22,43 @@ describe("Instagram content script against DOM fixtures", () => {
   });
 
   it.each([
-    ["a different profile image", "someone-else", "Редактировать профиль"],
+    ["a different profile image", "someoneelse", "Редактировать профиль"],
     ["a public profile without the own Edit profile control", "alexfisenkov", "Поделиться профилем"]
   ])("does not verify account.inspect from %s", async (_reason, avatarHandle, editLabel) => {
     const { result, clicks } = await runOwnProfileInspectFixture({ avatarHandle, editLabel });
     expect(result.availability).toBe("needs_selection");
     expect(result.coverage).toBe("unknown");
     expect(clicks).toBe(avatarHandle === "alexfisenkov" ? 1 : 0);
+    expect(result.errors[0]?.code).toBe(avatarHandle === "alexfisenkov" ? "edit_marker_missing" : "expected_handle_mismatch");
+  });
+
+  it("reports a missing expected account handle without exposing profile values", async () => {
+    const { result, clicks } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль", expectedHandle: null });
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "expected_handle_missing" }] });
+    expect(JSON.stringify(result)).not.toContain("alexfisenkov");
+    expect(clicks).toBe(0);
+  });
+
+  it("reports an expired read task before clicking a profile control", async () => {
+    const { result, clicks } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль",
+      taskExpiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "task_deadline_expired" }] });
+    expect(clicks).toBe(0);
+  });
+
+  it("restores the Direct tab but does not report account.inspect after its task deadline", async () => {
+    const { result, clicks, url } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль",
+      taskExpiresAt: new Date(Date.now() + 100).toISOString(), restoreDelayMs: 200 });
+    expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "task_deadline_expired" }] });
+    expect(clicks).toBe(1);
+    expect(url).toBe("https://www.instagram.com/direct/inbox/");
   });
 
   it("rejects an ambiguous own-profile control and does not choose one arbitrarily", async () => {
     const { result, clicks } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль", ambiguous: true });
     expect(result.availability).toBe("needs_selection");
     expect(clicks).toBe(0);
+    expect(result.errors[0]?.code).toBe("owner_marker_ambiguous");
   });
 
   it("invalidates the within-document proof when the avatar control changes accounts", async () => {
@@ -42,6 +66,7 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(result.availability).toBe("ready");
     expect(followup).toMatchObject({ availability: "needs_selection", coverage: "unknown" });
     expect(clicks).toBe(1);
+    expect(followup.errors[0]?.code).toBe("expected_handle_mismatch");
   });
 
   it("does not reuse proof for a replacement control while an expected-handle recipient avatar remains", async () => {
@@ -50,6 +75,7 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(result.availability).toBe("ready");
     expect(followup).toMatchObject({ availability: "needs_selection", coverage: "unknown" });
     expect(clicks).toBe(1);
+    expect(followup.errors[0]?.code).toBe("owner_marker_ambiguous");
   });
 
   it("re-proves a replacement control even when its href and image alt match the cached values", async () => {
@@ -70,6 +96,7 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(result.availability).toBe("needs_selection");
     expect(url).toBe("https://www.instagram.com/alexfisenkov/");
     expect(clicks).toBe(1);
+    expect(result.errors[0]?.code).toBe("original_url_restore_failed");
   });
 
   it("returns exact inbox refs and preserves unread versus unanswered", async () => {
@@ -293,7 +320,7 @@ function installOwnProfileControlFixture(page: Window, returnUrl: string) {
   } });
 }
 
-async function runOwnProfileInspectFixture(options: { avatarHandle: string; editLabel: string; ambiguous?: boolean; restore?: boolean; followup?: boolean; switchHandleBeforeFollowup?: string; keepExpectedRecipientAvatar?: boolean; replaceOwnControlWithMatchingAvatar?: boolean }) {
+async function runOwnProfileInspectFixture(options: { avatarHandle: string; editLabel: string; ambiguous?: boolean; restore?: boolean; restoreDelayMs?: number; followup?: boolean; switchHandleBeforeFollowup?: string; keepExpectedRecipientAvatar?: boolean; replaceOwnControlWithMatchingAvatar?: boolean; expectedHandle?: string | null; taskExpiresAt?: string }) {
   const initialUrl = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url: initialUrl, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body></body></html>");
@@ -338,14 +365,17 @@ async function runOwnProfileInspectFixture(options: { avatarHandle: string; edit
   Object.defineProperty(page.history, "back", { value: () => {
     if (options.restore !== false) {
       profileHeader?.remove();
-      page.history.pushState({}, "", "/direct/inbox/");
+      if (options.restoreDelayMs) setTimeout(() => page.history.pushState({}, "", "/direct/inbox/"), options.restoreDelayMs);
+      else page.history.pushState({}, "", "/direct/inbox/");
     }
   } });
   let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
   Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
   page.eval(contentScript);
   try {
-    const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", operation: { op: "account.inspect" } });
+    const result = await invoke(listener, { kind: "observe", accountBinding,
+      ...(options.expectedHandle === null ? {} : { expectedAccountHandle: options.expectedHandle ?? "alexfisenkov" }),
+      ...(options.taskExpiresAt ? { taskExpiresAt: options.taskExpiresAt } : {}), operation: { op: "account.inspect" } });
     if (options.switchHandleBeforeFollowup) {
       profile.href = `/${options.switchHandleBeforeFollowup}/`;
       image.alt = `Profile picture of ${options.switchHandleBeforeFollowup}`;
@@ -366,7 +396,7 @@ async function runOwnProfileInspectFixture(options: { avatarHandle: string; edit
       makeVisible(replacement.querySelector("img")!);
     }
     const followup = options.followup
-      ? await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", operation: { op: "inbox.list", limit: 5 } })
+      ? await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: new Date(Date.now() + 60_000).toISOString(), operation: { op: "inbox.list", limit: 5 } })
       : undefined;
     return { result, clicks, url: page.location.href, followup };
   } finally { page.happyDOM.abort(); }

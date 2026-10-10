@@ -92,7 +92,7 @@ async function onNativeMessage(message) {
   if (message.kind !== "task" || !bridgeReady || !validTask(message.task)) return;
   const task = message.task;
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI execution"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI execution", "task_deadline_expired"));
     return;
   }
   if (task.kind === "write" && (!allowWrites || !message.approval || !nativePort || !isApproval(task, message.approval))) {
@@ -110,7 +110,7 @@ async function onNativeMessage(message) {
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"));
     return;
   }
   const operation = taskToOperation(task, message.approval);
@@ -119,13 +119,13 @@ async function onNativeMessage(message) {
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
-    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch"));
+    sendResult(task, unavailable("offline", "the read task expired before browser UI dispatch", "task_deadline_expired"));
     return;
   }
   try {
     const result = await chrome.tabs.sendMessage(tab.id, {
       kind: task.kind === "write" ? "execute" : "observe", operation,
-      accountBinding, expectedAccountHandle, allowWrites, approval: message.approval
+      accountBinding, expectedAccountHandle, allowWrites, approval: message.approval, taskExpiresAt: task.expiresAt
     });
     sendResult(task, result);
   } catch {
@@ -204,10 +204,10 @@ function sendResult(task, result) {
   nativePort.postMessage({ kind: "result", taskId: task.id, result, contextHash: task.contextHash });
 }
 
-function unavailable(availability, message) {
+function unavailable(availability, message, code = availability) {
   return {
     source: "browser", nativeRef: "", accountBinding, capturedAt: new Date().toISOString(),
-    availability, coverage: "unknown", historyCompleteness: "unknown", errors: [{ code: availability, message }]
+    availability, coverage: "unknown", historyCompleteness: "unknown", errors: [{ code, message }]
   };
 }
 

@@ -22,11 +22,19 @@
 
   async function runOperation(message) {
     const { operation, accountBinding, expectedAccountHandle } = message;
-    if (!isInstagramPage() || !validBinding(accountBinding) || !validHandle(expectedAccountHandle) || !isRecord(operation) || typeof operation.op !== "string") {
+    if (!isInstagramPage() || !validBinding(accountBinding) || !isRecord(operation) || typeof operation.op !== "string") {
       return failure(accountBinding, "unsupported_ui_version", "invalid Instagram page or operation");
     }
     if (!READ_OPS.has(operation.op) && !PREVIEW_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
-    if (!await verifyOwnAccount(expectedAccountHandle)) return failure(accountBinding, "needs_selection", "the signed-in owner account could not be proven from its own Profile control");
+    if (typeof expectedAccountHandle !== "string" || !expectedAccountHandle.trim()) {
+      return failure(accountBinding, "needs_selection", "expected account verification context is unavailable", "expected_handle_missing");
+    }
+    if (!validHandle(expectedAccountHandle)) return failure(accountBinding, "needs_selection", "expected account verification context is invalid", "expected_handle_invalid");
+    if (taskDeadlineReached(message.taskExpiresAt)) return failure(accountBinding, "offline", "read task deadline expired", "task_deadline_expired");
+    const verificationStage = await verifyOwnAccount(expectedAccountHandle, message.taskExpiresAt);
+    if (verificationStage) return failure(accountBinding, verificationStage === "task_deadline_expired" ? "offline" : "needs_selection",
+      "owner account verification stopped at a fail-closed stage", verificationStage);
+    if (taskDeadlineReached(message.taskExpiresAt)) return failure(accountBinding, "offline", "read task deadline expired", "task_deadline_expired");
     const username = expectedAccountHandle;
     if (PREVIEW_OPS.has(operation.op)) return previewResult(operation, accountBinding, username);
     if (!READ_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
@@ -316,44 +324,53 @@
     return candidates.size === 1 ? [...candidates][0] : "";
   }
 
-  async function verifyOwnAccount(expectedHandle) {
-    const control = uniqueOwnProfileControl();
-    if (!control || control.handle.toLowerCase() !== expectedHandle.toLowerCase()) {
-      verifiedOwnProfileProof = undefined;
-      return false;
-    }
+  async function verifyOwnAccount(expectedHandle, taskExpiresAt) {
+    if (taskDeadlineReached(taskExpiresAt)) return "task_deadline_expired";
+    const controls = ownProfileControls();
+    if (controls.length === 0) { verifiedOwnProfileProof = undefined; return "owner_marker_missing"; }
+    if (controls.length !== 1) { verifiedOwnProfileProof = undefined; return "owner_marker_ambiguous"; }
+    const control = controls[0];
+    if (control.handle.toLowerCase() !== expectedHandle.toLowerCase()) { verifiedOwnProfileProof = undefined; return "expected_handle_mismatch"; }
     if (verifiedOwnProfileProof && verifiedOwnProfileProof.handle === expectedHandle.toLowerCase() &&
-        verifiedOwnProfileProof.element === control.element && verifiedOwnProfileProof.href === control.href && verifiedOwnProfileProof.alt === control.alt) return true;
-    if (isExpectedProfilePath(expectedHandle) && hasOwnEditProfileControl(expectedHandle)) {
+        verifiedOwnProfileProof.element === control.element && verifiedOwnProfileProof.href === control.href && verifiedOwnProfileProof.alt === control.alt) return undefined;
+    if (isExpectedProfilePath(expectedHandle)) {
+      const editStage = ownEditProfileStage(expectedHandle);
+      if (editStage) { verifiedOwnProfileProof = undefined; return editStage; }
       verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: control.element, href: control.href, alt: control.alt };
-      return true;
+      return undefined;
     }
 
     const original = safeInstagramUrl(location.href);
-    if (!original) return false;
-    control.element.click();
-    const reachedOwnProfile = await waitUntil(() => isExpectedProfilePath(expectedHandle) && hasOwnEditProfileControl(expectedHandle), 1_500);
+    if (!original) return "original_url_unavailable";
+    if (taskDeadlineReached(taskExpiresAt)) return "task_deadline_expired";
+    try { control.element.click(); } catch { return "profile_control_click_failed"; }
+    await waitUntil(() => isExpectedProfilePath(expectedHandle) && !ownEditProfileStage(expectedHandle), 1_500, taskExpiresAt);
+    const pathReached = isExpectedProfilePath(expectedHandle);
+    const editStage = pathReached ? ownEditProfileStage(expectedHandle) : "profile_path_not_reached";
     let restored = isSameUrl(original);
     if (!restored) {
-      try { history.back(); } catch { return false; }
+      try { history.back(); } catch { return "original_url_restore_failed"; }
       restored = await waitUntil(() => isSameUrl(original), 1_500);
     }
-    if (!reachedOwnProfile || !restored) {
-      verifiedOwnProfileProof = undefined;
-      return false;
-    }
-    const currentControl = uniqueOwnProfileControl();
-    if (!currentControl || currentControl.href !== control.href || currentControl.alt !== control.alt ||
+    if (!restored) { verifiedOwnProfileProof = undefined; return "original_url_restore_failed"; }
+    if (taskDeadlineReached(taskExpiresAt)) { verifiedOwnProfileProof = undefined; return "task_deadline_expired"; }
+    if (!pathReached) { verifiedOwnProfileProof = undefined; return "profile_path_not_reached"; }
+    if (editStage) { verifiedOwnProfileProof = undefined; return editStage; }
+    const currentControls = ownProfileControls();
+    if (currentControls.length === 0) { verifiedOwnProfileProof = undefined; return "post_restore_marker_missing"; }
+    if (currentControls.length !== 1) { verifiedOwnProfileProof = undefined; return "post_restore_marker_ambiguous"; }
+    const currentControl = currentControls[0];
+    if (currentControl.href !== control.href || currentControl.alt !== control.alt ||
         currentControl.handle.toLowerCase() !== expectedHandle.toLowerCase()) {
       verifiedOwnProfileProof = undefined;
-      return false;
+      return "post_restore_marker_changed";
     }
     verifiedOwnProfileProof = { handle: expectedHandle.toLowerCase(), element: currentControl.element, href: currentControl.href, alt: currentControl.alt };
-    return true;
+    return undefined;
   }
 
-  function uniqueOwnProfileControl() {
-    const candidates = Array.from(document.querySelectorAll('a[role="link"]')).flatMap((element) => {
+  function ownProfileControls() {
+    return Array.from(document.querySelectorAll('a[role="link"]')).flatMap((element) => {
       if (element.closest("nav, header, aside, main") || element.hasAttribute("aria-label") || element.hasAttribute("title") || !isVisible(element)) return [];
       if (element.target && element.target.toLowerCase() !== "_self") return [];
       const url = safeInstagramUrl(element.href);
@@ -365,7 +382,6 @@
       if (!profileImageAltContainsHandle(alt, handle)) return [];
       return [{ element, handle, href: `${url.origin}${url.pathname}`, alt }];
     });
-    return candidates.length === 1 ? candidates[0] : undefined;
   }
 
   function profileImageAltContainsHandle(value, handle) {
@@ -378,15 +394,16 @@
     return Boolean(url && !url.search && !url.hash && url.pathname.replace(/\/$/, "").toLowerCase() === `/${handle.toLowerCase()}`);
   }
 
-  function hasOwnEditProfileControl(handle) {
-    if (!isExpectedProfilePath(handle)) return false;
+  function ownEditProfileStage(handle) {
+    if (!isExpectedProfilePath(handle)) return "profile_path_not_reached";
     const controls = Array.from(document.querySelectorAll('header a[role="link"][href]')).filter((element) => {
       if (!isVisible(element) || element.hasAttribute("aria-label") || element.hasAttribute("title")) return false;
       const url = safeInstagramUrl(element.href);
-      return url && !url.username && !url.password && !url.port && url.pathname === "/accounts/edit/" && !url.search && !url.hash &&
-        cleanText(element.textContent, 128).toLowerCase() === "редактировать профиль";
+      return url && !url.username && !url.password && !url.port && url.pathname === "/accounts/edit/" && !url.search && !url.hash;
     });
-    return controls.length === 1;
+    if (controls.length > 1) return "edit_marker_ambiguous";
+    if (controls.length === 0 || cleanText(controls[0].textContent, 128).toLowerCase() !== "редактировать профиль") return "edit_marker_missing";
+    return undefined;
   }
 
   function isVisible(element) {
@@ -400,8 +417,19 @@
     try { return safeInstagramUrl(location.href)?.href === url.href; } catch { return false; }
   }
 
-  async function waitUntil(predicate, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
+  function taskDeadline(taskExpiresAt) {
+    if (typeof taskExpiresAt !== "string") return undefined;
+    const deadline = Date.parse(taskExpiresAt);
+    return Number.isFinite(deadline) ? deadline : Number.NEGATIVE_INFINITY;
+  }
+
+  function taskDeadlineReached(taskExpiresAt) {
+    const deadline = taskDeadline(taskExpiresAt);
+    return deadline !== undefined && Date.now() >= deadline;
+  }
+
+  async function waitUntil(predicate, timeoutMs, taskExpiresAt) {
+    const deadline = Math.min(Date.now() + timeoutMs, taskDeadline(taskExpiresAt) ?? Number.POSITIVE_INFINITY);
     while (Date.now() <= deadline) {
       if (predicate()) return true;
       await new Promise((resolve) => setTimeout(resolve, 40));
@@ -417,8 +445,8 @@
     };
   }
 
-  function failure(accountBinding, availability, message) {
-    return observation(validBinding(accountBinding) ? accountBinding : "unknown", undefined, availability, "unknown", "unknown", [], { errors: [{ code: availability, message }] });
+  function failure(accountBinding, availability, message, code = availability) {
+    return observation(validBinding(accountBinding) ? accountBinding : "unknown", undefined, availability, "unknown", "unknown", [], { errors: [{ code, message }] });
   }
 
   function safeInstagramUrl(value) {

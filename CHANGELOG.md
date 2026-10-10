@@ -6,6 +6,7 @@
 
 - Подключается ограниченный browser `account.inspect` перед автоматическим Direct read, если bridge зарегистрирован, но ещё не проверил аккаунт.
 - Browser `account.inspect` can verify the owner from the observed unique visible avatar link (outside `nav`/`header`/`aside`/`main`, without `aria-label`/`title`) and own `/accounts/edit/` control when the Direct DOM has no profile link in `nav`; it restores the original tab URL and fails closed on ambiguous or changed identity markers.
+- Browser owner verification reports fixed, value-free stage codes; Native Messaging passes the read-task expiry to the content script, which stops before returning data after its deadline.
 - Native Messaging extension восстанавливает соединение через ограниченный MV3 alarm backoff; browser inbox/comment cursors явно отклоняются, если UI pagination не поддерживается.
 - `tools/run.mjs` выбирает remote stdio proxy по внешней private config и не переключается на local core при ошибке remote. В phone inbox добавляется ограниченная semantic-навигация через exact accessibility IDs с fail-closed для неподтверждённого UI.
 - Unified read router оставляет запас до стандартного 60-секундного MCP request timeout; API Direct triage отменяет текущий GET и прекращает следующие conversation GET в своём ограниченном бюджете, сохраняя недочитанные диалоги как `unknown` и время для companion fallback.

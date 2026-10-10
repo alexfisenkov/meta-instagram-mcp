@@ -49,7 +49,7 @@ describe("Instagram extension service worker protocol", () => {
       accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString()
     } });
     expect(fixture.sendMessage).toHaveBeenLastCalledWith(1, expect.objectContaining({
-      kind: "observe", operation: { op: "account.inspect" }, accountBinding
+      kind: "observe", operation: { op: "account.inspect" }, accountBinding, expectedAccountHandle: "alexfisenkov"
     }));
     await fixture.nativeMessage({ kind: "task", task: {
       id: "task-snapshot-123456789", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.snapshot",
@@ -80,7 +80,7 @@ describe("Instagram extension service worker protocol", () => {
 
     expect(fixture.sendMessage).not.toHaveBeenCalled();
     expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "result", taskId: "task-expired-read", result: expect.objectContaining({ availability: "offline" })
+      kind: "result", taskId: "task-expired-read", result: expect.objectContaining({ availability: "offline", errors: [expect.objectContaining({ code: "task_deadline_expired" })] })
     }));
   });
 
@@ -100,7 +100,7 @@ describe("Instagram extension service worker protocol", () => {
 
       expect(fixture.sendMessage).not.toHaveBeenCalled();
       expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        kind: "result", taskId: "task-expiring-read", result: expect.objectContaining({ availability: "offline" })
+        kind: "result", taskId: "task-expiring-read", result: expect.objectContaining({ availability: "offline", errors: [expect.objectContaining({ code: "task_deadline_expired" })] })
       }));
     } finally { vi.useRealTimers(); }
   });
