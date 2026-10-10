@@ -101,6 +101,12 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(result).toMatchObject({ availability: "needs_selection", coverage: "unknown" });
   });
 
+  it("fails closed when header and menu controls share the supported card semantics with inbox rows", async () => {
+    const result = await runHeaderMenuDecoyFixture();
+    expect(result).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "inbox_rows_ambiguous" }] });
+    expect(result.data).toBeUndefined();
+  });
+
   it("fails closed when browser history does not restore the original Instagram URL", async () => {
     const { result, url, clicks } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль", restore: false });
     expect(result.availability).toBe("needs_selection");
@@ -339,6 +345,15 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(clicks).toBe(1);
   });
 
+  it("keeps Inbox→thread A→thread B→thread A navigation bound to fresh row proofs", async () => {
+    const { firstRead, secondRead, returnToA, clicks, url } = await runInboxThreadSidebarCycleFixture(true);
+    expect(firstRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-a-message" }] } });
+    expect(secondRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-b-message" }] } });
+    expect(returnToA).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-a-message" }] } });
+    expect(clicks).toBe(3);
+    expect(url).toBe("https://www.instagram.com/direct/t/thread-a/");
+  });
+
   it("reuses a proven event read on the same route without another row click", async () => {
     const { conversation, conversationAgain, clicks } = await runInboxRowContractFixture({ loadMessages: false, loadEventEntries: true, reuseReadRef: true });
     expect(conversation).toMatchObject({ availability: "ready", data: { visibleEntries: [{ type: "unknown" }, { type: "unknown" }] } });
@@ -542,9 +557,9 @@ describe("Instagram content script against DOM fixtures", () => {
     } finally { page.happyDOM.abort(); }
   });
 
-  it("keeps extension permissions bounded to bridge, alarms and fixed Instagram injection", async () => {
+  it("keeps extension permissions bounded to bridge, alarms, session state and fixed Instagram injection", async () => {
     const manifest = JSON.parse(await readFile(resolve(root, "browser-extension/manifest.json"), "utf8"));
-    expect(manifest.permissions).toEqual(["nativeMessaging", "alarms", "scripting"]);
+    expect(manifest.permissions).toEqual(["nativeMessaging", "alarms", "scripting", "storage"]);
     expect(manifest.host_permissions).toEqual(["https://www.instagram.com/*", "https://instagram.com/*"]);
     expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|cookies|"tabs"/i);
   });
@@ -729,7 +744,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
   } finally { page.happyDOM.abort(); }
 }
 
-async function runInboxThreadSidebarCycleFixture() {
+async function runInboxThreadSidebarCycleFixture(includeReturnToA = false) {
   const inboxUrl = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url: inboxUrl, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
@@ -773,7 +788,14 @@ async function runInboxThreadSidebarCycleFixture() {
       operation: { op: "thread.read", target: inboxOnThread.data.items[0]?.target, limit: 2 } });
     const secondRead = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
       operation: { op: "thread.read", target: inboxOnThread.data.items[1]?.target, limit: 2 } });
-    return { firstRead, inboxOnThread, sameThreadReuse, secondRead, clicks, url: page.location.href };
+    let returnToA;
+    if (includeReturnToA) {
+      const inboxOnThreadB = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+        operation: { op: "inbox.list", limit: 2 } });
+      returnToA = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+        operation: { op: "thread.read", target: inboxOnThreadB.data.items[0]?.target, limit: 2 } });
+    }
+    return { firstRead, inboxOnThread, sameThreadReuse, secondRead, returnToA, clicks, url: page.location.href };
   } finally { page.happyDOM.abort(); }
 }
 
@@ -922,6 +944,39 @@ async function runUnverifiedInboxFixture() {
   page.eval(contentScript);
   try { return await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", operation: { op: "inbox.list", limit: 5 } }); }
   finally { page.happyDOM.abort(); }
+}
+
+async function runHeaderMenuDecoyFixture() {
+  const url = "https://www.instagram.com/direct/inbox/";
+  const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
+  page.document.write("<!doctype html><html><body><header></header><nav></nav><main></main></body></html>");
+  page.document.close();
+  const main = page.document.querySelector("main")!;
+  const actualRows = page.document.createElement("div");
+  const headerControls = page.document.createElement("div");
+  const menuControls = page.document.createElement("div");
+  const mounts = [
+    { parent: main, group: actualRows, labels: ["Conversation A", "Conversation B"] },
+    { parent: page.document.querySelector("header")!, group: headerControls, labels: ["Header control A", "Header control B"] },
+    { parent: page.document.querySelector("nav")!, group: menuControls, labels: ["Menu control A", "Menu control B"] }
+  ];
+  for (const { parent, group, labels } of mounts) {
+    for (const label of labels) {
+      const row = makeInboxRowCard(page.document, label);
+      const wrapper = page.document.createElement("div");
+      wrapper.append(row); group.append(wrapper); makeVisible(wrapper);
+    }
+    parent.append(group);
+    makeVisible(group); makeVisible(parent);
+  }
+  installOwnProfileControlFixture(page, url);
+  let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+  Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+  page.eval(contentScript);
+  try {
+    return await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+      taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "inbox.list", limit: 10 } });
+  } finally { page.happyDOM.abort(); }
 }
 
 function makeVisible(element: Element) {

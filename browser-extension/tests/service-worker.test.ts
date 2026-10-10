@@ -20,6 +20,9 @@ afterEach(async () => {
 });
 
 describe("Instagram extension service worker protocol", () => {
+  it("requests session storage for one managed read surface", () => {
+    expect(manifest.permissions).toContain("storage");
+  });
   it("reconnects a disconnected native host through one bounded MV3 alarm", async () => {
     expect(manifest.permissions).toContain("alarms");
     const fixture = workerFixture();
@@ -55,6 +58,7 @@ describe("Instagram extension service worker protocol", () => {
         ? { kind: "pong", version: 1 }
         : { source: "browser", accountBinding, availability: "ready", coverage: "complete", data: { username: "alexfisenkov" }, errors: [] }
     });
+
     await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
     const task = { id: `task-bootstrap-zero-tab-${operation}`, kind: "read", source: "browser", bridgeId: "bridge-1", operation,
       accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
@@ -71,6 +75,221 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.sendMessage.mock.calls.every(([tabId]) => tabId === 91)).toBe(true);
     expect(fixture.updatedListenerCount).toBe(0);
     expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id)).toBe(true);
+  });
+
+  it("prepares an owned inactive Inbox surface when a cold read starts on a thread route", async () => {
+    const tabs = [{ id: 41, url: "https://www.instagram.com/direct/t/thread-7/", status: "complete", active: true }];
+    const fixture = workerFixture({
+      onTabsQuery: async () => [...tabs],
+      onCreateTab: async (properties) => {
+        expect(properties).toEqual({ url: "https://www.instagram.com/direct/inbox/", active: false });
+        const created = { id: 42, url: properties.url, status: "complete", active: false };
+        tabs.push(created);
+        return created;
+      },
+      onSendMessage: async (_tabId, message) => message.kind === "ping"
+        ? { kind: "pong", version: 1 }
+        : { source: "browser", nativeRef: "/direct/inbox/", accountBinding, availability: "ready", coverage: "partial",
+          data: { username: "alexfisenkov", items: [{ target: { accountBinding, explicitOwnerRef: "browser-inbox-row:cold" } }] }, errors: [] }
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-cold-thread-inbox", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    expect(fixture.sendMessage.mock.calls.map(([tabId, message]) => [tabId, message.kind])).toEqual([[42, "ping"], [42, "observe"]]);
+  });
+
+  it("reuses the same managed surface across an Inbox→thread→Inbox cycle and service-worker restart", async () => {
+    const tabs = [{ id: 41, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: true }];
+    const sessionStorage = new Map<string, unknown>();
+    let rowNumber = 0;
+    const options = {
+      sessionStorage,
+      onTabsQuery: async () => [...tabs],
+      onCreateTab: async (properties: { url: string; active: boolean }) => {
+        const created = { id: 42, url: properties.url, status: "complete", active: false };
+        tabs.push(created);
+        return created;
+      },
+      onGetTab: async (tabId: number) => tabs.find((tab) => tab.id === tabId),
+      onUpdateTab: async (tabId: number, properties: { url: string; active: boolean }) => {
+        const tab = tabs.find((candidate) => candidate.id === tabId);
+        if (!tab) throw new Error("tab not found");
+        Object.assign(tab, properties, { status: "complete" });
+        return tab;
+      },
+      onSendMessage: async (tabId: number, message: any) => {
+        if (message.kind === "ping") return { kind: "pong", version: 1 };
+        if (message.operation.op === "inbox.list") {
+          rowNumber += 1;
+          return { source: "browser", nativeRef: "/direct/inbox/", accountBinding, availability: "ready", coverage: "partial",
+            data: { items: [{ target: { accountBinding, explicitOwnerRef: `browser-inbox-row:cycle-${rowNumber}` } }] }, errors: [] };
+        }
+        const managed = tabs.find((tab) => tab.id === tabId)!;
+        Object.assign(managed, { url: "https://www.instagram.com/direct/t/thread-selected/", status: "complete" });
+        return { source: "browser", nativeRef: "/direct/t/thread-selected/", accountBinding, availability: "ready", coverage: "unknown",
+          sideEffects: ["may_mark_seen"], data: { threadNativeId: "thread-selected", messages: [] }, errors: [] };
+      }
+    };
+    const firstWorker = workerFixture(options);
+    await firstWorker.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = (id: string, operation: string, targetRefs: unknown[] = []) => ({ id, kind: "read", source: "browser", bridgeId: "bridge-1", operation,
+      accountBinding, targetRefs, payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString() });
+    await firstWorker.nativeMessage({ kind: "task", task: task("managed-cycle-inbox-a", "inbox.list") });
+    const firstInbox = firstWorker.portMessages[0]?.find((message: any) => message?.taskId === "managed-cycle-inbox-a") as any;
+    const firstTarget = firstInbox?.result?.data?.items?.[0]?.target;
+    await firstWorker.nativeMessage({ kind: "task", task: task("managed-cycle-thread-a", "conversation.read", [firstTarget]) });
+
+    const restartedWorker = workerFixture(options);
+    await restartedWorker.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await restartedWorker.nativeMessage({ kind: "task", task: task("managed-cycle-inbox-b", "inbox.list") });
+    const secondInbox = restartedWorker.portMessages[0]?.find((message: any) => message?.taskId === "managed-cycle-inbox-b") as any;
+    const secondTarget = secondInbox?.result?.data?.items?.[0]?.target;
+    await restartedWorker.nativeMessage({ kind: "task", task: task("managed-cycle-thread-b", "conversation.read", [secondTarget]) });
+
+    expect(firstWorker.createTab).toHaveBeenCalledOnce();
+    expect(restartedWorker.createTab).not.toHaveBeenCalled();
+    expect(restartedWorker.tabsUpdate).toHaveBeenCalledWith(42, { url: "https://www.instagram.com/direct/inbox/", active: false });
+    expect(restartedWorker.sendMessage.mock.calls.filter(([, message]) => message.kind === "observe").map(([tabId]) => tabId)).toEqual([42, 42]);
+  });
+
+  it("does not create or choose a surface when session ownership is absent and Instagram tabs are ambiguous", async () => {
+    const fixture = workerFixture({ onTabsQuery: async () => [
+      { id: 41, url: "https://www.instagram.com/direct/t/thread-a/", status: "complete", active: true },
+      { id: 42, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false }
+    ] });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "managed-surface-ambiguous", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.tabsUpdate).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "managed-surface-ambiguous", result: expect.objectContaining({ availability: "needs_selection", errors: [{ code: "browser_tab_selection_ambiguous", message: expect.any(String) }] })
+    }));
+  });
+
+  it("fails closed when session ownership cannot be read", async () => {
+    const fixture = workerFixture({ onStorageGet: async () => { throw new Error("session storage unavailable"); } });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "managed-session-read-error", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "managed-session-read-error", result: expect.objectContaining({ availability: "needs_selection", errors: [{ code: "browser_managed_surface_unavailable", message: expect.any(String) }] })
+    }));
+  });
+
+  it("never redirects an active managed thread tab during a fresh Inbox read", async () => {
+    const tabs = [{ id: 42, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: true }];
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, bridgeId: "bridge-1", accountBinding }]]);
+    const fixture = workerFixture({ sessionStorage, onTabsQuery: async () => [...tabs], onGetTab: async (tabId) => tabs.find((tab) => tab.id === tabId) });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "managed-active-tab", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.tabsUpdate).not.toHaveBeenCalled();
+    expect(fixture.removeTab).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "managed-active-tab", result: expect.objectContaining({ availability: "needs_selection", errors: [{ code: "browser_managed_surface_active", message: expect.any(String) }] })
+    }));
+  });
+
+  it("does not reuse a managed surface pinned to a different bridge assignment", async () => {
+    const managedTab = { id: 42, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false };
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, bridgeId: "another-bridge", accountBinding }]]);
+    const fixture = workerFixture({ sessionStorage, onTabsQuery: async () => [managedTab], onGetTab: async () => managedTab });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "managed-wrong-bridge", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.tabsUpdate).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "managed-wrong-bridge", result: expect.objectContaining({ availability: "needs_selection", errors: [{ code: "browser_managed_surface_unavailable", message: expect.any(String) }] })
+    }));
+  });
+
+  it("stops a managed-surface route wait on native cancellation without dispatching the read", async () => {
+    const managedTab = { id: 42, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: false };
+    const sessionStorage = new Map<string, unknown>([["managedReadSurface", { tabId: 42, bridgeId: "bridge-1", accountBinding }]]);
+    const fixture = workerFixture({ sessionStorage, onTabsQuery: async () => [managedTab], onGetTab: async () => managedTab,
+      onUpdateTab: async (_tabId, properties) => Object.assign(managedTab, properties, { status: "loading" }) });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const processing = fixture.nativeMessage({ kind: "task", task: {
+      id: "managed-route-cancel", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    await waitFor(() => fixture.updatedListenerCount === 1);
+    expect(fixture.tabsUpdate).toHaveBeenCalledWith(42, { url: "https://www.instagram.com/direct/inbox/", active: false });
+    fixture.disconnect(0);
+    await processing;
+    expect(fixture.updatedListenerCount).toBe(0);
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ taskId: "managed-route-cancel" }));
+  });
+
+  it("records a late-created tab for reuse after cancellation without dispatching content", async () => {
+    let markCreateStarted!: () => void;
+    let releaseCreate!: (tab: { id: number; url: string; status: string; active: boolean }) => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    const createGate = new Promise<{ id: number; url: string; status: string; active: boolean }>((resolve) => { releaseCreate = resolve; });
+    const tabs = [{ id: 41, url: "https://www.instagram.com/direct/t/thread-open/", status: "complete", active: true }];
+    const sessionStorage = new Map<string, unknown>();
+    const options = {
+      sessionStorage,
+      onTabsQuery: async () => [...tabs],
+      onCreateTab: async () => { markCreateStarted(); const created = await createGate; tabs.push(created); return created; },
+      onGetTab: async (tabId: number) => tabs.find((tab) => tab.id === tabId),
+      onSendMessage: async (_tabId: number, message: any) => message.kind === "ping" ? { kind: "pong", version: 1 }
+        : { source: "browser", accountBinding, availability: "ready", data: { items: [] }, errors: [] }
+    };
+    const fixture = workerFixture(options);
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "managed-late-create", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    const processing = fixture.nativeMessage({ kind: "task", task });
+    await createStarted;
+    fixture.disconnect(0);
+    await fixture.fireAlarm("instagram-native-reconnect");
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false }, 1);
+    releaseCreate({ id: 42, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false });
+    await processing;
+    for (let step = 0; step < 20; step += 1) await Promise.resolve();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(sessionStorage.get("managedReadSurface")).toEqual({ tabId: 42, bridgeId: "bridge-1", accountBinding });
+
+    const restartedWorker = workerFixture(options);
+    await restartedWorker.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await restartedWorker.nativeMessage({ kind: "task", task: { ...task, id: "managed-after-late-create", expiresAt: new Date(Date.now() + 20_000).toISOString() } });
+    expect(restartedWorker.createTab).not.toHaveBeenCalled();
+    expect(restartedWorker.sendMessage.mock.calls.filter(([, message]) => message.kind === "observe").map(([tabId]) => tabId)).toEqual([42]);
+  });
+
+  it.each(["verified inactive Inbox", "active or changed tab"]) ("cleans up a new tab after session storage failure only when it remains the %s", async (state) => {
+    const created = { id: 43, url: "https://www.instagram.com/direct/inbox/", status: "complete", active: false };
+    const current = state === "verified inactive Inbox" ? created : { ...created, url: "https://www.instagram.com/direct/t/changed/", active: true };
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => created, onGetTab: async () => current,
+      onStorageSet: async () => { throw new Error("storage unavailable"); } });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: `managed-storage-error-${state.replaceAll(" ", "-")}`, kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.removeTab).toHaveBeenCalledTimes(state === "verified inactive Inbox" ? 1 : 0);
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
   });
 
   it("bootstraps a zero-tab account inspection through the actual Native Host ready frame", async () => {
@@ -192,6 +411,23 @@ describe("Instagram extension service worker protocol", () => {
       expect(fixture.portMessages[0]?.find((message) => message?.kind === "result" && message.taskId === task.id)?.result.errors[0]?.code)
         .toBe("browser_bootstrap_not_eligible");
     }
+  });
+
+  it("never bootstraps a managed surface for writes or operations outside the read allowlist", async () => {
+    const fixture = workerFixture({ onTabsQuery: async () => [] });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: true });
+    const write = await approvedTask();
+    write.targetRefs = [];
+    await fixture.nativeMessage({ kind: "task", task: write, approval: {
+      taskId: write.id, bridgeId: write.bridgeId, requestId: write.requestId, contextHash: write.contextHash,
+      expiresAt: write.expiresAt, fingerprint: write.fingerprint, expectedFingerprint: write.fingerprint
+    } });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "unsupported-no-bootstrap", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "not.allowlisted",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
   });
 
   it("does not create a tab when Instagram tab selection is ambiguous", async () => {
@@ -676,9 +912,14 @@ describe("Instagram extension service worker protocol", () => {
 function workerFixture(options: {
   response?: unknown;
   onPostMessage?: (message: unknown) => void;
-  onTabsQuery?: () => Promise<Array<{ id: number; url: string }>>;
+  onTabsQuery?: () => Promise<Array<{ id: number; url: string; status?: string; active?: boolean; pendingUrl?: string }>>;
   onCreateTab?: (properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string; pendingUrl?: string }>;
   onGetTab?: (tabId: number) => Promise<{ id: number; url: string; status: string; pendingUrl?: string } | undefined>;
+  onUpdateTab?: (tabId: number, properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string; pendingUrl?: string; active?: boolean }>;
+  onRemoveTab?: (tabId: number) => Promise<void>;
+  onStorageGet?: (key: string) => Promise<void>;
+  onStorageSet?: (values: Record<string, unknown>) => Promise<void>;
+  sessionStorage?: Map<string, unknown>;
   onSendMessage?: (tabId: number, message: any) => Promise<unknown>;
   executeScript?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -710,21 +951,41 @@ function workerFixture(options: {
   const scripting = { executeScript: options.executeScript ?? vi.fn(async () => []) };
   const updatedListeners = new Set<(tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void>();
   const tabsById = new Map<number, { id: number; url: string; status: string; pendingUrl?: string }>();
+  const sessionStorage = options.sessionStorage ?? new Map<string, unknown>();
   const createTab = vi.fn(async (properties: { url: string; active: boolean }) => {
     const tab = options.onCreateTab ? await options.onCreateTab(properties) : { id: 999, url: properties.url, status: "complete" as const };
     tabsById.set(tab.id, tab);
     return tab;
   });
-  const getTab = vi.fn(async (tabId: number) => options.onGetTab ? options.onGetTab(tabId) : tabsById.get(tabId));
+  const getTab = vi.fn(async (tabId: number) => {
+    if (options.onGetTab) return options.onGetTab(tabId);
+    const known = tabsById.get(tabId);
+    if (known) return known;
+    return (await options.onTabsQuery?.())?.find((tab) => tab.id === tabId) as { id: number; url: string; status: string; pendingUrl?: string } | undefined;
+  });
+  const updateTab = vi.fn(async (tabId: number, properties: { url: string; active: boolean }) => {
+    if (options.onUpdateTab) return options.onUpdateTab(tabId, properties);
+    const previous = await getTab(tabId);
+    if (!previous) throw new Error("tab not found");
+    const updated = { ...previous, ...properties, status: "complete" };
+    tabsById.set(tabId, updated);
+    return updated;
+  });
+  const removeTab = vi.fn(async (tabId: number) => { await options.onRemoveTab?.(tabId); tabsById.delete(tabId); });
   const chrome = {
     runtime: {
       onStartup: { addListener: vi.fn() }, onInstalled: { addListener: vi.fn() },
       connectNative
     },
+    storage: { session: {
+      get: vi.fn(async (key: string) => { await options.onStorageGet?.(key); return { [key]: sessionStorage.get(key) }; }),
+      set: vi.fn(async (values: Record<string, unknown>) => { await options.onStorageSet?.(values); for (const [key, value] of Object.entries(values)) sessionStorage.set(key, value); }),
+      remove: vi.fn(async (key: string) => { sessionStorage.delete(key); })
+    } },
     alarms,
     tabs: {
-      query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/", status: "complete" }]),
-      create: createTab, get: getTab, onUpdated: { addListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void) => updatedListeners.add(listener),
+      query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/", status: "complete", active: true }]),
+      create: createTab, get: getTab, update: updateTab, remove: removeTab, onUpdated: { addListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void) => updatedListeners.add(listener),
         removeListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string; pendingUrl?: string }) => void) => updatedListeners.delete(listener) },
       sendMessage
     },
@@ -732,7 +993,7 @@ function workerFixture(options: {
   };
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Map, Array, Promise, RegExp, String, Number, Boolean, setTimeout, clearTimeout });
   return {
-    sendMessage, postMessage, connectNative, alarms, scripting, portMessages, createTab,
+    sendMessage, postMessage, connectNative, alarms, scripting, portMessages, createTab, getTab, tabsUpdate: updateTab, removeTab, sessionStorage,
     get updatedListenerCount() { return updatedListeners.size; },
     updateTab(tabId: number, changeInfo: Partial<{ url: string; status: string; pendingUrl?: string }>) {
       const previous = tabsById.get(tabId) ?? { id: tabId, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
