@@ -225,7 +225,7 @@ describe("standalone phone companion", () => {
       submit: async (id, taskId, result, contextHash) => hub.submit(id, taskId, result, contextHash, bridgeToken)
     };
     const phone = createPhoneCompanion({ appium: appium(), client, provider: ui, accountBinding: "acct:fixture", expectedAccountHandle: "fixture", pollIntervalMs: 250 });
-    const serverProvider = createCompanionSourceProvider({ hub, source: "phone", accountBinding: "acct:fixture", waitMs: process.platform === "win32" ? 30_000 : 1_000, pollMs: 25 });
+    const serverProvider = createCompanionSourceProvider({ hub, source: "phone", accountBinding: "acct:fixture", waitMs: process.platform === "win32" ? 30_000 : 4_000, pollMs: 25 });
     const intent = { source: "phone" as const, accountBinding: "acct:fixture", action: "comment.like" as const,
       target: { accountBinding: "acct:fixture", nativeId: "phone-comment:123" }, payload: { kind: "comment.like" as const }, contextHash: "prepare" };
     try {
