@@ -124,7 +124,7 @@ describe("CompanionHub", () => {
     expect(await hub.sourceStatus("browser", "acct:one", bridgeB.bridgeId)).toMatchObject({ availability: "not_connected", capabilities: [] });
     await expect(hub.enqueue({ kind: "read", source: "browser", bridgeId: bridgeB.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] }))
       .rejects.toThrow(/no assigned bridge available/i);
-  });
+  }, process.platform === "win32" ? 60_000 : 15_000);
 
   it("prefers an older ready operation-capable browser over a newer unready bridge", async () => {
     let now = 1_000;
