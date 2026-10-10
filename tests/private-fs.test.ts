@@ -72,5 +72,5 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
       await ensurePrivateFile(path);
       await expect(assertPrivateFile(path)).resolves.toBeUndefined();
     }
-  });
+  }, 25_000);
 });

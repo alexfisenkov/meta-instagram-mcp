@@ -189,7 +189,9 @@ function applyWindowsAcl(path: string, operation: "protect" | "assert" = "protec
   try {
     execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT], {
       encoding: "utf8",
-      timeout: 10_000,
+      // PowerShell startup on hosted Windows runners occasionally exceeds 10s before the script begins.
+      // Keep the operation bounded while allowing that cold-start variance; failures still fail closed.
+      timeout: 20_000,
       windowsHide: true,
       stdio: ["ignore", "ignore", "pipe"],
       env: {
