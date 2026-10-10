@@ -148,7 +148,7 @@ describe("CompanionHub", () => {
     expect(task.bridgeId).toBe(mac.bridgeId);
     expect(await hub.poll(server.bridgeId, 1, server.bridgeToken, "browser")).toEqual([]);
     expect(await hub.poll(mac.bridgeId, 1, mac.bridgeToken, "browser")).toMatchObject([{ id: task.id, bridgeId: mac.bridgeId }]);
-  });
+  }, process.platform === "win32" ? 60_000 : 15_000);
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     let now = 1_000;

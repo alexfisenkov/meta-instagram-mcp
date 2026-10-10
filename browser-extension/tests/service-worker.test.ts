@@ -41,6 +41,160 @@ describe("Instagram extension service worker protocol", () => {
     expect(fixture.alarms.create).toHaveBeenLastCalledWith("instagram-native-reconnect", { delayInMinutes: 1 });
   });
 
+  it.each(["account.inspect", "inbox.list"])("creates one fixed inactive Direct tab for zero-tab %s and waits for load before ping", async (operation) => {
+    const instagramTab = { id: 91, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+    const fixture = workerFixture({
+      onTabsQuery: async () => [],
+      onCreateTab: async (properties) => {
+        expect(properties).toEqual({ url: "https://www.instagram.com/direct/inbox/", active: false });
+        return instagramTab;
+      },
+      onGetTab: async () => instagramTab,
+      onSendMessage: async (_tabId, message) => message.kind === "ping"
+        ? { kind: "pong", version: 1 }
+        : { source: "browser", accountBinding, availability: "ready", coverage: "complete", data: { username: "alexfisenkov" }, errors: [] }
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: `task-bootstrap-zero-tab-${operation}`, kind: "read", source: "browser", bridgeId: "bridge-1", operation,
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    const processing = fixture.nativeMessage({ kind: "task", task });
+
+    await waitFor(() => fixture.updatedListenerCount === 1);
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    fixture.updateTab(91, { status: "complete" });
+    await processing;
+
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+    expect(fixture.sendMessage.mock.calls.every(([tabId]) => tabId === 91)).toBe(true);
+    expect(fixture.updatedListenerCount).toBe(0);
+    expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id)).toBe(true);
+  });
+
+  it("shares one in-flight tab creation across concurrent inspect reads", async () => {
+    let markCreateStarted!: () => void;
+    let releaseCreate!: (tab: { id: number; url: string; status: string }) => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    const createGate = new Promise<{ id: number; url: string; status: string }>((resolve) => { releaseCreate = resolve; });
+    const tab = { id: 92, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+    const fixture = workerFixture({
+      onTabsQuery: async () => [],
+      onCreateTab: async () => { markCreateStarted(); return createGate; },
+      onGetTab: async () => tab,
+      onSendMessage: async (_tabId, message) => message.kind === "ping"
+        ? { kind: "pong", version: 1 }
+        : { source: "browser", accountBinding, availability: "ready", coverage: "complete", data: { username: "alexfisenkov" }, errors: [] }
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = (id: string) => ({ id, kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() });
+    const first = fixture.nativeMessage({ kind: "task", task: task("task-bootstrap-shared-a") });
+    const second = fixture.nativeMessage({ kind: "task", task: task("task-bootstrap-shared-b") });
+    await createStarted;
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    releaseCreate(tab);
+    await waitFor(() => fixture.updatedListenerCount === 1);
+    fixture.updateTab(92, { status: "complete" });
+    await Promise.all([first, second]);
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    expect(fixture.sendMessage.mock.calls.filter(([, message]) => message.kind === "observe")).toHaveLength(2);
+  });
+
+  it.each(["before create completes", "after tab creation while loading"])("does not dispatch or redeliver after native disconnect %s", async (stage) => {
+    let markCreateStarted!: () => void;
+    let releaseCreate!: (tab: { id: number; url: string; status: string }) => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    const createGate = new Promise<{ id: number; url: string; status: string }>((resolve) => { releaseCreate = resolve; });
+    const tab = { id: 93, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+    const fixture = workerFixture({
+      onTabsQuery: async () => [],
+      onCreateTab: async () => {
+        markCreateStarted();
+        return stage === "before create completes" ? createGate : tab;
+      },
+      onGetTab: async () => tab,
+      onSendMessage: async (_tabId, message) => message.kind === "ping" ? { kind: "pong", version: 1 } : { source: "browser", accountBinding, availability: "ready", data: { username: "owner" } }
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: `task-bootstrap-disconnect-${stage.replaceAll(" ", "-")}`, kind: "read", source: "browser", bridgeId: "bridge-1",
+      operation: "account.inspect", accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    const processing = fixture.nativeMessage({ kind: "task", task });
+    await createStarted;
+    if (stage === "after tab creation while loading") await waitFor(() => fixture.updatedListenerCount === 1);
+    fixture.disconnect(0);
+    await fixture.fireAlarm("instagram-native-reconnect");
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false }, 1);
+    if (stage === "before create completes") releaseCreate(tab);
+    else fixture.updateTab(93, { status: "complete" });
+    await processing;
+
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.portMessages.flat().some((message) => message?.kind === "result" && message.taskId === task.id)).toBe(false);
+    expect(fixture.updatedListenerCount).toBe(0);
+  });
+
+  it("does not create a Direct tab for a preview or a stale conversation target", async () => {
+    const fixture = workerFixture({ onTabsQuery: async () => [] });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const preview = { id: "task-bootstrap-no-preview", kind: "preview", source: "browser", bridgeId: "bridge-1", operation: "message.send",
+      accountBinding, targetRefs: [{ accountBinding, nativeId: "thread-7" }], payload: { text: "not dispatched" }, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    await fixture.nativeMessage({ kind: "task", task: preview });
+    const conversation = { ...preview, id: "task-bootstrap-no-conversation", kind: "read", operation: "conversation.read", payload: {} };
+    await fixture.nativeMessage({ kind: "task", task: conversation });
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not create a tab when Instagram tab selection is ambiguous", async () => {
+    const fixture = workerFixture({ onTabsQuery: async () => [
+      { id: 1, url: "https://www.instagram.com/direct/inbox/" },
+      { id: 2, url: "https://www.instagram.com/direct/inbox/" }
+    ] });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "task-bootstrap-ambiguous", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    await fixture.nativeMessage({ kind: "task", task });
+    expect(fixture.createTab).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id && message.result?.availability === "needs_selection")).toBe(true);
+  });
+
+  it("stops waiting for an unready login tab at the task deadline and preserves needs_selection", async () => {
+    vi.useFakeTimers();
+    try {
+      const tab = { id: 94, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+      const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => tab, onGetTab: async () => tab });
+      await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+      const task = { id: "task-bootstrap-deadline", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+        accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 100).toISOString() };
+      const processing = fixture.nativeMessage({ kind: "task", task });
+      for (let step = 0; step < 100 && fixture.updatedListenerCount !== 1; step += 1) await Promise.resolve();
+      expect(fixture.updatedListenerCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await processing;
+      expect(fixture.sendMessage).not.toHaveBeenCalled();
+      expect(fixture.updatedListenerCount).toBe(0);
+      expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id &&
+        message.result?.errors?.[0]?.code === "task_deadline_expired")).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not retry bootstrap when the created tab is signed out or unsupported", async () => {
+    const tab = { id: 95, url: "https://www.instagram.com/direct/inbox/", status: "complete" };
+    const fixture = workerFixture({ onTabsQuery: async () => [], onCreateTab: async () => tab,
+      onSendMessage: async (_tabId, message) => message.kind === "ping" ? { kind: "pong", version: 1 }
+        : { source: "browser", accountBinding, availability: "needs_selection", coverage: "unknown", errors: [{ code: "owner_marker_missing", message: "not signed in" }] } });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    const task = { id: "task-bootstrap-login-not-ready", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString() };
+    await fixture.nativeMessage({ kind: "task", task });
+    expect(fixture.createTab).toHaveBeenCalledOnce();
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+    expect(fixture.portMessages[0]?.some((message) => message?.kind === "result" && message.taskId === task.id &&
+      message.result?.availability === "needs_selection")).toBe(true);
+  });
+
   it("routes account inspection and one approved write lease to fixed content operations", async () => {
     const fixture = workerFixture();
     await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: true });
@@ -402,6 +556,8 @@ function workerFixture(options: {
   response?: unknown;
   onPostMessage?: (message: unknown) => void;
   onTabsQuery?: () => Promise<Array<{ id: number; url: string }>>;
+  onCreateTab?: (properties: { url: string; active: boolean }) => Promise<{ id: number; url: string; status: string }>;
+  onGetTab?: (tabId: number) => Promise<{ id: number; url: string; status: string } | undefined>;
   onSendMessage?: (tabId: number, message: any) => Promise<unknown>;
   executeScript?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -431,6 +587,14 @@ function workerFixture(options: {
   });
   const alarms = { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: { addListener: (listener: (alarm: { name: string }) => unknown) => alarmListeners.push(listener) } };
   const scripting = { executeScript: options.executeScript ?? vi.fn(async () => []) };
+  const updatedListeners = new Set<(tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void>();
+  const tabsById = new Map<number, { id: number; url: string; status: string }>();
+  const createTab = vi.fn(async (properties: { url: string; active: boolean }) => {
+    const tab = options.onCreateTab ? await options.onCreateTab(properties) : { id: 999, url: properties.url, status: "complete" };
+    tabsById.set(tab.id, tab);
+    return tab;
+  });
+  const getTab = vi.fn(async (tabId: number) => options.onGetTab ? options.onGetTab(tabId) : tabsById.get(tabId));
   const chrome = {
     runtime: {
       onStartup: { addListener: vi.fn() }, onInstalled: { addListener: vi.fn() },
@@ -438,13 +602,23 @@ function workerFixture(options: {
     },
     alarms,
     tabs: {
-      query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
+      query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/", status: "complete" }]),
+      create: createTab, get: getTab, onUpdated: { addListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void) => updatedListeners.add(listener),
+        removeListener: (listener: (tabId: number, changeInfo: Record<string, unknown>, tab: { id: number; url: string; status: string }) => void) => updatedListeners.delete(listener) },
+      sendMessage
     },
     scripting
   };
-  vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Array, Promise, RegExp, String, Number, Boolean });
+  vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Map, Array, Promise, RegExp, String, Number, Boolean, setTimeout, clearTimeout });
   return {
-    sendMessage, postMessage, connectNative, alarms, scripting, portMessages,
+    sendMessage, postMessage, connectNative, alarms, scripting, portMessages, createTab,
+    get updatedListenerCount() { return updatedListeners.size; },
+    updateTab(tabId: number, changeInfo: Partial<{ url: string; status: string }>) {
+      const previous = tabsById.get(tabId) ?? { id: tabId, url: "https://www.instagram.com/direct/inbox/", status: "loading" };
+      const updated = { ...previous, ...changeInfo };
+      tabsById.set(tabId, updated);
+      for (const listener of [...updatedListeners]) listener(tabId, changeInfo, updated);
+    },
     startupMessages: postMessage.mock.calls.map(([message]) => message),
     nativeMessage: async (message: unknown, portIndex = 0) => { await listeners[portIndex]?.[0]?.(message); },
     disconnect: (portIndex: number) => { for (const listener of disconnectListeners[portIndex] ?? []) listener(); },

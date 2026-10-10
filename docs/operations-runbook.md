@@ -57,6 +57,8 @@ Browser companion, который уже зарегистрирован, но е
 
 Для телефона используйте отдельную [инструкцию Appium/WDA](ios-appium-operator-runbook.md). Phone read проверяет ожидаемый профиль, затем проходит через точные accessibility IDs `Home` и `Messages` или `Inbox`. Этот маршрут покрыт fixtures, но ещё не подтверждён на реальном устройстве и текущей локали Instagram; если label/control не совпадает, источник закрывается со статусом `unsupported_ui_version`.
 
+Для browser `account.inspect` и `inbox.list` при нуле Instagram-вкладок extension может создать одну неактивную вкладку по фиксированному адресу Direct Inbox и дождаться `status: complete` в оставшемся read deadline. Если вкладок больше одной, контент не прошёл owner verification или бюджет истёк, операция остаётся `needs_selection`/`unknown`; вход в Instagram и выбор между несколькими tabs не автоматизируются.
+
 ## Remote stdio proxy
 
 Portable `tools/run.mjs` по умолчанию запускает локальный MCP. Любой непустой `INSTAGRAM_MCP_REMOTE_CONFIG`, `INSTAGRAM_MCP_REMOTE_URL` или `INSTAGRAM_MCP_REMOTE_BEARER_TOKEN` направляет stdio к `remote-proxy`; некорректная конфигурация завершает запуск без перехода на локальное ядро. Настройте HTTPS origin и bearer token в приватном внешнем `.env` или укажите приватный файл конфигурации. Публичный URL, account credentials и bearer token в репозиторий не добавляйте.

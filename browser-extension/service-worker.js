@@ -3,6 +3,7 @@ const RECONNECT_ALARM = "instagram-native-reconnect";
 const RECONNECT_BASE_MS = 30_000;
 const RECONNECT_MAX_MS = 5 * 60_000;
 const INSTAGRAM_URL_PATTERNS = ["https://www.instagram.com/*", "https://instagram.com/*"];
+const DIRECT_INBOX_BOOTSTRAP_URL = "https://www.instagram.com/direct/inbox/";
 const OPERATION_MAP = Object.freeze({
   "account.inspect": "account.inspect",
   "account.snapshot": "account.snapshot",
@@ -33,6 +34,7 @@ let reconnectScheduled = false;
 const inFlightWrites = new Set();
 const writeApprovals = new Map();
 const inboxRowTabs = new Map();
+let pendingBootstrap;
 
 chrome.runtime.onStartup.addListener(connectNative);
 chrome.runtime.onInstalled.addListener(connectNative);
@@ -51,6 +53,7 @@ function connectNative() {
     port.onMessage.addListener((message) => onNativeMessage(message, port));
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
+      if (pendingBootstrap?.sourcePort === port) pendingBootstrap.cancel();
       nativePort = undefined;
       bridgeReady = false;
       expectedAccountHandle = undefined;
@@ -80,6 +83,10 @@ async function onNativeMessage(message, sourcePort = nativePort) {
   if (message.kind === "ready" && message.version === 1 && typeof message.accountBinding === "string" &&
       /^[a-zA-Z0-9:_-]{1,128}$/.test(message.accountBinding) && typeof message.expectedAccountHandle === "string" &&
       /^[a-zA-Z0-9._]{1,30}$/.test(message.expectedAccountHandle) && typeof message.allowWrites === "boolean") {
+    if (pendingBootstrap?.sourcePort === sourcePort && (pendingBootstrap.accountBinding !== message.accountBinding ||
+        pendingBootstrap.expectedAccountHandle !== message.expectedAccountHandle || pendingBootstrap.allowWrites !== message.allowWrites)) {
+      pendingBootstrap.cancel();
+    }
     bridgeReady = true;
     accountBinding = message.accountBinding;
     expectedAccountHandle = message.expectedAccountHandle;
@@ -107,10 +114,13 @@ async function onNativeMessage(message, sourcePort = nativePort) {
     inFlightWrites.add(task.id);
     writeApprovals.set(task.id, message.approval);
   }
-  const tab = await selectUniqueTab(task);
+  const tab = await selectUniqueTab(task, { sourcePort, assignment, isCurrent });
   if (!isCurrent()) return;
   if (!tab) {
-    sendResult(task, unavailable("needs_selection", "an exact Instagram tab could not be selected"), sourcePort, assignment);
+    const deadlineExpired = task.kind === "read" && Date.parse(task.expiresAt) <= Date.now();
+    sendResult(task, deadlineExpired
+      ? unavailable("offline", "the read task expired while preparing the browser tab", "task_deadline_expired")
+      : unavailable("needs_selection", "an exact Instagram tab could not be selected"), sourcePort, assignment);
     return;
   }
   if (task.kind === "read" && Date.parse(task.expiresAt) <= Date.now()) {
@@ -182,8 +192,9 @@ function isMissingMessageReceiver(error) {
     error.message === "Could not establish connection. Receiving end does not exist.";
 }
 
-async function selectUniqueTab(task) {
+async function selectUniqueTab(task, context) {
   const tabs = await chrome.tabs.query({ url: INSTAGRAM_URL_PATTERNS });
+  if (!context.isCurrent()) return undefined;
   let eligible = tabs.filter((tab) => typeof tab.id === "number" && isInstagramUrl(tab.url));
   const target = task.targetRefs.length === 1 ? task.targetRefs[0] : undefined;
   const rowRef = typeof target?.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith("browser-inbox-row:")
@@ -211,7 +222,117 @@ async function selectUniqueTab(task) {
       } catch { return false; }
     });
   }
+  if (eligible.length === 0 && canBootstrapReadSurface(task, context.assignment)) {
+    return bootstrapReadSurface(task, context);
+  }
   return eligible.length === 1 ? eligible[0] : undefined;
+}
+
+function canBootstrapReadSurface(task, assignment) {
+  return task.kind === "read" && ["account.inspect", "inbox.list"].includes(task.operation) && task.targetRefs.length === 0 &&
+    task.accountBinding === assignment.accountBinding && /^[a-zA-Z0-9:_-]{1,128}$/.test(assignment.accountBinding) &&
+    typeof assignment.expectedAccountHandle === "string" && /^[a-zA-Z0-9._]{1,30}$/.test(assignment.expectedAccountHandle);
+}
+
+async function bootstrapReadSurface(task, context) {
+  const { sourcePort, assignment, isCurrent } = context;
+  if (pendingBootstrap) {
+    if (pendingBootstrap.sourcePort !== sourcePort || pendingBootstrap.accountBinding !== assignment.accountBinding ||
+        pendingBootstrap.expectedAccountHandle !== assignment.expectedAccountHandle) return undefined;
+    return awaitBootstrapForTask(pendingBootstrap.promise, task.expiresAt, isCurrent);
+  }
+
+  const pending = { sourcePort, accountBinding: assignment.accountBinding, expectedAccountHandle: assignment.expectedAccountHandle,
+    allowWrites: assignment.allowWrites,
+    cancelled: false, createPending: false, completed: false, cancelCreate: undefined, cancelLoad: undefined, promise: undefined, cancel: undefined };
+  pending.cancel = () => {
+    pending.cancelled = true;
+    pending.cancelCreate?.();
+    pending.cancelLoad?.();
+  };
+  pending.promise = Promise.resolve().then(async () => {
+    if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
+    const createBudgetMs = Date.parse(task.expiresAt) - Date.now();
+    if (createBudgetMs <= 0) return undefined;
+    pending.createPending = true;
+    const createResult = Promise.resolve().then(() => chrome.tabs.create({ url: DIRECT_INBOX_BOOTSTRAP_URL, active: false }))
+      .then((tab) => ({ tab }), () => ({ failed: true }));
+    const cancellation = new Promise((resolve) => { pending.cancelCreate = () => resolve({ cancelled: true }); });
+    const createTimeout = setTimeout(() => pending.cancelCreate?.(), createBudgetMs);
+    const outcome = await Promise.race([createResult, cancellation]);
+    clearTimeout(createTimeout);
+    pending.cancelCreate = undefined;
+    if (outcome.cancelled) {
+      pending.cancelled = true;
+      void createResult.then(() => {
+        pending.createPending = false;
+        if (pending.completed && pendingBootstrap === pending) pendingBootstrap = undefined;
+      });
+      return undefined;
+    }
+    pending.createPending = false;
+    if (outcome.failed) return undefined;
+    const created = outcome.tab;
+    if (!isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now() ||
+        !Number.isInteger(created?.id) || !isInstagramUrl(created.url)) return undefined;
+    const loaded = await waitForTabComplete(created, task.expiresAt, isCurrent, (cancel) => { pending.cancelLoad = cancel; });
+    pending.cancelLoad = undefined;
+    if (!loaded || !isCurrent() || pending.cancelled || Date.parse(task.expiresAt) <= Date.now()) return undefined;
+    return loaded;
+  }).catch(() => undefined).finally(() => {
+    pending.completed = true;
+    if (!pending.createPending && pendingBootstrap === pending) pendingBootstrap = undefined;
+  });
+  pendingBootstrap = pending;
+  return awaitBootstrapForTask(pending.promise, task.expiresAt, isCurrent);
+}
+
+function awaitBootstrapForTask(promise, expiresAt, isCurrent) {
+  const remainingMs = Date.parse(expiresAt) - Date.now();
+  if (remainingMs <= 0 || !isCurrent()) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (tab) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(tab);
+    };
+    const timeout = setTimeout(() => finish(undefined), remainingMs);
+    promise.then((tab) => finish(isCurrent() && Date.parse(expiresAt) > Date.now() ? tab : undefined), () => finish(undefined));
+  });
+}
+
+function waitForTabComplete(initialTab, expiresAt, isCurrent, registerCancel) {
+  if (!Number.isInteger(initialTab?.id) || !isInstagramUrl(initialTab.url)) return Promise.resolve(undefined);
+  if (initialTab.status === "complete") return Promise.resolve(initialTab);
+  const remainingMs = Date.parse(expiresAt) - Date.now();
+  if (remainingMs <= 0 || !isCurrent()) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout;
+    const finish = (tab) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(tab);
+    };
+    const cancel = () => finish(undefined);
+    const onUpdated = (tabId, changeInfo, tab) => {
+      if (tabId !== initialTab.id) return;
+      if (!isCurrent() || Date.parse(expiresAt) <= Date.now()) return finish(undefined);
+      if (changeInfo.status === "complete") finish(isInstagramUrl(tab.url) ? tab : undefined);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    timeout = setTimeout(cancel, remainingMs);
+    registerCancel(cancel);
+    void chrome.tabs.get(initialTab.id).then((tab) => {
+      if (settled) return;
+      if (!isCurrent() || Date.parse(expiresAt) <= Date.now()) return finish(undefined);
+      if (tab?.status === "complete") finish(isInstagramUrl(tab.url) ? tab : undefined);
+    }, () => finish(undefined));
+  });
 }
 
 function rememberInboxRowTabs(task, result, tabId) {
