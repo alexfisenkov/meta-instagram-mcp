@@ -49,6 +49,19 @@ describe("MutationSafety", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("rejects browser-only inbox row refs before preview, context refresh, or mutation dispatch", async () => {
+    const { dir, intent, executor, execute, safety } = await fixture({ writeEnabled: true });
+    const rowIntent = { ...intent, source: "browser" as const,
+      target: { accountBinding: intent.accountBinding, explicitOwnerRef: "browser-inbox-row:opaque-row-ref" } };
+
+    const result = await safety.handle(rowIntent);
+
+    expect(result).toMatchObject({ status: "FAILED" });
+    expect(executor.refreshContext).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    await expect(readFile(join(dir, "audit.jsonl"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("executes once after matching a fresh preview and journals no payload text", async () => {
     const { dir, intent, execute, safety } = await fixture({ writeEnabled: true });
     let journalAtExecute = "";

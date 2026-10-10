@@ -150,7 +150,7 @@ export class CompanionHub {
     return this.enqueueInternal(input, signApproval);
   }
 
-  async sourceStatus(source: BridgeSource, accountBinding?: string, selectedBridgeId?: string): Promise<{ source: BridgeSource; availability: Availability; capabilities: string[]; accountBinding?: string; accountHandle?: string; surface?: "instagram"; bridgeId?: string; reason?: string }> {
+  async sourceStatus(source: BridgeSource, accountBinding?: string, selectedBridgeId?: string, operation?: BridgeOperation): Promise<{ source: BridgeSource; availability: Availability; capabilities: string[]; accountBinding?: string; accountHandle?: string; surface?: "instagram"; bridgeId?: string; reason?: string }> {
     return this.read((state) => {
       const now = this.now();
       const candidates = state.bridges.filter((bridge) => bridge.source === source && (!selectedBridgeId || bridge.id === selectedBridgeId) &&
@@ -159,7 +159,10 @@ export class CompanionHub {
         reason: selectedBridgeId ? "The selected companion is no longer registered or live." : "No live companion is registered for this source." };
       const bindings = [...new Set(candidates.map((bridge) => bridge.accountBinding))];
       if (!accountBinding && bindings.length > 1) return { source, availability: "needs_selection", capabilities: [], reason: "More than one account is connected for this source." };
-      const bridge = candidates.sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0]!;
+      const eligible = selectedBridgeId || !operation ? [] : candidates.filter((bridge) => bridge.liveStatus?.availability === "ready" &&
+        bridge.liveStatus.capabilities.includes(operation));
+      const pool = eligible.length ? eligible : candidates;
+      const bridge = pool.sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0]!;
       const liveStatus = bridge.liveStatus;
       return { source, availability: liveStatus?.availability ?? "offline", capabilities: liveStatus?.capabilities ?? [], accountBinding: bridge.accountBinding, bridgeId: bridge.id,
         ...(liveStatus?.accountHandle ? { accountHandle: liveStatus.accountHandle } : {}), ...(liveStatus?.surface ? { surface: liveStatus.surface } : {}),

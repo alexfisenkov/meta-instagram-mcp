@@ -69,6 +69,43 @@ describe("SourceRouter", () => {
     expect(read.mock.calls[0]?.[1]).toBe(prepareContext);
   });
 
+  it("keeps ephemeral browser inbox refs out of API and phone providers", async () => {
+    const browser = provider("browser", observation("browser", {
+      coverage: "partial", historyCompleteness: "limited", data: { messages: [{ nativeId: "m-1" }] }
+    }));
+    const apiStatus = vi.fn(async () => ({ source: "api" as const, availability: "ready" as const, capabilities: ["conversation.read"] }));
+    const phoneStatus = vi.fn(async () => ({ source: "phone" as const, availability: "ready" as const, capabilities: ["conversation.read"] }));
+    const api = { source: "api" as const, status: apiStatus, read: vi.fn(async () => observation("api")) };
+    const phone = { source: "phone" as const, status: phoneStatus, read: vi.fn(async () => observation("phone")) };
+    const router = createSourceRouter({ providers: [api, browser, phone], timeoutMs: 200 });
+
+    const result = await router.read({ operation: "conversation.read", target: {
+      accountBinding: "acct:fixture", explicitOwnerRef: "browser-inbox-row:opaque-fixture-ref"
+    }, limit: 2 });
+
+    expect(apiStatus).not.toHaveBeenCalled();
+    expect(phoneStatus).not.toHaveBeenCalled();
+    expect(result.triedSources).toEqual(["browser"]);
+    expect(result.skippedSources).toContainEqual(expect.objectContaining({ source: "api" }));
+    expect(result.skippedSources).toContainEqual(expect.objectContaining({ source: "phone" }));
+  });
+
+  it("rejects browser inbox refs for any operation other than conversation.read", async () => {
+    const apiStatus = vi.fn(async () => ({ source: "api" as const, availability: "ready" as const, capabilities: ["inbox.list"] }));
+    const browserStatus = vi.fn(async () => ({ source: "browser" as const, availability: "ready" as const, capabilities: ["inbox.list"] }));
+    const api = { source: "api" as const, status: apiStatus, read: vi.fn(async () => observation("api")) };
+    const browser = { source: "browser" as const, status: browserStatus, read: vi.fn(async () => observation("browser")) };
+    const router = createSourceRouter({ providers: [api, browser], timeoutMs: 200 });
+
+    const result = await router.read({ operation: "inbox.list", target: {
+      accountBinding: "acct:fixture", explicitOwnerRef: "browser-inbox-row:opaque-fixture-ref"
+    }, limit: 2 } as never);
+
+    expect(result.errors).toMatchObject([{ source: "browser", code: "browser_ref_read_only" }]);
+    expect(apiStatus).not.toHaveBeenCalled();
+    expect(browserStatus).not.toHaveBeenCalled();
+  });
+
   it("aborts a slow API inbox-triage read within its share and completes browser fallback in the reserved budget", async () => {
     vi.useFakeTimers();
     const api = provider("api", observation("api", { coverage: "partial", historyCompleteness: "unknown", data: { items: [{ conversationId: "thread-1", unanswered: "unknown" }] } }));

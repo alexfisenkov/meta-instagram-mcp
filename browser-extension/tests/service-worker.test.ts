@@ -144,6 +144,68 @@ describe("Instagram extension service worker protocol", () => {
     }));
   });
 
+  it("binds an ephemeral inbox ref to its originating bridge and selected tab", async () => {
+    const rowRef = "browser-inbox-row:opaque-row-ref";
+    const fixture = workerFixture({
+      onTabsQuery: async () => [{ id: 9, url: "https://www.instagram.com/direct/inbox/" }],
+      onSendMessage: async (_tabId, message) => {
+        if (message.kind === "ping") return { kind: "pong", version: 1 };
+        if (message.operation.op === "inbox.list") return { source: "browser", nativeRef: "/direct/inbox/", accountBinding,
+          capturedAt: new Date().toISOString(), availability: "ready", coverage: "partial", historyCompleteness: "limited",
+          data: { items: [{ target: { accountBinding, explicitOwnerRef: rowRef }, unread: "unknown", unanswered: "unknown" }] }, errors: [] };
+        return { source: "browser", nativeRef: "/direct/t/observed-thread/", accountBinding,
+          capturedAt: new Date().toISOString(), availability: "ready", coverage: "unknown", historyCompleteness: "limited",
+          sideEffects: ["may_mark_seen"], data: { threadNativeId: "observed-thread", messages: [] }, errors: [] };
+      }
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-inbox-ref-origin", kind: "read", source: "browser", bridgeId: "bridge-mac", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-inbox-ref-wrong-bridge", kind: "read", source: "browser", bridgeId: "bridge-server", operation: "conversation.read",
+      accountBinding, targetRefs: [{ accountBinding, explicitOwnerRef: rowRef }], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+    expect(fixture.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      taskId: "task-inbox-ref-wrong-bridge", result: expect.objectContaining({ availability: "needs_selection" })
+    }));
+
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-inbox-ref-no-write-id", kind: "preview", source: "browser", bridgeId: "bridge-mac", operation: "message.send",
+      accountBinding, targetRefs: [{ accountBinding, explicitOwnerRef: rowRef }], payload: { text: "must not dispatch" }, contextHash: "a".repeat(64),
+      expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+    expect(fixture.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      taskId: "task-inbox-ref-no-write-id", result: expect.objectContaining({ availability: "unsupported" })
+    }));
+
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-inbox-ref-selected-bridge", kind: "read", source: "browser", bridgeId: "bridge-mac", operation: "conversation.read",
+      accountBinding, targetRefs: [{ accountBinding, explicitOwnerRef: rowRef }], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe", "ping", "observe"]);
+    expect(fixture.sendMessage.mock.calls[3]).toMatchObject([9, { operation: { op: "thread.read", target: { accountBinding, explicitOwnerRef: rowRef } } }]);
+  });
+
+  it("requires a fresh inbox ref after service-worker restart clears tab bindings", async () => {
+    const fixture = workerFixture();
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-ref-after-worker-restart", kind: "read", source: "browser", bridgeId: "bridge-mac", operation: "conversation.read",
+      accountBinding, targetRefs: [{ accountBinding, explicitOwnerRef: "browser-inbox-row:ref-from-before-restart" }], payload: { limit: 2 },
+      expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-ref-after-worker-restart", result: expect.objectContaining({ availability: "needs_selection" })
+    }));
+  });
+
   it("does not reinject or replay an operation after its actual dispatch fails", async () => {
     const executeScript = vi.fn(async () => []);
     const fixture = workerFixture({

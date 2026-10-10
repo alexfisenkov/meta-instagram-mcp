@@ -39,6 +39,7 @@ const WINDOWS_DEFAULT_READ_BUDGET_MS = 50_000;
 const TRIAGE_API_FALLBACK_RESERVE_MS = 8_000;
 const WINDOWS_TRIAGE_API_FALLBACK_RESERVE_MS = 35_000;
 const READ_ABORT_GRACE_MS = 250;
+const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
 
 /** Returns the default shared provider budget; Windows leaves room before the MCP client's 60s request timeout. */
 export function defaultSourceRouterTimeoutMs(platform: NodeJS.Platform = process.platform): number {
@@ -81,10 +82,18 @@ export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
       if (target && (!target.accountBinding || !hasVerifiableIdentity(target))) {
         return emptyResult(observations, triedSources, [target], skippedSources, [{ source: "api", code: "needs_selection", message: "A native id or explicit owner reference is required for a selected target." }]);
       }
+      const browserInboxRowRef = target?.explicitOwnerRef?.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) ?? false;
+      if (browserInboxRowRef && request.operation !== "conversation.read") {
+        return emptyResult(observations, triedSources, [], skippedSources, [{ source: "browser", code: "browser_ref_read_only", message: "A browser inbox row reference is valid only for a selected conversation read." }]);
+      }
 
       const ordered = PRIORITY.map((source) => bySource.get(source)).filter((item): item is SourceProvider => Boolean(item)).slice(0, maxProviders);
       for (let providerIndex = 0; providerIndex < ordered.length; providerIndex += 1) {
         const provider = ordered[providerIndex]!;
+        if (browserInboxRowRef && provider.source !== "browser") {
+          skippedSources.push({ source: provider.source, reason: "The selected target is an ephemeral browser inbox reference." });
+          continue;
+        }
         let remaining = deadline - Date.now();
         if (remaining <= 0) {
           skippedSources.push({ source: provider.source, reason: "The shared read budget expired." });

@@ -32,6 +32,7 @@ let reconnectAttempts = 0;
 let reconnectScheduled = false;
 const inFlightWrites = new Set();
 const writeApprovals = new Map();
+const inboxRowTabs = new Map();
 
 chrome.runtime.onStartup.addListener(connectNative);
 chrome.runtime.onInstalled.addListener(connectNative);
@@ -131,6 +132,7 @@ async function onNativeMessage(message) {
       kind: task.kind === "write" ? "execute" : "observe", operation,
       accountBinding, expectedAccountHandle, allowWrites, approval: message.approval, taskExpiresAt: task.expiresAt
     });
+    if (task.kind === "read" && task.operation === "inbox.list") rememberInboxRowTabs(task, result, tab.id);
     sendResult(task, result);
   } catch {
     sendResult(task, unavailable("unsupported_ui_version", "the fixed content script is not available in the selected tab"));
@@ -162,6 +164,14 @@ function isMissingMessageReceiver(error) {
 async function selectUniqueTab(task) {
   const tabs = await chrome.tabs.query({ url: INSTAGRAM_URL_PATTERNS });
   let eligible = tabs.filter((tab) => typeof tab.id === "number" && isInstagramUrl(tab.url));
+  const target = task.targetRefs.length === 1 ? task.targetRefs[0] : undefined;
+  const rowRef = typeof target?.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith("browser-inbox-row:")
+    ? target.explicitOwnerRef : undefined;
+  if (rowRef) {
+    const selected = inboxRowTabs.get(rowRef);
+    if (!selected || selected.expiresAt <= Date.now() || selected.bridgeId !== task.bridgeId || selected.accountBinding !== task.accountBinding) return undefined;
+    eligible = eligible.filter((tab) => tab.id === selected.tabId);
+  }
   const targetId = task.targetRefs.length === 1 ? task.targetRefs[0].nativeId : undefined;
   if (targetId && (task.operation === "conversation.read" || task.operation.startsWith("message."))) {
     const expectedPath = `/direct/t/${encodeURIComponent(targetId)}`;
@@ -183,6 +193,20 @@ async function selectUniqueTab(task) {
   return eligible.length === 1 ? eligible[0] : undefined;
 }
 
+function rememberInboxRowTabs(task, result, tabId) {
+  if (!Number.isInteger(tabId) || !isRecord(result) || result.accountBinding !== task.accountBinding || !isRecord(result.data) || !Array.isArray(result.data.items)) return;
+  for (const [reference, selected] of inboxRowTabs) {
+    if (selected.bridgeId === task.bridgeId && selected.accountBinding === task.accountBinding && selected.tabId === tabId) inboxRowTabs.delete(reference);
+  }
+  for (const item of result.data.items.slice(0, 100)) {
+    if (!isRecord(item) || !isRecord(item.target)) continue;
+    const reference = item.target.explicitOwnerRef;
+    if (typeof reference !== "string" || !reference.startsWith("browser-inbox-row:") || item.target.accountBinding !== task.accountBinding) continue;
+    inboxRowTabs.set(reference, { tabId, bridgeId: task.bridgeId, accountBinding: task.accountBinding, expiresAt: Date.now() + 5 * 60_000 });
+  }
+  while (inboxRowTabs.size > 1_000) inboxRowTabs.delete(inboxRowTabs.keys().next().value);
+}
+
 function taskToOperation(task, approval) {
   const op = OPERATION_MAP[task.operation];
   if (!op || !isRecord(task.payload)) return undefined;
@@ -197,7 +221,10 @@ function taskToOperation(task, approval) {
   const targetRef = task.targetRefs[0];
   const operation = { op: op === "thread.read" && payload.pages ? "thread.scroll_older" : op, ...payload };
   if (["thread.read", "comments.list", "comments.replies"].includes(op) || MUTATION_OPS.has(op)) {
-    if (!targetRef || targetRef.accountBinding !== task.accountBinding || typeof targetRef.nativeId !== "string") return undefined;
+    const hasNativeId = typeof targetRef?.nativeId === "string";
+    const isBrowserInboxRef = op === "thread.read" && typeof targetRef?.explicitOwnerRef === "string" && targetRef.explicitOwnerRef.startsWith("browser-inbox-row:");
+    if (!targetRef || targetRef.accountBinding !== task.accountBinding || (!hasNativeId && !isBrowserInboxRef)) return undefined;
+    if (op !== "thread.read" && !hasNativeId) return undefined;
     operation.target = { ...targetRef };
   }
   if (MUTATION_OPS.has(op)) {

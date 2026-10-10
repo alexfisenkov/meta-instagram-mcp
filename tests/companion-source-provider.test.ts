@@ -75,7 +75,55 @@ describe("companion source provider", () => {
 
     expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "bridge_selection_unavailable" }] });
     expect(context.companionBridgeId).toBe(selectedBridgeId);
-    expect(vi.mocked(hub.sourceStatus)).toHaveBeenLastCalledWith("browser", "instagram:42", selectedBridgeId);
+    expect(vi.mocked(hub.sourceStatus)).toHaveBeenLastCalledWith("browser", "instagram:42", selectedBridgeId, "inbox.list");
+    expect(hub.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("keeps a browser inbox row ref pinned to its originating bridge after a newer heartbeat appears", async () => {
+    let latestBridgeId = "bridge-mac";
+    let currentOperation = "inbox.list";
+    const rowRef = "browser-inbox-row:opaque-row-ref";
+    const statuses: string[] = [];
+    const hub = {
+      sourceStatus: vi.fn(async (_source: string, accountBinding?: string, selectedBridgeId?: string) => {
+        const bridgeId = selectedBridgeId ?? latestBridgeId;
+        statuses.push(bridgeId);
+        return { source: "browser", availability: "ready", capabilities: ["inbox.list", "conversation.read"],
+          accountBinding: accountBinding ?? "instagram:42", bridgeId, accountHandle: "owner", surface: "instagram" };
+      }),
+      enqueue: vi.fn(async (input: { operation: string }) => { currentOperation = input.operation; return { id: `task-${input.operation}` }; }),
+      result: vi.fn(async (taskId: string) => ({ status: "complete", result: currentOperation === "inbox.list"
+        ? { ...observation("browser"), data: { items: [{ target: { accountBinding: "instagram:42", explicitOwnerRef: rowRef }, unread: "unknown" }] } }
+        : { ...observation("browser"), nativeRef: "/direct/t/observed-route/", data: { threadNativeId: "observed-route", messages: [{ nativeId: "m-1", text: "bounded" }] } } }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+
+    await provider.read({ operation: "inbox.list", limit: 2 });
+    latestBridgeId = "bridge-server";
+    const request = { operation: "conversation.read" as const, target: { accountBinding: "instagram:42", explicitOwnerRef: rowRef }, limit: 2 };
+    const context: { companionBridgeId?: string } = {};
+    await provider.prepareRead?.(request, context);
+    expect(await provider.status("conversation.read", context)).toMatchObject({ availability: "ready", bridgeId: "bridge-mac" });
+    const result = await provider.read(request, context);
+    const repeatedRead = await provider.read(request, context);
+
+    expect(result.availability).toBe("ready");
+    expect(repeatedRead.availability).toBe("ready");
+    expect(context.companionBridgeId).toBe("bridge-mac");
+    expect(vi.mocked(hub.enqueue)).toHaveBeenLastCalledWith(expect.objectContaining({ operation: "conversation.read", bridgeId: "bridge-mac",
+      targetRefs: [{ accountBinding: "instagram:42", explicitOwnerRef: rowRef }] }));
+    expect(statuses.slice(1).every((bridgeId) => bridgeId === "bridge-mac")).toBe(true);
+  });
+
+  it("fails closed when a browser inbox ref is unknown after provider restart", async () => {
+    const hub = { sourceStatus: vi.fn(), enqueue: vi.fn() } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42" });
+    const result = await provider.read({ operation: "conversation.read", target: {
+      accountBinding: "instagram:42", explicitOwnerRef: "browser-inbox-row:lost-after-restart"
+    }, limit: 2 });
+
+    expect(result).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "stale_browser_inbox_ref" }] });
+    expect(hub.sourceStatus).not.toHaveBeenCalled();
     expect(hub.enqueue).not.toHaveBeenCalled();
   });
 

@@ -126,6 +126,30 @@ describe("CompanionHub", () => {
       .rejects.toThrow(/no assigned bridge available/i);
   });
 
+  it("prefers an older ready operation-capable browser over a newer unready bridge", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
+    const mac = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    await hub.heartbeat({ bridgeId: mac.bridgeId, bridgeToken: mac.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["inbox.list", "conversation.read"]
+    } });
+    now = 2_000;
+    const server = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    await hub.heartbeat({ bridgeId: server.bridgeId, bridgeToken: server.bridgeToken, source: "browser", status: {
+      availability: "unsupported_ui_version", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: []
+    } });
+
+    expect(await hub.sourceStatus("browser", "acct:one")).toMatchObject({ availability: "unsupported_ui_version", bridgeId: server.bridgeId });
+    const inboxReady = await hub.sourceStatus("browser", "acct:one", undefined, "inbox.list");
+    expect(inboxReady).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId, capabilities: ["inbox.list", "conversation.read"] });
+    expect(await hub.sourceStatus("browser", "acct:one", mac.bridgeId, "conversation.read")).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId });
+    const task = await hub.enqueue({ kind: "read", source: "browser", bridgeId: inboxReady.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: { limit: 2 }, targetRefs: [] });
+
+    expect(task.bridgeId).toBe(mac.bridgeId);
+    expect(await hub.poll(server.bridgeId, 1, server.bridgeToken, "browser")).toEqual([]);
+    expect(await hub.poll(mac.bridgeId, 1, mac.bridgeToken, "browser")).toMatchObject([{ id: task.id, bridgeId: mac.bridgeId }]);
+  });
+
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     let now = 1_000;
     const hub = await makeHub({ now: () => now });

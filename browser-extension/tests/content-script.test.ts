@@ -122,6 +122,64 @@ describe("Instagram content script against DOM fixtures", () => {
     });
   });
 
+  it("returns ephemeral read-only refs for the observed Direct row cards and opens only the requested row", async () => {
+    const { inbox, conversation, conversationAgain, clicks, url } = await runInboxRowContractFixture({ reuseReadRef: true });
+    const item = inbox.data.items[0];
+    expect(inbox).toMatchObject({ availability: "ready", coverage: "partial", sideEffects: [] });
+    expect(inbox.data.items).toHaveLength(2);
+    expect(item).toMatchObject({ unread: "unknown", unanswered: "unknown", target: { accountBinding } });
+    expect(item.target.explicitOwnerRef).toMatch(/^browser-inbox-row:/);
+    expect(item).not.toHaveProperty("nativeId");
+    expect(conversation).toMatchObject({ availability: "ready", source: "browser", sideEffects: ["may_mark_seen"],
+      data: { threadNativeId: "observed-thread-7", messages: [{ nativeId: "msg-1", text: "One message" }] } });
+    expect(clicks).toBe(1);
+    expect(url).toBe("https://www.instagram.com/direct/t/observed-thread-7/");
+    expect(conversationAgain).toMatchObject({ availability: "ready", data: { threadNativeId: "observed-thread-7" } });
+  });
+
+  it("does not reuse an opened row ref to navigate to a changed conversation route", async () => {
+    const { conversationAgain, clicks, url } = await runInboxRowContractFixture({ reuseReadRef: true, changeRouteBeforeReuse: true });
+    expect(conversationAgain).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "stale_inbox_row_ref" }] });
+    expect(clicks).toBe(1);
+    expect(url).toBe("https://www.instagram.com/direct/t/another-thread/");
+  });
+
+  it("does not double-click when the same inbox row ref is read concurrently", async () => {
+    const { conversation, conversationDuplicate, clicks } = await runInboxRowContractFixture({ duplicateRead: true });
+    expect([conversation.availability, conversationDuplicate.availability].sort()).toEqual(["offline", "ready"]);
+    expect([conversation, conversationDuplicate].some((value) => value.errors[0]?.code === "inbox_row_navigation_unknown")).toBe(true);
+    expect(clicks).toBe(1);
+  });
+
+  it("returns unknown rather than empty when no supported inbox row structure is present", async () => {
+    const { inbox, clicks } = await runInboxRowContractFixture({ shellOnly: true });
+    expect(inbox).toMatchObject({ availability: "ready", coverage: "unknown", data: { items: [] } });
+    expect(inbox.data.items).toHaveLength(0);
+    expect(clicks).toBe(0);
+  });
+
+  it("does not report an empty conversation when a selected row route remains loading", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ loadMessages: false, readDeadlineMs: 250 });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"],
+      errors: [{ code: "task_deadline_expired" }] });
+    expect(conversation).not.toHaveProperty("data.messages");
+    expect(clicks).toBe(1);
+  });
+
+  it("fails closed on ambiguous Direct card groups and stale or switched-account row refs", async () => {
+    const ambiguous = await runInboxRowContractFixture({ separateGroups: true, skipRead: true });
+    expect(ambiguous.inbox).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "inbox_rows_ambiguous" }] });
+    expect(ambiguous.clicks).toBe(0);
+
+    const stale = await runInboxRowContractFixture({ removeBeforeRead: true });
+    expect(stale.conversation).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "stale_inbox_row_ref" }] });
+    expect(stale.clicks).toBe(0);
+
+    const switched = await runInboxRowContractFixture({ switchAccountBeforeRead: true });
+    expect(switched.conversation.availability).toBe("needs_selection");
+    expect(switched.clicks).toBe(0);
+  });
+
   it("reads only the selected thread and marks the possible mark-seen side effect", async () => {
     const result = await runFixture("thread.html", "https://www.instagram.com/direct/t/thread-7/", {
       op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 10
@@ -297,6 +355,105 @@ async function runFixture(file: string, url: string, operation: Record<string, u
       });
     });
   } finally { page.happyDOM.abort(); }
+}
+
+async function runInboxRowContractFixture(options: { shellOnly?: boolean; separateGroups?: boolean; skipRead?: boolean; removeBeforeRead?: boolean;
+  switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
+  duplicateRead?: boolean } = {}) {
+  const url = "https://www.instagram.com/direct/inbox/";
+  const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
+  page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
+  page.document.close();
+  let clicks = 0;
+  const rows: HTMLElement[] = [];
+  if (!options.shellOnly) {
+    const groupCount = options.separateGroups ? 2 : 1;
+    for (let groupIndex = 0; groupIndex < groupCount; groupIndex += 1) {
+      const list = page.document.createElement("div");
+      if (options.separateGroups) {
+        const heading = page.document.createElement("div");
+        heading.textContent = `Group ${groupIndex}`;
+        list.append(heading);
+        makeVisible(heading);
+      }
+      const rowCount = options.separateGroups ? 1 : 2;
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        const row = makeInboxRowCard(page.document, `Conversation ${groupIndex}-${rowIndex}`);
+        rows.push(row);
+        row.addEventListener("click", (event) => {
+          event.preventDefault();
+          clicks++;
+          page.history.pushState({}, "", "/direct/t/observed-thread-7/");
+          if (options.loadMessages !== false) {
+            const message = page.document.createElement("div");
+            message.setAttribute("data-message-id", "msg-1");
+            message.textContent = "One message";
+            page.document.querySelector("main")?.append(message);
+          }
+        });
+        const wrapper1 = page.document.createElement("div");
+        const wrapper2 = page.document.createElement("div");
+        const wrapper3 = page.document.createElement("div");
+        wrapper1.append(row); wrapper2.append(wrapper1); wrapper3.append(wrapper2); list.append(wrapper3);
+        makeVisible(wrapper1); makeVisible(wrapper2); makeVisible(wrapper3);
+      }
+      makeVisible(list);
+      page.document.querySelector("main")?.append(list);
+    }
+  }
+  installOwnProfileControlFixture(page, url);
+  let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+  Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+  page.eval(contentScript);
+  try {
+    const expiresAt = new Date(Date.now() + 5_000).toISOString();
+    const inbox = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: expiresAt,
+      operation: { op: "inbox.list", limit: 2 } });
+    if (options.skipRead || !inbox.data?.items?.[0]?.target) return { inbox, clicks, url: page.location.href };
+    if (options.removeBeforeRead) rows[0]?.remove();
+    if (options.switchAccountBeforeRead) {
+      const profile = page.document.querySelector('a[role="link"]');
+      const image = profile?.querySelector("img");
+      if (profile) profile.href = "/otheraccount/";
+      if (image) image.alt = "Profile picture of otheraccount";
+    }
+    const readExpiresAt = new Date(Date.now() + (options.readDeadlineMs ?? 5_000)).toISOString();
+    const readMessage = { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: readExpiresAt,
+      operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } };
+    const [conversation, conversationDuplicate] = options.duplicateRead
+      ? await Promise.all([invoke(listener, readMessage), invoke(listener, readMessage)])
+      : [await invoke(listener, readMessage), undefined];
+    let conversationAgain;
+    if (options.reuseReadRef) {
+      if (options.changeRouteBeforeReuse) page.history.pushState({}, "", "/direct/t/another-thread/");
+      conversationAgain = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } });
+    }
+    return { inbox, conversation, conversationAgain, conversationDuplicate, clicks, url: page.location.href };
+  } finally { page.happyDOM.abort(); }
+}
+
+function makeInboxRowCard(document: Document, label: string): HTMLElement {
+  const row = document.createElement("div");
+  row.setAttribute("role", "button");
+  row.setAttribute("tabindex", "0");
+  const image = document.createElement("img");
+  image.alt = "Conversation avatar";
+  row.append(image);
+  let parent: HTMLElement = row;
+  for (let index = 0; index < 15; index += 1) {
+    const child = document.createElement("div");
+    if (index === 0) child.textContent = label;
+    parent.append(child);
+    parent = child;
+  }
+  for (let index = 0; index < 13; index += 1) {
+    const span = document.createElement("span");
+    span.textContent = index === 0 ? label : `Part ${index}`;
+    parent.append(span);
+  }
+  makeVisible(row); makeVisible(image);
+  return row;
 }
 
 function installOwnProfileControlFixture(page: Window, returnUrl: string) {

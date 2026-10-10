@@ -6,9 +6,11 @@
   const READ_OPS = new Set(["account.inspect", "account.snapshot", "inbox.list", "thread.read", "thread.scroll_older", "comments.list", "comments.replies", "insights.read"]);
   const PREVIEW_OPS = new Set(["message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"]);
   const MUTATION_OPS = PREVIEW_OPS;
+  const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
   const LIVE_CAPABILITIES = Object.freeze(["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies",
     "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply", "comment.like", "comment.unlike"]);
   const executedRequests = new Set();
+  const inboxRowRefs = new Map();
   let verifiedOwnProfileProof;
   const MAX_LIMIT = 100;
   const MAX_SCROLL_PAGES = 5;
@@ -47,7 +49,7 @@
       return observation(accountBinding, { username, accountBinding, loggedIn: true, surface: "instagram", capabilities: LIVE_CAPABILITIES }, "ready", "complete", "not_applicable", []);
     }
     if (operation.op === "inbox.list") return readInbox(accountBinding, username, operation.limit);
-    if (operation.op === "thread.read" || operation.op === "thread.scroll_older") return readThread(accountBinding, username, operation);
+    if (operation.op === "thread.read" || operation.op === "thread.scroll_older") return readThread(accountBinding, username, operation, message.taskExpiresAt);
     if (operation.op === "comments.list" || operation.op === "comments.replies") return readComments(accountBinding, username, operation);
     if (operation.op === "insights.read") return failure(accountBinding, "unsupported_ui_version", "insights semantic controls are not verified");
     return failure(accountBinding, "unsupported", "operation is not allowlisted");
@@ -55,32 +57,147 @@
 
   function readInbox(accountBinding, username, requestedLimit) {
     const limit = boundedInteger(requestedLimit, 1, MAX_LIMIT, 50);
+    inboxRowRefs.clear();
     const items = [];
     const seen = new Set();
-    for (const anchor of document.querySelectorAll('a[href^="/direct/t/"]')) {
-      const url = safeInstagramUrl(anchor.href);
-      const id = url?.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      const row = anchor.closest('[role="listitem"], li, [role="link"]') || anchor;
-      const text = cleanText(row.innerText || row.textContent, 600);
-      const labels = [anchor.getAttribute("aria-label"), row.getAttribute("aria-label")].filter(Boolean).join(" ").toLowerCase();
-      const unread = /\b(unread|new)\b|непрочитан|нов(ое|ый)/i.test(labels) ? true : "unknown";
-      items.push({ nativeId: id, href: url.pathname, label: text || "", unread, unanswered: "unknown" });
-      if (items.length >= limit) break;
+    const cards = findInboxRowCards();
+    if (cards.ambiguous) return failure(accountBinding, "unsupported_ui_version", "the Direct inbox row container is ambiguous", "inbox_rows_ambiguous");
+    if (cards.rows.length > 0) {
+      const proof = verifiedOwnProfileProof;
+      if (!proof || proof.handle !== username.toLowerCase()) return failure(accountBinding, "needs_selection", "the verified owner proof is unavailable for inbox rows", "owner_proof_missing");
+      for (const row of cards.rows.slice(0, limit)) {
+        const explicitOwnerRef = `${BROWSER_INBOX_ROW_REF_PREFIX}${crypto.randomUUID()}`;
+        inboxRowRefs.set(explicitOwnerRef, { row, document, accountBinding, expectedAccountHandle: username.toLowerCase(), ownerProof: proof,
+          path: location.pathname, snapshot: inboxRowSnapshot(row), expiresAt: Date.now() + 5 * 60_000 });
+        items.push({ target: { accountBinding, explicitOwnerRef }, label: cleanText(row.innerText || row.textContent, 600), unread: "unknown", unanswered: "unknown" });
+      }
+    } else {
+      for (const anchor of document.querySelectorAll('a[href^="/direct/t/"]')) {
+        const url = safeInstagramUrl(anchor.href);
+        const id = url?.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const row = anchor.closest('[role="listitem"], li, [role="link"]') || anchor;
+        const text = cleanText(row.innerText || row.textContent, 600);
+        const labels = [anchor.getAttribute("aria-label"), row.getAttribute("aria-label")].filter(Boolean).join(" ").toLowerCase();
+        const unread = /\b(unread|new)\b|непрочитан|нов(ое|ый)/i.test(labels) ? true : "unknown";
+        items.push({ nativeId: id, href: url.pathname, label: text || "", unread, unanswered: "unknown" });
+        if (items.length >= limit) break;
+      }
     }
     const coverage = items.length >= limit ? "partial" : "unknown";
     return observation(accountBinding, { username, items }, "ready", coverage, "limited", [], { sideEffects: [] });
   }
 
-  async function readThread(accountBinding, username, operation) {
+  function findInboxRowCards() {
+    if (location.pathname.replace(/\/$/, "") !== "/direct/inbox") return { rows: [], ambiguous: false };
+    const groups = new Map();
+    for (const row of document.querySelectorAll('div[role="button"][tabindex="0"]')) {
+      if (!isInboxRowCard(row)) continue;
+      const container = nearestBranchingContainer(row);
+      if (!container) continue;
+      const rows = groups.get(container) || [];
+      rows.push(row);
+      groups.set(container, rows);
+    }
+    if (groups.size > 1) return { rows: [], ambiguous: true };
+    return { rows: groups.size === 1 ? [...groups.values()][0] : [], ambiguous: false };
+  }
+
+  function isInboxRowCard(row) {
+    if (row.tagName !== "DIV" || row.getAttribute("role") !== "button" || row.getAttribute("tabindex") !== "0" ||
+        row.hasAttribute("aria-label") || row.hasAttribute("title") || !isVisible(row) || row.querySelector("a, button")) return false;
+    const images = Array.from(row.querySelectorAll("img[alt]")).filter(isVisible);
+    const spans = row.querySelectorAll("span").length;
+    const divs = row.querySelectorAll("div").length;
+    return images.length === 1 && spans >= 8 && divs >= 12 && divs <= 32;
+  }
+
+  function nearestBranchingContainer(row) {
+    let ancestor = row.parentElement;
+    for (let depth = 1; ancestor && depth <= 8; depth += 1, ancestor = ancestor.parentElement) {
+      const visibleChildren = Array.from(ancestor.children).filter(isVisible);
+      if (visibleChildren.length > 1) return ancestor;
+    }
+    return undefined;
+  }
+
+  function inboxRowSnapshot(row) {
+    return stableStringify({
+      text: cleanText(row.innerText || row.textContent, 3_000),
+      attributes: ["role", "tabindex", "aria-label", "title", "href", "data-visualcompletion"].map((name) => [name, row.getAttribute(name)]),
+      imageAlts: Array.from(row.querySelectorAll("img[alt]"), (image) => cleanText(image.getAttribute("alt"), 256)),
+      descendants: Array.from(row.querySelectorAll("*"), (element) => [element.tagName, element.getAttribute("role"), element.getAttribute("tabindex")])
+    });
+  }
+
+  function isFreshInboxRow(record) {
+    return record.document === document && record.row.ownerDocument === document && record.row.isConnected &&
+      isInboxRowCard(record.row) &&
+      inboxRowSnapshot(record.row) === record.snapshot;
+  }
+
+  function directThreadIdFromPath() {
+    return location.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
+  }
+
+  function readSideEffectFailure(accountBinding, availability, message, code) {
+    return { ...failure(accountBinding, availability, message, code), sideEffects: ["may_mark_seen"] };
+  }
+
+  async function readThread(accountBinding, username, operation, taskExpiresAt) {
     const target = operation.target;
-    if (!isRecord(target) || !validBinding(target.accountBinding) || target.accountBinding !== accountBinding || typeof target.nativeId !== "string") {
+    if (!isRecord(target) || !validBinding(target.accountBinding) || target.accountBinding !== accountBinding) {
       return failure(accountBinding, "needs_selection", "an exact conversation reference is required");
     }
-    const expectedId = target.nativeId.slice(0, 256);
-    const currentId = location.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
-    if (!currentId || currentId !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation does not match the requested reference");
+    let expectedId;
+    if (typeof target.nativeId === "string") {
+      expectedId = target.nativeId.slice(0, 256);
+      const currentId = directThreadIdFromPath();
+      if (!currentId || currentId !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation does not match the requested reference");
+    } else if (typeof target.explicitOwnerRef === "string" && target.explicitOwnerRef.startsWith(BROWSER_INBOX_ROW_REF_PREFIX)) {
+      const rowRef = target.explicitOwnerRef;
+      const record = inboxRowRefs.get(rowRef);
+      if (!record || record.expiresAt <= Date.now() || record.accountBinding !== accountBinding ||
+          record.expectedAccountHandle !== username.toLowerCase() || record.ownerProof !== verifiedOwnProfileProof || record.document !== document) {
+        inboxRowRefs.delete(rowRef);
+        return failure(accountBinding, "needs_selection", "the selected inbox row reference is stale or no longer matches its verified owner", "stale_inbox_row_ref");
+      }
+      if (record.openedNativeId) {
+        const currentId = directThreadIdFromPath();
+        if (!currentId || currentId !== record.openedNativeId) {
+          return failure(accountBinding, "needs_selection", "the selected inbox row was already opened in another route", "stale_inbox_row_ref");
+        }
+        expectedId = currentId.slice(0, 256);
+      } else {
+        if (record.navigationStarted) {
+          return readSideEffectFailure(accountBinding, "offline", "navigation for this inbox row is already in progress or ended without a verified route", "inbox_row_navigation_unknown");
+        }
+        if (record.path !== "/direct/inbox/" || location.pathname !== record.path || !isFreshInboxRow(record)) {
+          inboxRowRefs.delete(rowRef);
+          return failure(accountBinding, "needs_selection", "the selected inbox row node changed before navigation", "stale_inbox_row_ref");
+        }
+      if (taskDeadlineReached(taskExpiresAt)) {
+        return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
+      }
+      record.navigationStarted = true;
+      try { record.row.click(); }
+        catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
+        const navigated = await waitUntil(() => Boolean(directThreadIdFromPath()), 1_500, taskExpiresAt);
+        const routeId = directThreadIdFromPath();
+        if (!navigated || !routeId) {
+          return readSideEffectFailure(accountBinding, taskDeadlineReached(taskExpiresAt) ? "offline" : "needs_selection",
+            "the selected inbox row did not reach a conversation route", taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_route_not_reached");
+        }
+        record.openedNativeId = routeId.slice(0, 256);
+        expectedId = record.openedNativeId;
+      }
+      const loaded = await waitUntil(() => Boolean(document.querySelector("[data-message-id], [data-mid]")), 2_500, taskExpiresAt);
+      if (!loaded) return readSideEffectFailure(accountBinding, "offline", "conversation messages did not load within the bounded read",
+        taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_content_not_loaded");
+    } else {
+      return failure(accountBinding, "needs_selection", "the conversation reference is not supported by this browser reader");
+    }
 
     const pages = operation.op === "thread.scroll_older" ? boundedInteger(operation.pages, 1, MAX_SCROLL_PAGES, 1) : 0;
     let scroller = findMessageScroller();

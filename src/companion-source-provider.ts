@@ -13,12 +13,16 @@ export interface CompanionSourceProviderOptions {
   now?: () => number;
 }
 
+const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
+const BROWSER_INBOX_ROW_REF_TTL_MS = 5 * 60_000;
+
 /** Reads through the durable authenticated companion task queue; it never exposes writes. */
 export function createCompanionSourceProvider(options: CompanionSourceProviderOptions): SourceProvider {
   const waitMs = options.waitMs ?? (process.platform === "win32" ? 30_000 : 4_000);
   const pollMs = options.pollMs ?? 50;
   const now = options.now ?? Date.now;
   const browserCursors = new Map<string, { accountBinding: string; targetKey: string; pageBudget: number; expiresAt: number }>();
+  const browserInboxRowRefs = new Map<string, { bridgeId: string; accountBinding: string; expiresAt: number }>();
   if (!Number.isInteger(waitMs) || waitMs < 1 || waitMs > 30_000 || !Number.isInteger(pollMs) || pollMs < 5 || pollMs > 1_000) {
     throw new Error("invalid companion source wait budget");
   }
@@ -26,10 +30,25 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
   const provider: SourceProvider = {
     source: options.source,
     async prepareRead(request, context) {
+      const target = "target" in request ? request.target : undefined;
+      const rowRef = target?.explicitOwnerRef?.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) ? target.explicitOwnerRef : undefined;
+      if (rowRef && request.operation === "conversation.read" && options.source === "browser" && target) {
+        const selected = lookupBrowserInboxRef(browserInboxRowRefs, rowRef, target.accountBinding, now());
+        if (!selected || (context?.companionBridgeId && context.companionBridgeId !== selected.bridgeId)) {
+          throw new Error("The browser inbox row reference is unknown, expired, or bound to another selected bridge.");
+        }
+        if (context) context.companionBridgeId = selected.bridgeId;
+        const status = await options.hub.sourceStatus("browser", target.accountBinding, selected.bridgeId, "conversation.read");
+        throwIfReadStopped(context, now);
+        if (status.bridgeId !== selected.bridgeId || status.accountBinding !== target.accountBinding ||
+            status.availability !== "ready" || !status.capabilities.includes("conversation.read")) {
+          throw new Error("The browser inbox row reference no longer has a ready selected companion.");
+        }
+        return;
+      }
       if (options.source !== "browser" || request.operation === "account.inspect") return;
       throwIfReadStopped(context, now);
-      const target = "target" in request ? request.target : undefined;
-      const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding, context?.companionBridgeId);
+      const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding, context?.companionBridgeId, request.operation);
       throwIfReadStopped(context, now);
       if (context?.companionBridgeId && initial.bridgeId && initial.bridgeId !== context.companionBridgeId) {
         throw new Error("Selected companion changed during browser preflight.");
@@ -39,7 +58,7 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
 
       const probe = await provider.read({ operation: "account.inspect", accountBinding: initial.accountBinding }, context);
       const probeData = isRecord(probe.data) ? probe.data : undefined;
-      const verified = await options.hub.sourceStatus(options.source, initial.accountBinding, initial.bridgeId);
+      const verified = await options.hub.sourceStatus(options.source, initial.accountBinding, initial.bridgeId, request.operation);
       throwIfReadStopped(context, now);
       const accountHandle = verified.accountHandle?.toLowerCase();
       if (probe.availability !== "ready" || probe.accountBinding !== initial.accountBinding ||
@@ -51,7 +70,7 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
     },
     async status(operation, context) {
       if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped before companion readiness check." };
-      const status = await options.hub.sourceStatus(options.source, options.accountBinding, context?.companionBridgeId);
+      const status = await options.hub.sourceStatus(options.source, options.accountBinding, context?.companionBridgeId, operation as BridgeOperation | undefined);
       if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped during companion readiness check." };
       if (context?.companionBridgeId && status.bridgeId !== context.companionBridgeId) {
         return { source: options.source, availability: "offline", capabilities: [], accountBinding: options.accountBinding,
@@ -86,7 +105,18 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         browserPageBudget = cursor.pageBudget;
       }
       const accountBinding = target?.accountBinding ?? requestedAccountBinding ?? options.accountBinding;
-      const status = await options.hub.sourceStatus(options.source, accountBinding, context?.companionBridgeId);
+      const browserRowRef = target?.explicitOwnerRef?.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) ? target.explicitOwnerRef : undefined;
+      if (browserRowRef && (options.source !== "browser" || request.operation !== "conversation.read")) {
+        return unavailable(options.source, accountBinding ?? "unresolved", "unsupported", "An ephemeral browser inbox reference is valid only for its selected conversation read.", "browser_ref_read_only");
+      }
+      if (browserRowRef) {
+        const selected = lookupBrowserInboxRef(browserInboxRowRefs, browserRowRef, target!.accountBinding, now());
+        if (!selected || (context?.companionBridgeId && context.companionBridgeId !== selected.bridgeId)) {
+          return unavailable("browser", accountBinding ?? "unresolved", "needs_selection", "The browser inbox row reference is unknown, expired, or bound to another selected bridge.", "stale_browser_inbox_ref");
+        }
+        if (context) context.companionBridgeId = selected.bridgeId;
+      }
+      const status = await options.hub.sourceStatus(options.source, accountBinding, context?.companionBridgeId, request.operation);
       const resolvedAccountBinding = accountBinding ?? status.accountBinding;
       if (isReadStopped(context, now)) return readStoppedObservation(options.source, resolvedAccountBinding ?? "unresolved", context, now);
       if (!status.bridgeId || (context?.companionBridgeId && status.bridgeId !== context.companionBridgeId)) {
@@ -131,6 +161,9 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         if (result.status === "complete") {
           if (!isObservation(result.result)) return unavailable(options.source, resolvedAccountBinding, "unsupported_ui_version", "Companion returned an invalid observation.", "invalid_result");
           const observation = result.result;
+          if (options.source === "browser" && request.operation === "inbox.list" && status.bridgeId) {
+            rememberBrowserInboxRefs(browserInboxRowRefs, observation, status.bridgeId, resolvedAccountBinding, now());
+          }
           if (options.source === "browser" && request.operation === "conversation.read" && target && browserPageBudget < 5 &&
               isRecord(observation.data) && observation.data.olderAvailable === true) {
             const olderCursor = `browser-older:${randomUUID()}`;
@@ -185,6 +218,25 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
 }
 
 function stableTarget(target: TargetRef): string { return JSON.stringify(Object.fromEntries(Object.entries(target).sort(([a], [b]) => a.localeCompare(b)))); }
+function lookupBrowserInboxRef(refs: Map<string, { bridgeId: string; accountBinding: string; expiresAt: number }>, reference: string, accountBinding: string, now: number) {
+  const record = refs.get(reference);
+  if (!record) return undefined;
+  if (record.expiresAt <= now || record.accountBinding !== accountBinding) { refs.delete(reference); return undefined; }
+  return record;
+}
+function rememberBrowserInboxRefs(refs: Map<string, { bridgeId: string; accountBinding: string; expiresAt: number }>, observation: Observation<unknown>, bridgeId: string, accountBinding: string, now: number): void {
+  for (const [reference, record] of refs) {
+    if (record.expiresAt <= now || (record.bridgeId === bridgeId && record.accountBinding === accountBinding)) refs.delete(reference);
+  }
+  if (!isRecord(observation.data) || !Array.isArray(observation.data.items)) return;
+  for (const item of observation.data.items.slice(0, 100)) {
+    if (!isRecord(item) || !isRecord(item.target)) continue;
+    const reference = item.target.explicitOwnerRef;
+    if (typeof reference !== "string" || !reference.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) || item.target.accountBinding !== accountBinding) continue;
+    refs.set(reference, { bridgeId, accountBinding, expiresAt: now + BROWSER_INBOX_ROW_REF_TTL_MS });
+  }
+  while (refs.size > 1_000) refs.delete(refs.keys().next().value as string);
+}
 function isAvailability(value: unknown): value is Availability { return ["ready", "permission_blocked", "missing_scope", "offline", "not_connected", "unsupported", "unsupported_ui_version", "needs_selection"].includes(String(value)); }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 
