@@ -2,6 +2,14 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
+## 0.2.2 — candidate, not released
+
+- Для unpinned browser read runtime может проверить до трёх свежих bridge того же account binding, которые объявили `account.inspect` и запрошенную read capability. Первый bridge, прошедший account verification и live operation check, закрепляется для чтения; API → browser → phone порядок и общий read deadline сохраняются. Явные bridge/row refs не переназначаются; discovery не работает в фоне и не разрешает writes.
+- RED→GREEN regression воспроизводит ранее наблюдавшийся выбор: API Direct отвечает `missing_scope`, новый server browser bridge не проходит `account.inspect`, хотя более старый Mac bridge зарегистрирован с тем же binding. До исправления browser не попадал в `triedSources`; после исправления проверка доходит до Mac, а inbox task ставится только этому же проверенному bridge. Отдельный `account.inspect` возвращает первый успешный inspect без повторного вызова; abort не запускает следующего кандидата.
+- Browser-only row ref остаётся привязан к выдавшему его bridge и при прямом provider вызове без router context; если исходный bridge устарел/недоступен, read завершается unknown вместо переназначения на новейший bridge.
+- Cloud — отдельное private deployment: согласованный целевой gateway allowlist — 19 entries (старые 18 плюс named exception `meta_read_source`; `meta_capabilities` уже был в прежнем allowlist). Read exception охватывает `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`; остальные layered/mutation, write/auth и stateful resolver operations остаются закрыты. `meta_read_source` сохраняет `readOnlyHint: false`, так как UI conversation read может пометить диалог просмотренным (`may_mark_seen`). Этот public source change не доказывает private gateway deployment или фактический cloud catalog.
+- На момент candidate preparation новый runtime ещё не развёрнут, и Direct read после этого изменения повторно не выполнялся. Предшествующее live наблюдение не является доказательством новой маршрутизации; API scopes, bridge readiness и результат реального чтения проверяются отдельно.
+
 ## 0.2.1
 
 - Подключается ограниченный browser `account.inspect` перед автоматическим Direct read, если bridge зарегистрирован, но ещё не проверил аккаунт.

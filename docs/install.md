@@ -3,7 +3,7 @@
 В этом репозитории предусмотрены два способа работы:
 
 - portable MCP для Node.js с конфигурацией и token-store вне каталога приложения;
-- четыре профиля: API stdio, API + server-owned persistent Chrome/extension/Native Host, external desktop browser и connected phone companion. Shared runtime paths для stdio/HTTP/API/browser/phone подключены в checkout; server deployment, host registration, live OAuth/UI/device QA и published release остаются отдельными gates. Сверяйтесь с [матрицей возможностей](capabilities.md).
+- четыре профиля: API stdio, API + server-owned persistent Chrome/extension/Native Host, external desktop browser и connected phone companion. Shared runtime paths для stdio/HTTP/API/browser/phone подключены в checkout. Выбранный release SHA, server deployment, host registration, OAuth scopes и live UI/device QA — отдельные gates: наличие опубликованной версии не доказывает, что конкретный runtime установлен или готов. Сверяйтесь с [матрицей возможностей](capabilities.md).
 
 ## Требования
 

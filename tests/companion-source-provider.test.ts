@@ -270,6 +270,59 @@ describe("companion source provider", () => {
     expect(statuses.slice(1).every((bridgeId) => bridgeId === "bridge-mac")).toBe(true);
   });
 
+  it("pins direct provider row-ref reads without context and fails closed if the origin expires", async () => {
+    let latestBridgeId = "bridge-mac";
+    let originState: "ready" | "expired" | "changed" = "ready";
+    let currentOperation = "inbox.list";
+    const rowRef = "browser-inbox-row:direct-provider-ref";
+    const statusCalls: Array<string | undefined> = [];
+    const taskCalls: Array<{ operation: string; bridgeId: string }> = [];
+    const hub = {
+      sourceStatus: vi.fn(async (_source: string, accountBinding?: string, selectedBridgeId?: string) => {
+        statusCalls.push(selectedBridgeId);
+        if (selectedBridgeId === "bridge-mac" && originState === "expired") {
+          return { source: "browser", availability: "not_connected", capabilities: [], accountBinding: accountBinding ?? "instagram:42" };
+        }
+        if (selectedBridgeId === "bridge-mac" && originState === "changed") {
+          return { source: "browser", availability: "ready", capabilities: ["inbox.list", "conversation.read"],
+            accountBinding: accountBinding ?? "instagram:42", bridgeId: "bridge-server", accountHandle: "owner", surface: "instagram" };
+        }
+        const bridgeId = selectedBridgeId ?? latestBridgeId;
+        return { source: "browser", availability: "ready", capabilities: ["inbox.list", "conversation.read"],
+          accountBinding: accountBinding ?? "instagram:42", bridgeId, accountHandle: "owner", surface: "instagram" };
+      }),
+      enqueue: vi.fn(async (input: { operation: string; bridgeId: string }) => {
+        currentOperation = input.operation;
+        taskCalls.push(input);
+        return { id: `direct-${taskCalls.length}` };
+      }),
+      result: vi.fn(async () => ({ status: "complete", result: currentOperation === "inbox.list"
+        ? { ...observation("browser"), data: { items: [{ target: { accountBinding: "instagram:42", explicitOwnerRef: rowRef } }] } }
+        : { ...observation("browser"), nativeRef: "/direct/t/observed-route/", data: { threadNativeId: "observed-route", messages: [{ nativeId: "m-1", text: "bounded" }] } } }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+    const request = { operation: "conversation.read" as const,
+      target: { accountBinding: "instagram:42", explicitOwnerRef: rowRef }, limit: 2 };
+
+    await provider.read({ operation: "inbox.list", limit: 2 });
+    latestBridgeId = "bridge-server";
+    const result = await provider.read(request);
+
+    expect(result.availability).toBe("ready");
+    expect(statusCalls.at(-1)).toBe("bridge-mac");
+    expect(taskCalls.at(-1)).toMatchObject({ operation: "conversation.read", bridgeId: "bridge-mac" });
+
+    originState = "changed";
+    const changedOrigin = await provider.read(request);
+    originState = "expired";
+    const expiredOrigin = await provider.read(request);
+
+    expect(changedOrigin).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "bridge_selection_unavailable" }] });
+    expect(expiredOrigin).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "bridge_selection_unavailable" }] });
+    expect(statusCalls.at(-1)).toBe("bridge-mac");
+    expect(taskCalls.filter((task) => task.operation === "conversation.read")).toHaveLength(1);
+  });
+
   it("fails closed when a browser inbox ref is unknown after provider restart", async () => {
     const hub = { sourceStatus: vi.fn(), enqueue: vi.fn() } as unknown as CompanionHub;
     const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42" });

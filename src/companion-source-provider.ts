@@ -101,6 +101,8 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         const stoppedBinding = "target" in request ? request.target?.accountBinding : "accountBinding" in request ? request.accountBinding : undefined;
         return readStoppedObservation(options.source, stoppedBinding ?? options.accountBinding ?? "unresolved", context, now);
       }
+      // Keep ephemeral browser refs pinned even for direct provider callers without a router context.
+      const selectionContext = context ?? {};
       const target = "target" in request ? request.target : undefined;
       const requestedAccountBinding = "accountBinding" in request ? request.accountBinding : undefined;
       if (request.operation === "account.inspect" && options.source === "browser" && !target && !hasPinnedCompanion(context)) {
@@ -145,12 +147,13 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         if (!selected || (context?.companionBridgeId && context.companionBridgeId !== selected.bridgeId)) {
           return unavailable("browser", accountBinding ?? "unresolved", "needs_selection", "The browser inbox row reference is unknown, expired, or bound to another selected bridge.", "stale_browser_inbox_ref");
         }
-        if (context) { context.companionBridgeId = selected.bridgeId; context.companionBridgeSelection = "pinned"; }
+        selectionContext.companionBridgeId = selected.bridgeId;
+        selectionContext.companionBridgeSelection = "pinned";
       }
-      const status = await options.hub.sourceStatus(options.source, accountBinding, context?.companionBridgeId, request.operation);
+      const status = await options.hub.sourceStatus(options.source, accountBinding, selectionContext.companionBridgeId, request.operation);
       const resolvedAccountBinding = accountBinding ?? status.accountBinding;
       if (isReadStopped(context, now)) return readStoppedObservation(options.source, resolvedAccountBinding ?? "unresolved", context, now);
-      if (!status.bridgeId || (context?.companionBridgeId && status.bridgeId !== context.companionBridgeId)) {
+      if (!status.bridgeId || (selectionContext.companionBridgeId && status.bridgeId !== selectionContext.companionBridgeId)) {
         return unavailable(options.source, resolvedAccountBinding ?? "unresolved", "offline", "The selected companion identity is no longer available.", "bridge_selection_unavailable");
       }
       if (context && !context.companionBridgeId) {
