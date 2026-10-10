@@ -2,6 +2,11 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
+## 0.2.5 — 2026-10-11
+
+- На Linux/macOS browser companion получает до 8 секунд на отдельную read task, чтобы ограниченное создание и проверка холодной Inbox-вкладки успевали завершиться в пределах общего 12-секундного router deadline. Телефонный default остаётся 4 секунды, Windows defaults — 30 секунд; caller deadline и явный `waitMs` продолжают ограничивать ожидание. Это не гарантирует чтение при задержке сети, входе или проверке аккаунта.
+- Регрессионные тесты покрывают задержанное завершение через собранный runtime provider, короткий caller deadline, сохранённый override и оставшийся бюджет phone fallback.
+
 ## 0.2.4 — 2026-10-11
 
 - MCP initialize metadata now reports the product version from package metadata; the version remains consistent in source and compiled distribution.
