@@ -138,6 +138,42 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(conversationAgain).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "msg-1" }] } });
   });
 
+  it("reads a second sidebar row after Inbox → thread A → Inbox list without returning thread A content", async () => {
+    const { firstRead, inboxOnThread, secondRead, clicks, url } = await runInboxThreadSidebarCycleFixture();
+    expect(firstRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-a-message", text: "Thread A message" }] } });
+    expect(inboxOnThread.availability).toBe("ready");
+    expect(inboxOnThread.data.items[0].target.explicitOwnerRef).toMatch(/^browser-inbox-row:/);
+    expect(inboxOnThread.data.items).toHaveLength(2);
+    expect(secondRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-b-message", text: "Thread B message" }] } });
+    expect(secondRead.data.messages).not.toContainEqual(expect.objectContaining({ text: "Thread A message" }));
+    expect(clicks).toBe(2);
+    expect(url).toBe("https://www.instagram.com/direct/t/thread-b/");
+  });
+
+  it("rejects a second row navigation while another conversation navigation is in progress", async () => {
+    const { conversation, concurrentConversation, clicks } = await runInboxRowContractFixture({ concurrentDistinctRefs: true });
+    expect([conversation.availability, concurrentConversation.availability].sort()).toEqual(["offline", "ready"]);
+    expect([conversation, concurrentConversation].some((value) => value.errors[0]?.code === "browser_ui_busy")).toBe(true);
+    expect(clicks).toBe(1);
+  });
+
+  it("rejects account.inspect while conversation navigation is still loading", async () => {
+    const { conversation, concurrentInspect, clicks } = await runInboxRowContractFixture({ inspectDuringRead: true, loadMessages: false, readDeadlineMs: 250 });
+    expect(concurrentInspect).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "browser_ui_busy" }] });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"] });
+    expect(clicks).toBe(1);
+  });
+
+  it("fails closed when clicking a new row does not change the current thread route", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ noRouteChange: true, loadMessages: false, readDeadlineMs: 250 });
+    expect(["needs_selection", "offline"]).toContain(conversation.availability);
+    expect(conversation.coverage).toBe("unknown");
+    expect(conversation.sideEffects).toEqual(["may_mark_seen"]);
+    expect(["conversation_route_not_reached", "task_deadline_expired"]).toContain(conversation.errors[0]?.code);
+    expect(conversation.data?.messages).toBeUndefined();
+    expect(clicks).toBe(1);
+  });
+
   it("does not reuse an opened row ref to navigate to a changed conversation route", async () => {
     const { conversationAgain, clicks, url } = await runInboxRowContractFixture({ reuseReadRef: true, changeRouteBeforeReuse: true });
     expect(conversationAgain).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "stale_inbox_row_ref" }] });
@@ -148,7 +184,7 @@ describe("Instagram content script against DOM fixtures", () => {
   it("does not double-click when the same inbox row ref is read concurrently", async () => {
     const { conversation, conversationDuplicate, clicks } = await runInboxRowContractFixture({ duplicateRead: true });
     expect([conversation.availability, conversationDuplicate.availability].sort()).toEqual(["offline", "ready"]);
-    expect([conversation, conversationDuplicate].some((value) => value.errors[0]?.code === "inbox_row_navigation_unknown")).toBe(true);
+    expect([conversation, conversationDuplicate].some((value) => value.errors[0]?.code === "browser_ui_busy")).toBe(true);
     expect(clicks).toBe(1);
   });
 
@@ -505,7 +541,8 @@ async function runFixture(file: string, url: string, operation: Record<string, u
 async function runInboxRowContractFixture(options: { shellOnly?: boolean; separateGroups?: boolean; skipRead?: boolean; removeBeforeRead?: boolean;
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
   changeRouteAwayAndBackBeforeReuse?: boolean;
-  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean;
+  duplicateRead?: boolean; concurrentDistinctRefs?: boolean; inspectDuringRead?: boolean; noRouteChange?: boolean;
+  preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean;
   loadEventEntries?: boolean; nativeTargetReadAfterProof?: boolean | { op: string; pages?: number }; scrollFixture?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
@@ -552,7 +589,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
         row.addEventListener("click", (event) => {
           event.preventDefault();
           clicks++;
-          page.history.pushState({}, "", "/direct/t/observed-thread-7/");
+          if (!options.noRouteChange) page.history.pushState({}, "", "/direct/t/observed-thread-7/");
           if (staleToReveal) staleToReveal.style.display = "";
           if (staleToMove) page.document.querySelector("main")?.append(staleToMove);
           if (options.loadEventEntries) {
@@ -609,9 +646,21 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
     const readExpiresAt = new Date(Date.now() + (options.readDeadlineMs ?? 5_000)).toISOString();
     const readMessage = { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: readExpiresAt,
       operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } };
-    const [conversation, conversationDuplicate] = options.duplicateRead
-      ? await Promise.all([invoke(listener, readMessage), invoke(listener, readMessage)])
-      : [await invoke(listener, readMessage), undefined];
+    let conversation;
+    let conversationDuplicate;
+    let concurrentConversation;
+    let concurrentInspect;
+    if (options.duplicateRead) [conversation, conversationDuplicate] = await Promise.all([invoke(listener, readMessage), invoke(listener, readMessage)]);
+    else if (options.concurrentDistinctRefs) {
+      const secondMessage = { ...readMessage, operation: { op: "thread.read", target: inbox.data.items[1].target, limit: 2 } };
+      [conversation, concurrentConversation] = await Promise.all([invoke(listener, readMessage), invoke(listener, secondMessage)]);
+    } else if (options.inspectDuringRead) {
+      const pendingConversation = invoke(listener, readMessage);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      concurrentInspect = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "account.inspect" } });
+      conversation = await pendingConversation;
+    } else conversation = await invoke(listener, readMessage);
     let conversationNative;
     if (options.nativeTargetReadAfterProof) {
       const nativeOperation = typeof options.nativeTargetReadAfterProof === "object"
@@ -634,7 +683,53 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
       conversationAgain = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } });
     }
-    return { inbox, conversation, conversationAgain, conversationDuplicate, conversationNative, scroller, clicks, url: page.location.href };
+    return { inbox, conversation, conversationAgain, conversationDuplicate, concurrentConversation, concurrentInspect, conversationNative, scroller, clicks, url: page.location.href };
+  } finally { page.happyDOM.abort(); }
+}
+
+async function runInboxThreadSidebarCycleFixture() {
+  const inboxUrl = "https://www.instagram.com/direct/inbox/";
+  const page = new Window({ url: inboxUrl, settings: { disableJavaScriptEvaluation: false } });
+  page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
+  page.document.close();
+  makeVisible(page.document.querySelector("main")!);
+  let clicks = 0;
+  const group = page.document.createElement("div");
+  for (const [index, routeId] of ["thread-a", "thread-b"].entries()) {
+    const row = makeInboxRowCard(page.document, `Conversation ${routeId}`);
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      clicks += 1;
+      page.history.pushState({}, "", `/direct/t/${routeId}/`);
+      const message = page.document.createElement("div");
+      message.setAttribute("data-message-id", `${routeId}-message`);
+      message.textContent = `Thread ${index === 0 ? "A" : "B"} message`;
+      page.document.querySelector("main")?.append(message);
+      makeVisible(message);
+    });
+    const outer = page.document.createElement("div");
+    const middle = page.document.createElement("div");
+    const inner = page.document.createElement("div");
+    inner.append(row); middle.append(inner); outer.append(middle); group.append(outer);
+    makeVisible(outer); makeVisible(middle); makeVisible(inner);
+  }
+  makeVisible(group);
+  page.document.querySelector("main")?.append(group);
+  installOwnProfileControlFixture(page, inboxUrl);
+  let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+  Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+  page.eval(contentScript);
+  const deadline = () => new Date(Date.now() + 5_000).toISOString();
+  try {
+    const inbox = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+      operation: { op: "inbox.list", limit: 2 } });
+    const firstRead = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+      operation: { op: "thread.read", target: inbox.data.items[0]?.target, limit: 2 } });
+    const inboxOnThread = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+      operation: { op: "inbox.list", limit: 2 } });
+    const secondRead = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+      operation: { op: "thread.read", target: inboxOnThread.data.items[1]?.target, limit: 2 } });
+    return { firstRead, inboxOnThread, secondRead, clicks, url: page.location.href };
   } finally { page.happyDOM.abort(); }
 }
 

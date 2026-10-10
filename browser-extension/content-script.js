@@ -12,6 +12,7 @@
   const executedRequests = new Set();
   const inboxRowRefs = new Map();
   let verifiedOwnProfileProof;
+  let uiOperationInProgress = false;
   let observedRoutePath = location.pathname;
   const routeObserver = typeof MutationObserver === "function" && document.documentElement
     ? new MutationObserver(observeRouteChange) : undefined;
@@ -27,8 +28,21 @@
       return false;
     }
     if (!message || !["observe", "execute"].includes(message.kind)) return false;
+    if (uiOperationInProgress) {
+      sendResponse(message.kind === "execute"
+        ? { status: "FAILED", code: "browser_ui_busy", reason: "another browser UI operation is still in progress; no write was dispatched" }
+        : failure(message.accountBinding, "offline", "another browser UI operation is still in progress", "browser_ui_busy"));
+      return false;
+    }
+    uiOperationInProgress = true;
     const task = message.kind === "execute" ? runMutation(message) : runOperation(message);
-    void task.then(sendResponse).catch(() => sendResponse(failure(message.accountBinding, "unsupported_ui_version", "browser operation failed")));
+    void task.then((result) => {
+      uiOperationInProgress = false;
+      sendResponse(result);
+    }).catch(() => {
+      uiOperationInProgress = false;
+      sendResponse(failure(message.accountBinding, "unsupported_ui_version", "browser operation failed"));
+    });
     return true;
   });
 
@@ -64,6 +78,15 @@
 
   function readInbox(accountBinding, username, requestedLimit) {
     const limit = boundedInteger(requestedLimit, 1, MAX_LIMIT, 50);
+    const currentThreadId = directThreadIdFromPath();
+    const retainedRows = new Map();
+    if (currentThreadId) {
+      for (const record of inboxRowRefs.values()) {
+        if (record.row && isFreshInboxRow(record) && record.accountBinding === accountBinding &&
+            record.expectedAccountHandle === username.toLowerCase() && record.ownerProof === verifiedOwnProfileProof &&
+            hasVerifiedThreadProof(record, accountBinding, currentThreadId)) retainedRows.set(record.row, record);
+      }
+    }
     inboxRowRefs.clear();
     const items = [];
     const seen = new Set();
@@ -73,9 +96,12 @@
       const proof = verifiedOwnProfileProof;
       if (!proof || proof.handle !== username.toLowerCase()) return failure(accountBinding, "needs_selection", "the verified owner proof is unavailable for inbox rows", "owner_proof_missing");
       for (const row of cards.rows.slice(0, limit)) {
-        const explicitOwnerRef = `${BROWSER_INBOX_ROW_REF_PREFIX}${crypto.randomUUID()}`;
-        inboxRowRefs.set(explicitOwnerRef, { row, document, accountBinding, expectedAccountHandle: username.toLowerCase(), ownerProof: proof,
-          path: location.pathname, snapshot: inboxRowSnapshot(row), expiresAt: Date.now() + 5 * 60_000 });
+        const retained = retainedRows.get(row);
+        const record = retained || { row, document, accountBinding, expectedAccountHandle: username.toLowerCase(), ownerProof: proof,
+          path: location.pathname, snapshot: inboxRowSnapshot(row), expiresAt: Date.now() + 5 * 60_000 };
+        const explicitOwnerRef = retained ? retained.reference : `${BROWSER_INBOX_ROW_REF_PREFIX}${crypto.randomUUID()}`;
+        record.reference = explicitOwnerRef;
+        inboxRowRefs.set(explicitOwnerRef, record);
         items.push({ target: { accountBinding, explicitOwnerRef }, label: cleanText(row.innerText || row.textContent, 600), unread: "unknown", unanswered: "unknown" });
       }
     } else {
@@ -97,7 +123,8 @@
   }
 
   function findInboxRowCards() {
-    if (location.pathname.replace(/\/$/, "") !== "/direct/inbox") return { rows: [], ambiguous: false };
+    const path = location.pathname.replace(/\/+$/, "") || "/";
+    if (path !== "/direct/inbox" && !/^\/direct\/t\/[^/]+$/.test(path)) return { rows: [], ambiguous: false };
     const groups = new Map();
     for (const row of document.querySelectorAll('div[role="button"][tabindex="0"]')) {
       if (!isInboxRowCard(row)) continue;
@@ -214,7 +241,7 @@
         if (record.navigationStarted) {
           return readSideEffectFailure(accountBinding, "offline", "navigation for this inbox row is already in progress or ended without a verified route", "inbox_row_navigation_unknown");
         }
-        if (record.path !== "/direct/inbox/" || location.pathname !== record.path || !isFreshInboxRow(record)) {
+        if (location.pathname !== record.path || !isFreshInboxRow(record)) {
           inboxRowRefs.delete(rowRef);
           return failure(accountBinding, "needs_selection", "the selected inbox row node changed before navigation", "stale_inbox_row_ref");
         }
@@ -222,12 +249,16 @@
           return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
         }
         const priorMessages = new Set(allThreadCandidateNodes());
+        const priorThreadId = directThreadIdFromPath();
         record.navigationStarted = true;
         try { record.row.click(); }
         catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
-        const navigated = await waitUntil(() => Boolean(directThreadIdFromPath()), 1_500, taskExpiresAt);
+        const navigated = await waitUntil(() => {
+          const routeId = directThreadIdFromPath();
+          return Boolean(routeId && routeId !== priorThreadId);
+        }, 1_500, taskExpiresAt);
         const routeId = directThreadIdFromPath();
-        if (!navigated || !routeId) {
+        if (!navigated || !routeId || routeId === priorThreadId) {
           return readSideEffectFailure(accountBinding, taskDeadlineReached(taskExpiresAt) ? "offline" : "needs_selection",
             "the selected inbox row did not reach a conversation route", taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_route_not_reached");
         }
