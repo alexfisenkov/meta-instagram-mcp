@@ -129,19 +129,21 @@ describe("CompanionHub", () => {
   it("prefers an older ready operation-capable browser over a newer unready bridge", async () => {
     let now = 1_000;
     const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
-    const mac = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    const mac = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list", "conversation.read"] });
     await hub.heartbeat({ bridgeId: mac.bridgeId, bridgeToken: mac.bridgeToken, source: "browser", status: {
-      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["inbox.list", "conversation.read"]
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list", "conversation.read"]
     } });
     now = 2_000;
-    const server = await hub.register({ ...registration, capabilities: ["inbox.list", "conversation.read"] });
+    const server = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list", "conversation.read"] });
     await hub.heartbeat({ bridgeId: server.bridgeId, bridgeToken: server.bridgeToken, source: "browser", status: {
       availability: "unsupported_ui_version", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: []
     } });
 
     expect(await hub.sourceStatus("browser", "acct:one")).toMatchObject({ availability: "unsupported_ui_version", bridgeId: server.bridgeId });
     const inboxReady = await hub.sourceStatus("browser", "acct:one", undefined, "inbox.list");
-    expect(inboxReady).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId, capabilities: ["inbox.list", "conversation.read"] });
+    expect(inboxReady).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId, capabilities: ["account.inspect", "inbox.list", "conversation.read"] });
+    expect((await hub.readinessCandidates("browser", "acct:one", "inbox.list")).map((candidate) => candidate.bridgeId))
+      .toEqual([mac.bridgeId, server.bridgeId]);
     expect(await hub.sourceStatus("browser", "acct:one", mac.bridgeId, "conversation.read")).toMatchObject({ availability: "ready", bridgeId: mac.bridgeId });
     const task = await hub.enqueue({ kind: "read", source: "browser", bridgeId: inboxReady.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: { limit: 2 }, targetRefs: [] });
 
@@ -149,6 +151,28 @@ describe("CompanionHub", () => {
     expect(await hub.poll(server.bridgeId, 1, server.bridgeToken, "browser")).toEqual([]);
     expect(await hub.poll(mac.bridgeId, 1, mac.bridgeToken, "browser")).toMatchObject([{ id: task.id, bridgeId: mac.bridgeId }]);
   }, process.platform === "win32" ? 60_000 : 15_000);
+
+  it("lists only fresh same-account bridges declaring both account inspection and the requested read, newest first, bounded", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
+    await hub.register({ ...registration, accountBinding: "acct:one", capabilities: ["account.inspect", "inbox.list"] }); // expires before discovery
+    now = 7_000;
+    const mac = await hub.register({ ...registration, accountBinding: "acct:one", capabilities: ["account.inspect", "inbox.list"] });
+    now = 7_100;
+    const server = await hub.register({ ...registration, accountBinding: "acct:one", capabilities: ["account.inspect", "inbox.list"] });
+    now = 7_200;
+    const older = await hub.register({ ...registration, accountBinding: "acct:one", capabilities: ["account.inspect", "inbox.list"] });
+    now = 7_300;
+    await hub.register({ ...registration, accountBinding: "acct:one", capabilities: ["account.inspect"] }); // missing requested operation
+    await hub.register({ ...registration, accountBinding: "acct:other", capabilities: ["account.inspect", "inbox.list"] });
+
+    const candidates = await hub.readinessCandidates("browser", "acct:one", "inbox.list");
+
+    expect(candidates.map((candidate) => candidate.bridgeId)).toEqual([older.bridgeId, server.bridgeId, mac.bridgeId]);
+    expect(candidates.every((candidate) => candidate.accountBinding === "acct:one" &&
+      candidate.declaredCapabilities.includes("account.inspect") && candidate.declaredCapabilities.includes("inbox.list"))).toBe(true);
+    expect(candidates).toHaveLength(3);
+  });
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     let now = 1_000;

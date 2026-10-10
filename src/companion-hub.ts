@@ -32,6 +32,13 @@ export interface BridgeTask {
   writeApproval?: SignedUiApproval;
 }
 
+export interface CompanionReadinessCandidate {
+  bridgeId: string;
+  source: BridgeSource;
+  accountBinding: string;
+  declaredCapabilities: string[];
+}
+
 interface CompanionHubOptions {
   storagePath: string;
   leaseMs?: number;
@@ -69,6 +76,7 @@ interface HubState {
 }
 
 const READS = new Set<BridgeOperation>(["account.inspect", "account.snapshot", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read", "context.refresh"]);
+const MAX_READINESS_CANDIDATES = 3;
 const WRITES = new Set<BridgeOperation>([
   "message.send", "message.react", "message.unreact", "comment.reply", "comment.private_reply",
   "comment.hide", "comment.show", "comment.delete", "comment.like", "comment.unlike"
@@ -167,6 +175,26 @@ export class CompanionHub {
       return { source, availability: liveStatus?.availability ?? "offline", capabilities: liveStatus?.capabilities ?? [], accountBinding: bridge.accountBinding, bridgeId: bridge.id,
         ...(liveStatus?.accountHandle ? { accountHandle: liveStatus.accountHandle } : {}), ...(liveStatus?.surface ? { surface: liveStatus.surface } : {}),
         ...(!liveStatus ? { reason: "The companion has not reported verified runtime readiness." } : {}) };
+    });
+  }
+
+  /** Returns a small, fresh, same-account read allowlist for on-demand owner verification. */
+  async readinessCandidates(source: BridgeSource, accountBinding: string, operation: BridgeOperation): Promise<CompanionReadinessCandidate[]> {
+    if (source !== "browser" || !validBinding(accountBinding) || !READS.has(operation) || operation === "context.refresh") return [];
+    return this.read((state) => {
+      const now = this.now();
+      return state.bridges
+        .filter((bridge) => bridge.source === source && bridge.accountBinding === accountBinding &&
+          now - Date.parse(bridge.lastSeenAt) <= this.options.bridgeTtlMs &&
+          bridge.capabilities.includes("account.inspect") && bridge.capabilities.includes(operation))
+        .sort((left, right) => {
+          const leftReady = left.liveStatus?.availability === "ready" && left.liveStatus.capabilities.includes(operation);
+          const rightReady = right.liveStatus?.availability === "ready" && right.liveStatus.capabilities.includes(operation);
+          return Number(rightReady) - Number(leftReady) || Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+        })
+        .slice(0, MAX_READINESS_CANDIDATES)
+        .map((bridge) => ({ bridgeId: bridge.id, source: bridge.source, accountBinding: bridge.accountBinding,
+          declaredCapabilities: [...bridge.capabilities] }));
     });
   }
 

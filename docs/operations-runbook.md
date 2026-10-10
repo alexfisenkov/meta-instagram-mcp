@@ -4,10 +4,11 @@
 
 ## Контракты и границы
 
-- Нативные stdio и Streamable HTTP server регистрируют 27 инструментов: 18 legacy и 9 layered/mutation. Cloud allowlist отдельно содержит 18 legacy tools; не считайте его каталогом нативного runtime.
+- Нативные stdio и Streamable HTTP server регистрируют 27 инструментов: 18 legacy и 9 layered/mutation. Согласованный cloud allowlist содержит 19 инструментов: прежние 18 и named exception `meta_read_source`; `meta_capabilities` уже был разрешён. Фактический deployed cloud catalog нужно читать отдельно — этот checkout не доказывает deployment приватного allowlist. Это исключение не открывает остальные layered/mutation tools; write/auth/stateful resolver операции остаются закрыты. `meta_read_source` честно помечен `readOnlyHint: false`, потому что UI-read может иметь side effect `may_mark_seen`.
+- `meta_read_source` разрешает только read operations `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`. Это не разрешение на send/reply/reaction или другие writes. Проверяйте их результат отдельно от общего snapshot `meta_capabilities`.
 - Для объединённого чтения Direct используйте `meta_read_inbox` или `meta_read_source`. Они маршрутизируют чтение API → browser → phone и возвращают источники, coverage, ограничения и ошибки.
-- `meta_capabilities` показывает текущий runtime status. Он сам не проверяет содержимое Instagram, не запускает OAuth и не доказывает, что live read сработал.
-- Неподключённый, неподдержанный или неавторизованный источник пропускается. При отсутствии подтверждённых наблюдений результат имеет `coverage: unknown`; пустой список не означает пустой inbox.
+- `meta_capabilities` показывает общий runtime status и operation-specific status. Generic browser summary может указывать на самый свежий bridge, даже если тот не прошёл account verification; operation status ищет ready bridge с нужной live capability. Ни один из этих snapshot-запросов не открывает UI и не запускает `account.inspect`. При конкретном unpinned browser read provider может по общему deadline проверить до трёх свежих same-binding bridges, заявивших `account.inspect` и нужную read capability; после owner verification он закрепляет bridge до конца этого чтения. Declared capability сама по себе не означает readiness. Явный row ref не переназначается. Ни summary, ни operation status не доказывает, что последующий live read сработал.
+- Неподключённый, неподдержанный или неавторизованный источник пропускается. При отсутствии подтверждённых наблюдений результат имеет `coverage: unknown`; пустой список не означает пустой inbox. Ошибка owner preflight одного допустимого browser bridge не скрывает другой свежий bridge того же binding, но явный bridge/ref остаётся pinned и fail-closed.
 - Запись в API, browser и phone остаётся отдельным подтверждаемым путём. Read fallback не переключает запись между источниками и не повторяет `OUTCOME_UNKNOWN`.
 
 ## Локально проверить установленный MCP
@@ -49,11 +50,11 @@ Browser companion, который уже зарегистрирован, но е
 - `permission_blocked` означает, что permission status не удалось подтвердить или Meta отклонила запрос. Не делайте вывод об исправной авторизации только по наличию token-файла.
 - `offline` означает транспортную или runtime ошибку. Browser/phone могут быть fallback только если у них есть собственный проверенный источник.
 
-Официальный OAuth flow описан в [Meta setup](meta-setup.md), а callback и token refresh — в [установке](install.md). Повторный consent, права Meta App, доступ Page и подтверждение аккаунта выполняет владелец. Cloud allowlist с legacy API tools не добавляет browser/phone fallback.
+Официальный OAuth flow описан в [Meta setup](meta-setup.md), а callback и token refresh — в [установке](install.md). Повторный consent, права Meta App, доступ Page и подтверждение аккаунта выполняет владелец. Cloud `meta_read_source` маршрутизирует разрешённые чтения через настроенный router; фактическая cloud deployment и каталог проверяются отдельно, а один allowlist entry не доказывает доступность API/browser/phone.
 
 ## Подключить источник
 
-Настройку browser Native Messaging и удалённого Hub выполняйте по [установке](install.md). После регистрации проверьте `meta_capabilities`, затем вызовите `meta_read_inbox`; runtime перепроверит зарегистрированный, но ещё не подтверждённый browser аккаунт перед Direct чтением.
+Настройку browser Native Messaging и удалённого Hub выполняйте по [установке](install.md). После регистрации `meta_capabilities` даёт только общий/per-operation status snapshot; для unpinned read runtime может проверить до трёх свежих browser bridge одного binding, если они объявили `account.inspect` и нужную read capability. Успешная owner-проверка закрепляет тот же bridge для Direct read. Явный browser ref не переназначается, а declared capability без успешного account verification и live operation status не считается готовностью.
 
 Для телефона используйте отдельную [инструкцию Appium/WDA](ios-appium-operator-runbook.md). Phone read проверяет ожидаемый профиль, затем проходит через точные accessibility IDs `Home` и `Messages` или `Inbox`. Этот маршрут покрыт fixtures, но ещё не подтверждён на реальном устройстве и текущей локали Instagram; если label/control не совпадает, источник закрывается со статусом `unsupported_ui_version`.
 

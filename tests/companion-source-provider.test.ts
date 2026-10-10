@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createCompanionSourceProvider } from "../src/companion-source-provider.js";
 import type { CompanionHub } from "../src/companion-hub.js";
+import { createSourceRouter, type SourceProvider } from "../src/source-router.js";
 
 function observation(source: "browser" | "phone", accountBinding = "instagram:42") {
   return {
@@ -57,6 +58,160 @@ describe("companion source provider", () => {
     expect(context.companionBridgeId).toBe(selectedBridgeId);
     expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: selectedBridgeId }));
     expect(vi.mocked(hub.sourceStatus).mock.calls.slice(1).every(([, , bridgeId]) => bridgeId === selectedBridgeId)).toBe(true);
+  });
+
+  it("discovers an older ready same-account browser after the newest account inspection fails, then pins inbox", async () => {
+    let macVerified = false;
+    let nextTask = 0;
+    const assignments: Array<{ operation: string; bridgeId: string }> = [];
+    const receipts = new Map<string, unknown>();
+    const serverUnavailable = {
+      source: "browser", nativeRef: "browser:unavailable", accountBinding: "instagram:42", capturedAt: "2026-10-10T00:00:00.000Z",
+      availability: "needs_selection", coverage: "unknown", historyCompleteness: "unknown",
+      errors: [{ code: "needs_selection", message: "The server browser account is not verified." }]
+    };
+    const inspectReady = {
+      source: "browser", nativeRef: "/direct/inbox/", accountBinding: "instagram:42", capturedAt: "2026-10-10T00:00:01.000Z",
+      availability: "ready", coverage: "complete", historyCompleteness: "not_applicable",
+      data: { username: "owner", loggedIn: true, surface: "instagram", capabilities: ["account.inspect", "inbox.list"] }, errors: []
+    };
+    const inboxReady = {
+      source: "browser", nativeRef: "/direct/inbox/", accountBinding: "instagram:42", capturedAt: "2026-10-10T00:00:02.000Z",
+      availability: "ready", coverage: "partial", historyCompleteness: "limited",
+      data: { username: "owner", items: [{ target: { accountBinding: "instagram:42", nativeId: "thread-mac" } }] }, errors: []
+    };
+    const hub = {
+      readinessCandidates: vi.fn(async (_source: string, binding: string, operation: string) => [
+        { bridgeId: "bridge-server", source: "browser", accountBinding: binding, declaredCapabilities: ["account.inspect", "inbox.list"], lastSeenAt: 200 },
+        { bridgeId: "bridge-mac", source: "browser", accountBinding: binding, declaredCapabilities: ["account.inspect", "inbox.list"], lastSeenAt: 100 }
+      ].filter((candidate) => candidate.declaredCapabilities.includes(operation))),
+      sourceStatus: vi.fn(async (_source: string, binding = "instagram:42", selectedBridgeId?: string, operation?: string) => {
+        const bridgeId = selectedBridgeId ?? (macVerified && operation === "inbox.list" ? "bridge-mac" : "bridge-server");
+        if (bridgeId === "bridge-mac" && macVerified) return { source: "browser", availability: "ready", capabilities: ["account.inspect", "inbox.list"], accountBinding: binding, bridgeId, accountHandle: "owner", surface: "instagram" };
+        return { source: "browser", availability: bridgeId === "bridge-server" ? "needs_selection" : "offline", capabilities: [], accountBinding: binding, bridgeId };
+      }),
+      enqueue: vi.fn(async (input: { operation: string; bridgeId: string }) => {
+        const id = `task-${++nextTask}`;
+        assignments.push({ operation: input.operation, bridgeId: input.bridgeId });
+        const result = input.operation === "account.inspect"
+          ? input.bridgeId === "bridge-server" ? serverUnavailable : inspectReady
+          : inboxReady;
+        if (input.bridgeId === "bridge-mac" && input.operation === "account.inspect") macVerified = true;
+        receipts.set(id, { status: "complete", result });
+        return { id };
+      }),
+      result: vi.fn(async (id: string) => receipts.get(id))
+    } as unknown as CompanionHub;
+    const apiProvider = {
+      source: "api",
+      status: async () => ({ source: "api", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42" }),
+      read: async () => ({ source: "api", nativeRef: "api:unavailable", accountBinding: "instagram:42", capturedAt: "2026-10-10T00:00:00.000Z",
+        availability: "missing_scope", coverage: "unknown", historyCompleteness: "unknown", errors: [{ code: "missing_scope", message: "Direct scope is unavailable." }] })
+    } as unknown as SourceProvider;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+    const router = createSourceRouter({ providers: [apiProvider, provider], timeoutMs: 3_000 });
+
+    const routed = await router.read({ operation: "inbox.list", limit: 5 });
+
+    expect(routed.triedSources).toEqual(["api", "browser"]);
+    expect(routed.observations).toHaveLength(2);
+    expect(routed.observations[0]).toMatchObject({ source: "api", availability: "missing_scope", coverage: "unknown" });
+    expect(routed.observations[1]).toMatchObject({ availability: "ready", data: { items: [{ target: { nativeId: "thread-mac" } }] } });
+    expect(assignments).toEqual([
+      { operation: "account.inspect", bridgeId: "bridge-server" },
+      { operation: "account.inspect", bridgeId: "bridge-mac" },
+      { operation: "inbox.list", bridgeId: "bridge-mac" }
+    ]);
+    expect(hub.readinessCandidates).toHaveBeenCalledWith("browser", "instagram:42", "inbox.list");
+  });
+
+  it("returns the first successful pure account.inspect probe without reading that bridge twice", async () => {
+    let macVerified = false;
+    const assignments: string[] = [];
+    const receipts = new Map<string, unknown>();
+    const hub = {
+      readinessCandidates: vi.fn(async () => [
+        { bridgeId: "bridge-server", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect"] },
+        { bridgeId: "bridge-mac", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect"] }
+      ]),
+      sourceStatus: vi.fn(async (_source: string, binding: string, bridgeId?: string) => bridgeId === "bridge-mac" && macVerified
+        ? { source: "browser", availability: "ready", capabilities: ["account.inspect"], accountBinding: binding, bridgeId,
+          accountHandle: "owner", surface: "instagram" }
+        : { source: "browser", availability: "needs_selection", capabilities: [], accountBinding: binding, bridgeId: bridgeId ?? "bridge-server" }),
+      enqueue: vi.fn(async (input: { bridgeId: string }) => {
+        const id = `inspect-${assignments.length + 1}`;
+        assignments.push(input.bridgeId);
+        const result = input.bridgeId === "bridge-server"
+          ? { ...observation("browser"), availability: "needs_selection", coverage: "unknown", historyCompleteness: "unknown", data: undefined }
+          : { ...observation("browser"), nativeRef: "/direct/inbox/", coverage: "complete", historyCompleteness: "not_applicable",
+            data: { username: "owner", accountBinding: "instagram:42", surface: "instagram", capabilities: ["account.inspect"] } };
+        if (input.bridgeId === "bridge-mac") macVerified = true;
+        receipts.set(id, { status: "complete", result });
+        return { id };
+      }),
+      result: vi.fn(async (id: string) => receipts.get(id))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+
+    const result = await provider.read({ operation: "account.inspect", accountBinding: "instagram:42" });
+
+    expect(result).toMatchObject({ availability: "ready", accountBinding: "instagram:42", data: { username: "owner" } });
+    expect(assignments).toEqual(["bridge-server", "bridge-mac"]);
+    expect(hub.enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not discover another bridge for an explicit account selection or mismatched binding", async () => {
+    const readinessCandidates = vi.fn(async () => [
+      { bridgeId: "bridge-server", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect"] },
+      { bridgeId: "bridge-mac", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect"] }
+    ]);
+    const hub = {
+      readinessCandidates,
+      sourceStatus: vi.fn(async (_source: string, binding: string, bridgeId?: string) => ({ source: "browser", availability: "needs_selection",
+        capabilities: [], accountBinding: binding, bridgeId: bridgeId ?? "bridge-server" })),
+      enqueue: vi.fn(async () => ({ id: "pinned-inspect" })),
+      result: vi.fn(async () => ({ status: "complete", result: { ...observation("browser"), availability: "needs_selection", coverage: "unknown",
+        historyCompleteness: "unknown", data: undefined, errors: [{ code: "needs_selection", message: "owner verification failed" }] } }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+
+    const wrongBinding = await provider.read({ operation: "account.inspect", accountBinding: "instagram:other" });
+    const pinned = await provider.read({ operation: "account.inspect", accountBinding: "instagram:42" },
+      { companionBridgeId: "bridge-server", companionBridgeSelection: "pinned" });
+
+    expect(wrongBinding).toMatchObject({ availability: "needs_selection", errors: [{ code: "account_binding_mismatch" }] });
+    expect(pinned).toMatchObject({ availability: "needs_selection", errors: [{ code: "needs_selection" }] });
+    expect(readinessCandidates).not.toHaveBeenCalled();
+    expect(hub.enqueue).toHaveBeenCalledOnce();
+    expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: "bridge-server" }));
+  });
+
+  it("cancels the active readiness probe and does not start the next candidate after caller abort", async () => {
+    const controller = new AbortController();
+    let markFirstPoll!: () => void;
+    const firstPoll = new Promise<void>((resolve) => { markFirstPoll = resolve; });
+    const hub = {
+      readinessCandidates: vi.fn(async () => [
+        { bridgeId: "bridge-server", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect", "inbox.list"] },
+        { bridgeId: "bridge-mac", source: "browser", accountBinding: "instagram:42", declaredCapabilities: ["account.inspect", "inbox.list"] }
+      ]),
+      sourceStatus: vi.fn(async (_source: string, binding: string, bridgeId?: string) => ({ source: "browser", availability: "offline",
+        capabilities: [], accountBinding: binding, bridgeId: bridgeId ?? "bridge-server" })),
+      enqueue: vi.fn(async (input: { bridgeId: string }) => ({ id: `probe-${input.bridgeId}` })),
+      result: vi.fn(async () => { markFirstPoll(); return { status: "queued" }; }),
+      cancelReadTask: vi.fn(async () => true)
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 500, pollMs: 50 });
+    const pending = provider.prepareRead?.({ operation: "inbox.list", limit: 5 },
+      { signal: controller.signal, deadlineAt: Date.now() + 1_000 });
+
+    await firstPoll;
+    controller.abort(new Error("caller read deadline expired"));
+    await expect(pending).rejects.toThrow(/caller read deadline expired/);
+
+    expect(hub.enqueue).toHaveBeenCalledOnce();
+    expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: "bridge-server", operation: "account.inspect" }));
+    expect(hub.cancelReadTask).toHaveBeenCalledWith("probe-bridge-server");
   });
 
   it("does not reassign a selected bridge that becomes unavailable", async () => {
@@ -152,7 +307,7 @@ describe("companion source provider", () => {
   it("probes a registered browser and verifies the exact account before allowing automatic reads", async () => {
     const accountProbe = { ...observation("browser"), nativeRef: "/direct/inbox/", coverage: "complete" as const,
       historyCompleteness: "not_applicable" as const,
-      data: { username: "owner", surface: "instagram", capabilities: ["inbox.list"] } };
+      data: { username: "owner", accountBinding: "instagram:42", surface: "instagram", capabilities: ["account.inspect", "inbox.list"] } };
     const statuses = [
       { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
       { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
@@ -160,6 +315,8 @@ describe("companion source provider", () => {
         bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }
     ];
     const hub = {
+      readinessCandidates: vi.fn(async (_source: string, accountBinding: string, operation: string) => [{ bridgeId: "bridge-1", source: "browser",
+        accountBinding, declaredCapabilities: ["account.inspect", "inbox.list"] }].filter((candidate) => candidate.declaredCapabilities.includes(operation))),
       sourceStatus: vi.fn(async () => statuses.shift() ?? { source: "browser", availability: "ready", capabilities: ["inbox.list"],
         accountBinding: "instagram:42", bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }),
       enqueue: vi.fn(async () => ({ id: "account-inspect-task" })),
@@ -178,10 +335,12 @@ describe("companion source provider", () => {
 
   it("keeps browser preflight bound to the selected conversation account", async () => {
     const calls: Array<string | undefined> = [];
-    const ready = { source: "browser", availability: "ready", capabilities: ["conversation.read"], accountBinding: "instagram:42",
+    const ready = { source: "browser", availability: "ready", capabilities: ["account.inspect", "conversation.read"], accountBinding: "instagram:42",
       bridgeId: "bridge-selected", accountHandle: "owner", surface: "instagram" };
     let sourceStatusCalls = 0;
     const hub = {
+      readinessCandidates: vi.fn(async (_source: string, accountBinding: string, operation: string) => [{ bridgeId: "bridge-selected", source: "browser",
+        accountBinding, declaredCapabilities: ["account.inspect", "conversation.read"] }].filter((candidate) => candidate.declaredCapabilities.includes(operation))),
       sourceStatus: vi.fn(async (_source: string, accountBinding?: string) => {
         calls.push(accountBinding);
         sourceStatusCalls++;
@@ -195,7 +354,7 @@ describe("companion source provider", () => {
         return { id: "account-inspect-selected" };
       }),
       result: vi.fn(async () => ({ status: "complete", result: { ...observation("browser"),
-        data: { username: "owner", surface: "instagram", capabilities: ["conversation.read"] } } }))
+        data: { username: "owner", accountBinding: "instagram:42", surface: "instagram", capabilities: ["account.inspect", "conversation.read"] } } }))
     } as unknown as CompanionHub;
     const provider = createCompanionSourceProvider({ hub, source: "browser", waitMs: 50, pollMs: 5 });
     const prepareRead = (provider as unknown as { prepareRead(request: unknown): Promise<void> }).prepareRead;
@@ -221,8 +380,27 @@ describe("companion source provider", () => {
     expect(hub.enqueue).not.toHaveBeenCalled();
   });
 
+  it("does not inspect browser candidates for unsupported cursor or insights operations", async () => {
+    const readinessCandidates = vi.fn(async () => [{ bridgeId: "bridge-1", source: "browser", accountBinding: "instagram:42",
+      declaredCapabilities: ["account.inspect", "inbox.list", "insights.read"] }]);
+    const hub = {
+      readinessCandidates,
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
+      enqueue: vi.fn()
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42" });
+
+    await provider.prepareRead?.({ operation: "inbox.list", limit: 5, cursor: "cursor-page-2" });
+    await provider.prepareRead?.({ operation: "insights.read", period: "day" });
+    const cursorRead = await provider.read({ operation: "inbox.list", limit: 5, cursor: "cursor-page-2" });
+
+    expect(cursorRead).toMatchObject({ availability: "unsupported", coverage: "unknown", errors: [{ code: "unsupported_cursor" }] });
+    expect(readinessCandidates).not.toHaveBeenCalled();
+    expect(hub.enqueue).not.toHaveBeenCalled();
+  });
+
   it("rejects a browser probe whose verified account handle differs", async () => {
-    const accountProbe = { ...observation("browser"), data: { username: "other-account", surface: "instagram", capabilities: ["inbox.list"] } };
+    const accountProbe = { ...observation("browser"), data: { username: "other-account", accountBinding: "instagram:42", surface: "instagram", capabilities: ["account.inspect", "inbox.list"] } };
     const statuses = [
       { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
       { source: "browser", availability: "offline", capabilities: [], accountBinding: "instagram:42", bridgeId: "bridge-1" },
@@ -230,6 +408,8 @@ describe("companion source provider", () => {
         bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }
     ];
     const hub = {
+      readinessCandidates: vi.fn(async (_source: string, accountBinding: string, operation: string) => [{ bridgeId: "bridge-1", source: "browser",
+        accountBinding, declaredCapabilities: ["account.inspect", "inbox.list"] }].filter((candidate) => candidate.declaredCapabilities.includes(operation))),
       sourceStatus: vi.fn(async () => statuses.shift() ?? { source: "browser", availability: "ready", capabilities: ["inbox.list"],
         accountBinding: "instagram:42", bridgeId: "bridge-1", accountHandle: "owner", surface: "instagram" }),
       enqueue: vi.fn(async () => ({ id: "account-inspect-task" })),
