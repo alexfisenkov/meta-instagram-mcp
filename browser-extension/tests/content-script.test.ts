@@ -166,6 +166,22 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(clicks).toBe(1);
   });
 
+  it("does not return a visible pre-click message node as content from the newly selected thread", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ preexistingStaleMessage: true, loadMessages: false, readDeadlineMs: 250 });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"],
+      errors: [{ code: "task_deadline_expired" }] });
+    expect(conversation.data?.messages).toBeUndefined();
+    expect(clicks).toBe(1);
+  });
+
+  it("does not treat a hidden pre-click message node as fresh when it becomes visible during navigation", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ hiddenStaleMessageRevealed: true, loadMessages: false, readDeadlineMs: 250 });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"],
+      errors: [{ code: "task_deadline_expired" }] });
+    expect(conversation.data?.messages).toBeUndefined();
+    expect(clicks).toBe(1);
+  });
+
   it("fails closed on ambiguous Direct card groups and stale or switched-account row refs", async () => {
     const ambiguous = await runInboxRowContractFixture({ separateGroups: true, skipRead: true });
     expect(ambiguous.inbox).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "inbox_rows_ambiguous" }] });
@@ -196,10 +212,29 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(wrongTarget.availability).toBe("needs_selection");
   });
 
+  it("reads only visible message nodes inside the selected thread main", async () => {
+    const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/", settings: { disableJavaScriptEvaluation: false } });
+    page.document.write('<!doctype html><html><body><main><div data-message-id="current-message">Current conversation message</div><div data-mid="hidden-message" style="display:none">Hidden stale message</div></main><aside><div data-message-id="other-thread-message">Other thread message</div></aside></body></html>');
+    page.document.close();
+    for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
+    const hidden = page.document.querySelector('[data-mid="hidden-message"]') as HTMLElement;
+    hidden.style.display = "none";
+    installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
+    let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+    Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+    page.eval(contentScript);
+    try {
+      const result = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
+        operation: { op: "thread.read", target: { accountBinding, nativeId: "thread-7" }, limit: 5 } });
+      expect(result.data.messages).toEqual([{ nativeId: "current-message", text: "Current conversation message", direction: "unknown", timestamp: "unknown" }]);
+    } finally { page.happyDOM.abort(); }
+  });
+
   it("scrolls the exact selected thread by the bounded older-history page budget", async () => {
     const html = await readFile(resolve(root, "browser-extension/tests/fixtures/thread.html"), "utf8");
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
     page.document.write(html); page.document.close();
+    for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
     installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
     const scroller = page.document.querySelector('[role="log"]') as HTMLElement;
     Object.defineProperties(scroller, { scrollHeight: { value: 1_000 }, clientHeight: { value: 200 }, scrollTop: { value: 800, writable: true } });
@@ -249,6 +284,7 @@ describe("Instagram content script against DOM fixtures", () => {
     const page = new Window({ url: "https://www.instagram.com/direct/t/thread-7/" });
     page.document.write(html);
     page.document.close();
+    for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
     installOwnProfileControlFixture(page, "https://www.instagram.com/direct/t/thread-7/");
     const form = page.document.createElement("form");
     const input = page.document.createElement("textarea");
@@ -341,6 +377,7 @@ async function runFixture(file: string, url: string, operation: Record<string, u
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write(html);
   page.document.close();
+  for (const node of page.document.querySelectorAll("[data-message-id], [data-mid]")) makeVisible(node);
   installOwnProfileControlFixture(page, url);
   let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
   Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
@@ -359,11 +396,21 @@ async function runFixture(file: string, url: string, operation: Record<string, u
 
 async function runInboxRowContractFixture(options: { shellOnly?: boolean; separateGroups?: boolean; skipRead?: boolean; removeBeforeRead?: boolean;
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
-  duplicateRead?: boolean } = {}) {
+  duplicateRead?: boolean; preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
   const page = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
   page.document.write("<!doctype html><html><body><main><header>Direct</header></main></body></html>");
   page.document.close();
+  let staleToReveal: HTMLElement | undefined;
+  if (options.preexistingStaleMessage || options.hiddenStaleMessageRevealed) {
+    const stale = page.document.createElement("div");
+    stale.setAttribute("data-message-id", "stale-pre-click");
+    stale.textContent = "Stale previous thread";
+    page.document.querySelector("main")?.append(stale);
+    makeVisible(stale);
+    if (options.hiddenStaleMessageRevealed) stale.style.display = "none";
+    if (options.hiddenStaleMessageRevealed) staleToReveal = stale;
+  }
   let clicks = 0;
   const rows: HTMLElement[] = [];
   if (!options.shellOnly) {
@@ -384,11 +431,13 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
           event.preventDefault();
           clicks++;
           page.history.pushState({}, "", "/direct/t/observed-thread-7/");
+          if (staleToReveal) staleToReveal.style.display = "";
           if (options.loadMessages !== false) {
             const message = page.document.createElement("div");
             message.setAttribute("data-message-id", "msg-1");
             message.textContent = "One message";
             page.document.querySelector("main")?.append(message);
+            makeVisible(message);
           }
         });
         const wrapper1 = page.document.createElement("div");

@@ -141,6 +141,18 @@
     return location.pathname.match(/^\/direct\/t\/([^/]+)\/?$/)?.[1];
   }
 
+  function threadMessageNodes() {
+    const main = document.querySelector("main");
+    if (!main) return [];
+    return Array.from(main.querySelectorAll("[data-message-id], [data-mid]")).filter(isVisible);
+  }
+
+  function allThreadMessageNodes() {
+    const main = document.querySelector("main");
+    if (!main) return [];
+    return Array.from(main.querySelectorAll("[data-message-id], [data-mid]"));
+  }
+
   function readSideEffectFailure(accountBinding, availability, message, code) {
     return { ...failure(accountBinding, availability, message, code), sideEffects: ["may_mark_seen"] };
   }
@@ -177,11 +189,12 @@
           inboxRowRefs.delete(rowRef);
           return failure(accountBinding, "needs_selection", "the selected inbox row node changed before navigation", "stale_inbox_row_ref");
         }
-      if (taskDeadlineReached(taskExpiresAt)) {
-        return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
-      }
-      record.navigationStarted = true;
-      try { record.row.click(); }
+        if (taskDeadlineReached(taskExpiresAt)) {
+          return readSideEffectFailure(accountBinding, "offline", "the read task deadline expired before inbox row navigation", "task_deadline_expired");
+        }
+        const priorMessages = new Set(allThreadMessageNodes());
+        record.navigationStarted = true;
+        try { record.row.click(); }
         catch { return readSideEffectFailure(accountBinding, "needs_selection", "the selected inbox row could not be opened", "inbox_row_navigation_failed"); }
         const navigated = await waitUntil(() => Boolean(directThreadIdFromPath()), 1_500, taskExpiresAt);
         const routeId = directThreadIdFromPath();
@@ -191,10 +204,11 @@
         }
         record.openedNativeId = routeId.slice(0, 256);
         expectedId = record.openedNativeId;
+        const loaded = await waitUntil(() => threadMessageNodes().some((node) => !priorMessages.has(node)), 2_500, taskExpiresAt);
+        if (!loaded) return readSideEffectFailure(accountBinding, "offline", "new conversation messages did not load within the bounded read",
+          taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_content_not_loaded");
+        operation.freshMessageNodes = threadMessageNodes().filter((node) => !priorMessages.has(node));
       }
-      const loaded = await waitUntil(() => Boolean(document.querySelector("[data-message-id], [data-mid]")), 2_500, taskExpiresAt);
-      if (!loaded) return readSideEffectFailure(accountBinding, "offline", "conversation messages did not load within the bounded read",
-        taskDeadlineReached(taskExpiresAt) ? "task_deadline_expired" : "conversation_content_not_loaded");
     } else {
       return failure(accountBinding, "needs_selection", "the conversation reference is not supported by this browser reader");
     }
@@ -210,11 +224,13 @@
       }
       scroller = findMessageScroller();
     }
+    if (directThreadIdFromPath() !== expectedId) return failure(accountBinding, "needs_selection", "the selected conversation route changed before the read completed", "conversation_route_changed");
 
     const limit = boundedInteger(operation.limit, 1, MAX_LIMIT, 50);
     const messages = [];
     const seen = new Set();
-    for (const node of document.querySelectorAll('[data-message-id], [data-mid]')) {
+    const messageNodes = Array.isArray(operation.freshMessageNodes) ? operation.freshMessageNodes : threadMessageNodes();
+    for (const node of messageNodes) {
       const id = node.getAttribute("data-message-id") || node.getAttribute("data-mid");
       if (!id || seen.has(id)) continue;
       seen.add(id);
