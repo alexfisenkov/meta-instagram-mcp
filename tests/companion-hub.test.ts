@@ -10,11 +10,11 @@ import { createHash } from "node:crypto";
 
 const roots: string[] = [];
 const authorities = new WeakMap<CompanionHub, Awaited<ReturnType<typeof createUiApprovalAuthority>>>();
-async function makeHub(options: { leaseMs?: number; now?: () => number } = {}) {
+async function makeHub(options: { leaseMs?: number; bridgeTtlMs?: number; now?: () => number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "instagram-hub-"));
   roots.push(root);
   const authority = await createUiApprovalAuthority({ privateKeyPath: join(root, "approval.json"), projectRoot: process.cwd() });
-  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: options.leaseMs ?? 30_000, now: options.now, approvalPublicKey: authority.publicKey });
+  const hub = new CompanionHub({ storagePath: join(root, "hub.json"), leaseMs: options.leaseMs ?? 30_000, bridgeTtlMs: options.bridgeTtlMs, now: options.now, approvalPublicKey: authority.publicKey });
   authorities.set(hub, authority);
   return hub;
 }
@@ -89,6 +89,41 @@ describe("CompanionHub", () => {
     expect(await hub.sourceStatus("phone", "acct:one")).toMatchObject({
       availability: "ready", capabilities: ["inbox.list", "comment.like"], accountBinding: "acct:one"
     });
+  });
+
+  it("pins readiness and read delivery to the same selected bridge", async () => {
+    let now = 1_000;
+    const hub = await makeHub({ now: () => now, bridgeTtlMs: 5_000 });
+    const bridgeA = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list"] });
+    await hub.heartbeat({ bridgeId: bridgeA.bridgeId, bridgeToken: bridgeA.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+    now = 2_000;
+    const bridgeB = await hub.register({ ...registration, capabilities: ["account.inspect", "inbox.list"] });
+    await hub.heartbeat({ bridgeId: bridgeB.bridgeId, bridgeToken: bridgeB.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+
+    const selected = await hub.sourceStatus("browser", "acct:one");
+    expect(selected).toMatchObject({ availability: "ready", bridgeId: bridgeB.bridgeId });
+    const inspect = await hub.enqueue({ kind: "read", source: "browser", bridgeId: selected.bridgeId, accountBinding: "acct:one", operation: "account.inspect", payload: {}, targetRefs: [] });
+    const inbox = await hub.enqueue({ kind: "read", source: "browser", bridgeId: selected.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: { limit: 4 }, targetRefs: [] });
+
+    expect(await hub.poll(bridgeA.bridgeId, 2, bridgeA.bridgeToken, "browser")).toEqual([]);
+    expect(await hub.poll(bridgeB.bridgeId, 2, bridgeB.bridgeToken, "browser")).toMatchObject([
+      { id: inspect.id, bridgeId: bridgeB.bridgeId, operation: "account.inspect" },
+      { id: inbox.id, bridgeId: bridgeB.bridgeId, operation: "inbox.list" }
+    ]);
+
+    now = 4_000;
+    await hub.heartbeat({ bridgeId: bridgeA.bridgeId, bridgeToken: bridgeA.bridgeToken, source: "browser", status: {
+      availability: "ready", accountBinding: "acct:one", accountHandle: "owner", surface: "instagram", capabilities: ["account.inspect", "inbox.list"]
+    } });
+    now = 7_001;
+    expect(await hub.sourceStatus("browser", "acct:one")).toMatchObject({ availability: "ready", bridgeId: bridgeA.bridgeId });
+    expect(await hub.sourceStatus("browser", "acct:one", bridgeB.bridgeId)).toMatchObject({ availability: "not_connected", capabilities: [] });
+    await expect(hub.enqueue({ kind: "read", source: "browser", bridgeId: bridgeB.bridgeId, accountBinding: "acct:one", operation: "inbox.list", payload: {}, targetRefs: [] }))
+      .rejects.toThrow(/no assigned bridge available/i);
   });
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {

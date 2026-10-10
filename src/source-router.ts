@@ -6,7 +6,7 @@ export type ReadRequest = ApiReadRequest;
 
 export interface SourceProvider {
   readonly source: Exclude<SourceId, "user_supplied">;
-  status(operation?: ReadRequest["operation"], context?: SourceReadContext): Promise<{ source: SourceId; availability: Availability; capabilities: string[]; reason?: string; accountBinding?: string }>;
+  status(operation?: ReadRequest["operation"], context?: SourceReadContext): Promise<{ source: SourceId; availability: Availability; capabilities: string[]; reason?: string; accountBinding?: string; bridgeId?: string }>;
   /** Optional bounded, read-only source bootstrap before the requested read. */
   prepareRead?(request: ReadRequest, context?: SourceReadContext): Promise<void>;
   read(request: ReadRequest, context?: SourceReadContext): Promise<Observation<unknown>>;

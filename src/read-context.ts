@@ -3,4 +3,6 @@ export interface SourceReadContext {
   signal?: AbortSignal;
   /** Epoch-millisecond cutoff for starting or continuing provider work. */
   deadlineAt?: number;
+  /** Companion identity selected during readiness; later stages must keep the same bridge. */
+  companionBridgeId?: string;
 }

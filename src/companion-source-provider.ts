@@ -29,26 +29,35 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       if (options.source !== "browser" || request.operation === "account.inspect") return;
       throwIfReadStopped(context, now);
       const target = "target" in request ? request.target : undefined;
-      const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding);
+      const initial = await options.hub.sourceStatus(options.source, target?.accountBinding ?? options.accountBinding, context?.companionBridgeId);
       throwIfReadStopped(context, now);
+      if (context?.companionBridgeId && initial.bridgeId && initial.bridgeId !== context.companionBridgeId) {
+        throw new Error("Selected companion changed during browser preflight.");
+      }
+      if (context && !context.companionBridgeId && initial.bridgeId) context.companionBridgeId = initial.bridgeId;
       if (initial.availability !== "offline" || !initial.bridgeId || !initial.accountBinding) return;
 
       const probe = await provider.read({ operation: "account.inspect", accountBinding: initial.accountBinding }, context);
       const probeData = isRecord(probe.data) ? probe.data : undefined;
-      const verified = await options.hub.sourceStatus(options.source, initial.accountBinding);
+      const verified = await options.hub.sourceStatus(options.source, initial.accountBinding, initial.bridgeId);
       throwIfReadStopped(context, now);
       const accountHandle = verified.accountHandle?.toLowerCase();
       if (probe.availability !== "ready" || probe.accountBinding !== initial.accountBinding ||
           !probeData || typeof probeData.username !== "string" || !accountHandle ||
           probeData.username.toLowerCase() !== accountHandle || verified.availability !== "ready" ||
-          verified.accountBinding !== initial.accountBinding || verified.surface !== "instagram") {
+          verified.accountBinding !== initial.accountBinding || verified.bridgeId !== initial.bridgeId || verified.surface !== "instagram") {
         throw new Error("Registered browser companion did not verify the selected Instagram account.");
       }
     },
     async status(operation, context) {
       if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped before companion readiness check." };
-      const status = await options.hub.sourceStatus(options.source, options.accountBinding);
+      const status = await options.hub.sourceStatus(options.source, options.accountBinding, context?.companionBridgeId);
       if (isReadStopped(context, now)) return { source: options.source, availability: "offline", capabilities: [], reason: "Read stopped during companion readiness check." };
+      if (context?.companionBridgeId && status.bridgeId !== context.companionBridgeId) {
+        return { source: options.source, availability: "offline", capabilities: [], accountBinding: options.accountBinding,
+          reason: "The selected companion identity is no longer available." };
+      }
+      if (context && !context.companionBridgeId && status.bridgeId) context.companionBridgeId = status.bridgeId;
       if (operation && status.availability === "ready" && !status.capabilities.includes(operation)) {
         return { ...status, availability: "unsupported", reason: `The connected companion does not report ${operation}.` };
       }
@@ -77,9 +86,13 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
         browserPageBudget = cursor.pageBudget;
       }
       const accountBinding = target?.accountBinding ?? requestedAccountBinding ?? options.accountBinding;
-      const status = await options.hub.sourceStatus(options.source, accountBinding);
+      const status = await options.hub.sourceStatus(options.source, accountBinding, context?.companionBridgeId);
       const resolvedAccountBinding = accountBinding ?? status.accountBinding;
       if (isReadStopped(context, now)) return readStoppedObservation(options.source, resolvedAccountBinding ?? "unresolved", context, now);
+      if (!status.bridgeId || (context?.companionBridgeId && status.bridgeId !== context.companionBridgeId)) {
+        return unavailable(options.source, resolvedAccountBinding ?? "unresolved", "offline", "The selected companion identity is no longer available.", "bridge_selection_unavailable");
+      }
+      if (context && !context.companionBridgeId) context.companionBridgeId = status.bridgeId;
       const bootstrap = request.operation === "account.inspect" && options.source === "browser" && Boolean(status.bridgeId);
       if ((status.availability !== "ready" && !bootstrap) || !resolvedAccountBinding ||
           (status.availability === "ready" && !status.capabilities.includes(request.operation))) {
@@ -101,7 +114,7 @@ export function createCompanionSourceProvider(options: CompanionSourceProviderOp
       }
       let task;
       try {
-        task = await options.hub.enqueue({ kind: "read", source: options.source, accountBinding: resolvedAccountBinding, operation, payload, targetRefs, ttlMs: taskTtlMs });
+        task = await options.hub.enqueue({ kind: "read", source: options.source, bridgeId: status.bridgeId, accountBinding: resolvedAccountBinding, operation, payload, targetRefs, ttlMs: taskTtlMs });
       } catch (error) {
         return unavailable(options.source, resolvedAccountBinding, "offline", safeReason(error), "enqueue_failed");
       }

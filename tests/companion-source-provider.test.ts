@@ -13,7 +13,7 @@ function observation(source: "browser" | "phone", accountBinding = "instagram:42
 describe("companion source provider", () => {
   it("uses live per-operation readiness instead of registration capabilities", async () => {
     const hub = {
-      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["comments.list"], accountBinding: "instagram:42" }))
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["comments.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" }))
     } as unknown as CompanionHub;
     const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42" });
 
@@ -26,7 +26,7 @@ describe("companion source provider", () => {
   it("preserves the companion observation provenance and unknown triage state", async () => {
     const result = observation("browser");
     const hub = {
-      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42" })),
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
       enqueue: vi.fn(async () => ({ id: "task-1" })),
       result: vi.fn(async () => ({ status: "complete", result }))
     } as unknown as CompanionHub;
@@ -40,12 +40,51 @@ describe("companion source provider", () => {
     }));
   });
 
+  it("delivers a read through the exact bridge whose readiness passed", async () => {
+    const selectedBridgeId = "bridge-selected";
+    const hub = {
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: selectedBridgeId })),
+      enqueue: vi.fn(async () => ({ id: "task-selected" })),
+      result: vi.fn(async () => ({ status: "complete", result: observation("browser") }))
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", waitMs: 50, pollMs: 5 });
+    const context: { signal?: AbortSignal; deadlineAt?: number; companionBridgeId?: string } = {};
+
+    expect(await provider.status("inbox.list", context)).toMatchObject({ availability: "ready", bridgeId: selectedBridgeId });
+    const result = await provider.read({ operation: "inbox.list", limit: 4 }, context);
+
+    expect(result.availability).toBe("ready");
+    expect(context.companionBridgeId).toBe(selectedBridgeId);
+    expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: selectedBridgeId }));
+    expect(vi.mocked(hub.sourceStatus).mock.calls.slice(1).every(([, , bridgeId]) => bridgeId === selectedBridgeId)).toBe(true);
+  });
+
+  it("does not reassign a selected bridge that becomes unavailable", async () => {
+    const selectedBridgeId = "bridge-selected";
+    const hub = {
+      sourceStatus: vi.fn(async (_source: string, _binding?: string, bridgeId?: string) => bridgeId
+        ? { source: "browser", availability: "not_connected", capabilities: [], accountBinding: "instagram:42", reason: "Selected companion expired." }
+        : { source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: selectedBridgeId }),
+      enqueue: vi.fn()
+    } as unknown as CompanionHub;
+    const provider = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42" });
+    const context: { companionBridgeId?: string } = {};
+
+    expect(await provider.status("inbox.list", context)).toMatchObject({ availability: "ready", bridgeId: selectedBridgeId });
+    const result = await provider.read({ operation: "inbox.list", limit: 4 }, context);
+
+    expect(result).toMatchObject({ availability: "offline", coverage: "unknown", errors: [{ code: "bridge_selection_unavailable" }] });
+    expect(context.companionBridgeId).toBe(selectedBridgeId);
+    expect(vi.mocked(hub.sourceStatus)).toHaveBeenLastCalledWith("browser", "instagram:42", selectedBridgeId);
+    expect(hub.enqueue).not.toHaveBeenCalled();
+  });
+
   it("cancels a queued read on abort and stops polling the Hub", async () => {
     const controller = new AbortController();
     let markFirstPoll!: () => void;
     const firstPoll = new Promise<void>((resolve) => { markFirstPoll = resolve; });
     const hub = {
-      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42" })),
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
       enqueue: vi.fn(async () => ({ id: "task-cancel-me" })),
       result: vi.fn(async () => { markFirstPoll(); return { status: "queued" }; }),
       cancelReadTask: vi.fn(async () => true)
@@ -158,7 +197,7 @@ describe("companion source provider", () => {
     const target = { accountBinding: "instagram:42", nativeId: "thread-42" };
     let current = { ...observation("browser"), nativeRef: "/direct/t/thread-42/", data: { username: "fixture", messages: [], olderAvailable: true } };
     const hub = {
-      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["conversation.read"], accountBinding: "instagram:42" })),
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["conversation.read"], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
       enqueue: vi.fn(async () => ({ id: "task-older" })),
       result: vi.fn(async () => ({ status: "complete", result: current }))
     } as unknown as CompanionHub;
@@ -185,7 +224,7 @@ describe("companion source provider", () => {
     [{ operation: "comments.replies", target: { accountBinding: "instagram:42", nativeId: "comment-1" }, cursor: "api-cursor-next" }, "comments.replies"]
   ] as const)("fails closed when browser does not implement %s pagination", async (request, operation) => {
     const hub = {
-      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: [operation], accountBinding: "instagram:42" })),
+      sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: [operation], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
       enqueue: vi.fn(async () => ({ id: "unexpected-task" })),
       result: vi.fn(async () => ({ status: "complete", result: observation("browser") }))
     } as unknown as CompanionHub;
