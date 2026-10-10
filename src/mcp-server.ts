@@ -1,10 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { createToolHandlers } from "./tools.js";
 import type { LayeredToolHandlers } from "./layered-tools.js";
 
 export type ExistingToolHandlers = ReturnType<typeof createToolHandlers>;
+
+const packageVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 const jsonToolResult = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
@@ -13,7 +16,7 @@ const jsonToolResult = (data: unknown) => ({
 export function createMcpServer(handlers: ExistingToolHandlers = createToolHandlers({ config: loadConfig() }), layered?: LayeredToolHandlers): McpServer {
   const server = new McpServer({
     name: "meta-instagram-mcp",
-    version: "0.2.0"
+    version: packageVersion
   });
 
   server.registerTool(

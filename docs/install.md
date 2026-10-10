@@ -181,7 +181,7 @@ Extension ID должен оставаться стабильным между �
 
 ### Companion с подключённым телефоном
 
-Для обязательных prerequisites, loopback readiness checks и безопасного Direct smoke используйте отдельный [iPhone/Appium operator runbook](ios-appium-operator-runbook.md). Сценарии ниже описывают формат внешней phone-конфигурации и bridge contract.
+Ниже приведены поддержанные prerequisites, формат внешней phone-конфигурации и bridge contract. Setup examples не доказывают live readiness реального устройства.
 
 Телефонный companion запускается на том же компьютере, где доступны выбранное устройство и настроенный Appium. Для iOS нужны Xcode, Appium, WebDriverAgent (WDA) и Instagram; для Android — Appium с UiAutomator2 и Instagram. Конфигурация хранится вне каталога приложения и содержит секрет Hub и идентификатор выбранного устройства — не коммитьте её и не пересылайте вместе с логами.
 
@@ -309,7 +309,7 @@ Registering the host does not install or sign the extension, establish bridge cr
 
 | Часть | Значение |
 |---|---|
-| Extension | `<app>/browser-extension`; `nativeMessaging`, `alarms`, `scripting` и только Instagram host permissions. Фиксированный content script внедряется в выбранную вкладку только после точного ping error «Receiving end does not exist»; read/write task затем dispatch once. |
+| Extension | `<app>/browser-extension`; `nativeMessaging`, `alarms`, `scripting`, `storage` и только Instagram host permissions. `storage.session` хранит tab ID, account binding и состояние владения одной созданной read-вкладкой; bridge ID rotation не инвалидирует саму managed surface. Marker не содержит tokens, usernames, переписки или row refs. Фиксированный content script внедряется в выбранную вкладку только после точного ping error «Receiving end does not exist»; read/write task затем dispatch once. |
 | Runtime asset | `<app>/dist/companion/browser-native-host.js`; Windows launcher — `<app>/tools/native-host/InstagramNativeHost.exe`. |
 | Host name | `com.alexfisenkov.instagram_companion`; origin allowlist — один `chrome-extension://<id>/`. |
 | Private bridge file | macOS/Linux путь задаётся в launcher как `INSTAGRAM_MCP_BRIDGE_CONFIG`; Windows default — `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. |
