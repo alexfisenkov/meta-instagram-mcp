@@ -1,6 +1,6 @@
 {
   "name": "meta-instagram-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Unified Instagram MCP with official Meta API and connected browser/phone companions.",

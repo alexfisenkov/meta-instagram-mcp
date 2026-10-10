@@ -2,6 +2,10 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
+## 0.2.3 — 2026-10-11
+
+- Browser Direct row navigation waits for a verified thread-route transition within the remaining Hub read-task deadline. Expiry or an unchanged route remains unknown; the operation does not click again. This source-level regression does not establish the cause of any earlier live failure or a live account read.
+
 ## 0.2.2 — 2026-10-10
 
 - Для unpinned browser read runtime может проверить до трёх свежих bridge того же account binding, которые объявили `account.inspect` и запрошенную read capability. Первый bridge, прошедший account verification и live operation check, закрепляется для чтения; API → browser → phone порядок и общий read deadline сохраняются. Явные bridge/row refs не переназначаются; discovery не работает в фоне и не разрешает writes.

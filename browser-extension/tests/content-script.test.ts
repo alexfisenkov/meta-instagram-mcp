@@ -194,6 +194,21 @@ describe("Instagram content script against DOM fixtures", () => {
     expect(clicks).toBe(1);
   });
 
+  it("waits for a selected row route transition within the existing read deadline", async () => {
+    const { conversation, clicks, url } = await runInboxRowContractFixture({ routeChangeDelayMs: 1_700, readDeadlineMs: 4_500 });
+    expect(conversation).toMatchObject({ availability: "ready", source: "browser", sideEffects: ["may_mark_seen"],
+      data: { messages: [{ nativeId: "msg-1", text: "One message" }] } });
+    expect(clicks).toBe(1);
+    expect(url).toBe("https://www.instagram.com/direct/t/observed-thread-7/");
+  });
+
+  it("does not repeat the row click after the existing read deadline expires", async () => {
+    const { conversation, clicks } = await runInboxRowContractFixture({ routeChangeDelayMs: 1_700, readDeadlineMs: 250, settleAfterReadMs: 1_800 });
+    expect(conversation).toMatchObject({ availability: "offline", coverage: "unknown", sideEffects: ["may_mark_seen"],
+      errors: [{ code: "task_deadline_expired" }] });
+    expect(clicks).toBe(1);
+  });
+
   it("does not reuse an opened row ref to navigate to a changed conversation route", async () => {
     const { conversationAgain, clicks, url } = await runInboxRowContractFixture({ reuseReadRef: true, changeRouteBeforeReuse: true });
     expect(conversationAgain).toMatchObject({ availability: "needs_selection", coverage: "unknown", errors: [{ code: "stale_inbox_row_ref" }] });
@@ -562,6 +577,8 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
   switchAccountBeforeRead?: boolean; loadMessages?: boolean; readDeadlineMs?: number; reuseReadRef?: boolean; changeRouteBeforeReuse?: boolean;
   changeRouteAwayAndBackBeforeReuse?: boolean;
   duplicateRead?: boolean; concurrentDistinctRefs?: boolean; inspectDuringRead?: boolean; noRouteChange?: boolean;
+  routeChangeDelayMs?: number;
+  settleAfterReadMs?: number;
   preexistingStaleMessage?: boolean; hiddenStaleMessageRevealed?: boolean; outOfMainStaleMessageMoved?: boolean;
   loadEventEntries?: boolean; nativeTargetReadAfterProof?: boolean | { op: string; pages?: number }; scrollFixture?: boolean } = {}) {
   const url = "https://www.instagram.com/direct/inbox/";
@@ -609,33 +626,37 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
         row.addEventListener("click", (event) => {
           event.preventDefault();
           clicks++;
-          if (!options.noRouteChange) page.history.pushState({}, "", "/direct/t/observed-thread-7/");
-          if (staleToReveal) staleToReveal.style.display = "";
-          if (staleToMove) page.document.querySelector("main")?.append(staleToMove);
-          if (options.loadEventEntries) {
-            page.document.querySelector("main")?.setAttribute("role", "main");
-            for (const text of ["Older history is unavailable", "A story was shared"]) {
-              const entry = page.document.createElement("div");
-              entry.setAttribute("role", "article");
-              entry.textContent = text;
-              page.document.querySelector("main")?.append(entry);
-              makeVisible(entry);
+          const finishNavigation = () => {
+            if (!options.noRouteChange) page.history.pushState({}, "", "/direct/t/observed-thread-7/");
+            if (staleToReveal) staleToReveal.style.display = "";
+            if (staleToMove) page.document.querySelector("main")?.append(staleToMove);
+            if (options.loadEventEntries) {
+              page.document.querySelector("main")?.setAttribute("role", "main");
+              for (const text of ["Older history is unavailable", "A story was shared"]) {
+                const entry = page.document.createElement("div");
+                entry.setAttribute("role", "article");
+                entry.textContent = text;
+                page.document.querySelector("main")?.append(entry);
+                makeVisible(entry);
+              }
             }
-          }
-          if (options.loadMessages !== false) {
-            const message = page.document.createElement("div");
-            message.setAttribute("data-message-id", "msg-1");
-            message.textContent = "One message";
-            page.document.querySelector("main")?.append(message);
-            makeVisible(message);
-          }
-          if (options.loadMessages !== false && options.scrollFixture) {
-            scroller = page.document.createElement("div");
-            scroller.setAttribute("role", "log");
-            page.document.querySelector("main")?.append(scroller);
-            Object.defineProperties(scroller, { scrollHeight: { value: 1_000 }, clientHeight: { value: 200 }, scrollTop: { value: 800, writable: true } });
-            makeVisible(scroller);
-          }
+            if (options.loadMessages !== false) {
+              const message = page.document.createElement("div");
+              message.setAttribute("data-message-id", "msg-1");
+              message.textContent = "One message";
+              page.document.querySelector("main")?.append(message);
+              makeVisible(message);
+            }
+            if (options.loadMessages !== false && options.scrollFixture) {
+              scroller = page.document.createElement("div");
+              scroller.setAttribute("role", "log");
+              page.document.querySelector("main")?.append(scroller);
+              Object.defineProperties(scroller, { scrollHeight: { value: 1_000 }, clientHeight: { value: 200 }, scrollTop: { value: 800, writable: true } });
+              makeVisible(scroller);
+            }
+          };
+          if (options.routeChangeDelayMs) setTimeout(finishNavigation, options.routeChangeDelayMs);
+          else finishNavigation();
         });
         const wrapper1 = page.document.createElement("div");
         const wrapper2 = page.document.createElement("div");
@@ -703,6 +724,7 @@ async function runInboxRowContractFixture(options: { shellOnly?: boolean; separa
       conversationAgain = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov",
         taskExpiresAt: new Date(Date.now() + 5_000).toISOString(), operation: { op: "thread.read", target: inbox.data.items[0].target, limit: 2 } });
     }
+    if (options.settleAfterReadMs) await new Promise((resolve) => setTimeout(resolve, options.settleAfterReadMs));
     return { inbox, conversation, conversationAgain, conversationDuplicate, concurrentConversation, concurrentInspect, conversationNative, scroller, clicks, url: page.location.href };
   } finally { page.happyDOM.abort(); }
 }
