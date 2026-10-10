@@ -34,7 +34,55 @@ describe("Browser Native Messaging host", () => {
     expect(received.find((message) => isRecord(message) && message.kind === "task")).toMatchObject({
       kind: "task", task: { operation: "account.inspect", targetRefs: [] }
     });
-    host.close();
+    await host.close();
+  });
+
+  it("quiesces after a deferred heartbeat and drops tasks returned by a poll after close starts", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let markPollStarted!: () => void;
+    let releasePoll!: (tasks: BridgeTask[]) => void;
+    const pollStarted = new Promise<void>((resolve) => { markPollStarted = resolve; });
+    const pollGate = new Promise<BridgeTask[]>((resolve) => { releasePoll = resolve; });
+    const client = bridgeClient([readTask]);
+    client.poll = vi.fn(async () => { markPollStarted(); return pollGate; });
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 30_000, log: vi.fn() });
+    const received = readFrames(output);
+    await host.start();
+    input.write(encodeNativeFrame({ kind: "hello", version: 1 }));
+    await pollStarted;
+    const closing = host.close();
+    expect(host.close()).toBe(closing);
+    releasePoll([readTask]);
+    await closing;
+    expect(client.poll).toHaveBeenCalledOnce();
+    expect(client.submit).not.toHaveBeenCalled();
+    expect(received.some((message) => isRecord(message) && message.kind === "task")).toBe(false);
+    input.end();
+    output.end();
+  });
+
+  it("does not poll after close while the heartbeat already in flight settles", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let markHeartbeatStarted!: () => void;
+    let releaseHeartbeat!: () => void;
+    const heartbeatStarted = new Promise<void>((resolve) => { markHeartbeatStarted = resolve; });
+    const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
+    const client = bridgeClient([readTask]);
+    client.heartbeat = vi.fn(async () => { markHeartbeatStarted(); await heartbeatGate; });
+    const host = createBrowserNativeHost({ client, accountBinding, expectedAccountHandle: "alexfisenkov", input, output, pollIntervalMs: 30_000, log: vi.fn() });
+    await host.start();
+    input.write(encodeNativeFrame({ kind: "hello", version: 1 }));
+    await heartbeatStarted;
+    const closing = host.close();
+    releaseHeartbeat();
+    await closing;
+    expect(client.heartbeat).toHaveBeenCalledOnce();
+    expect(client.poll).not.toHaveBeenCalled();
+    expect(client.submit).not.toHaveBeenCalled();
+    input.end();
+    output.end();
   });
 
   it("waits for account verification heartbeat before completing the bootstrap read", async () => {
@@ -64,7 +112,7 @@ describe("Browser Native Messaging host", () => {
     releaseHeartbeat();
     await waitFor(() => vi.mocked(client.submit).mock.calls.length === 1);
     expect(client.heartbeat).toHaveBeenCalledWith("bridge-1", expect.objectContaining({ availability: "ready", accountHandle: "alexfisenkov" }));
-    host.close();
+    await host.close();
   });
 
   it("does not redispatch a leased read while Hub receipt submission is in flight", async () => {
@@ -95,11 +143,18 @@ describe("Browser Native Messaging host", () => {
       await waitFor(() => vi.mocked(client.poll).mock.calls.length >= 2);
       expect(received.filter((message) => isRecord(message) && message.kind === "task")).toHaveLength(1);
       expect(client.submit).toHaveBeenCalledOnce();
+      const closing = host.close();
+      let closeResolved = false;
+      void closing.then(() => { closeResolved = true; });
+      expect(host.close()).toBe(closing);
+      expect(closeResolved).toBe(false);
       releaseSubmit();
+      await closing;
+      expect(closeResolved).toBe(true);
       await waitFor(() => submitted);
     } finally {
       releaseSubmit();
-      host.close();
+      await host.close();
       input.end();
       output.end();
     }
@@ -130,7 +185,7 @@ describe("Browser Native Messaging host", () => {
       await waitFor(() => vi.mocked(client.submit).mock.calls.length === 2);
       expect(client.submit).toHaveBeenCalledTimes(2);
     } finally {
-      host.close();
+      await host.close();
       input.end();
       output.end();
     }
@@ -156,7 +211,7 @@ describe("Browser Native Messaging host", () => {
     input.write(encodeNativeFrame({ kind: "result", taskId: readTask.id, result: observation, contextHash: readTask.contextHash }));
     await waitFor(() => vi.mocked(client.submit).mock.calls.length === 1);
     expect(client.submit).toHaveBeenCalledWith("bridge-1", "task-read", observation, "context-1");
-    host.close();
+    await host.close();
   });
 
   it("fails closed on account mismatch and leaves writes disabled by default", async () => {
@@ -173,7 +228,7 @@ describe("Browser Native Messaging host", () => {
       status: "FAILED", reason: "browser write gate is disabled"
     }, writeTask.contextHash);
     expect(received.some((message) => isRecord(message) && message.kind === "task")).toBe(false);
-    host.close();
+    await host.close();
   });
 
   it("requires a trusted approval adapter before forwarding a write lease", async () => {
@@ -208,7 +263,7 @@ describe("Browser Native Messaging host", () => {
       kind: "task", approval: { taskId: writeTask.id, requestId: "approved-123456789012", expectedFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
       task: { kind: "write", operation: "message.send" }
     });
-    host.close();
+    await host.close();
   });
 
   it("replaces mismatched account/context results with a bounded failure receipt", async () => {
@@ -235,7 +290,7 @@ describe("Browser Native Messaging host", () => {
       expect(receipt).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown" });
       expect(contextHash).toBe("context-1");
     }
-    host.close();
+    await host.close();
   });
 
   it("rejects caller-supplied selectors, script keys, and account-mismatched bridge tasks", async () => {
@@ -252,7 +307,7 @@ describe("Browser Native Messaging host", () => {
     await waitFor(() => logs.length >= 2);
     expect(received.some((message) => isRecord(message) && message.kind === "task")).toBe(false);
     expect(client.submit).not.toHaveBeenCalled();
-    host.close();
+    await host.close();
   });
 
   it("completes a real outbound register, heartbeat, poll, and result round-trip on localhost", async () => {

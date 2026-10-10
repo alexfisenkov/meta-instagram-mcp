@@ -276,7 +276,7 @@ describe("runtime composition", () => {
       expect(writeCount).toBe(2);
     } finally {
       await client.close(); await server.close(); await restartedClient?.close(); await restartedServer?.close();
-      host.close(); input.end(); output.end();
+      await host.close(); input.end(); output.end();
     }
   }, process.platform === "win32" ? 120_000 : 15_000);
 
@@ -338,7 +338,7 @@ describe("runtime composition", () => {
       expect(taskOperations).toEqual(["account.inspect", "inbox.list"]);
       expect(await hub.sourceStatus("browser", "instagram:42")).toMatchObject({ availability: "ready", accountHandle: "alexfisenkov", surface: "instagram", capabilities: expect.arrayContaining(["inbox.list"]) });
     } finally {
-      await client.close(); await server?.close(); host.close(); input.end(); output.end();
+      await client.close(); await server?.close(); await host.close(); input.end(); output.end();
     }
   }, process.platform === "win32" ? 90_000 : 15_000);
 

@@ -54,6 +54,74 @@ describe("standalone phone companion", () => {
     await phone.close();
   });
 
+  it("drains an already-started one-shot phone write before idempotent close resolves", async () => {
+    const keyRoot = await mkdtemp(join(tmpdir(), "phone-close-approval-"));
+    const authority = await createUiApprovalAuthority({ privateKeyPath: join(keyRoot, "key.json"), projectRoot: process.cwd() });
+    const device = appium();
+    const client = bridge();
+    client.register = vi.fn(async () => ({ bridgeId: "bridge-fixture-0001", approvalPublicKey: authority.publicKey }));
+    let markExecuteStarted!: () => void;
+    let releaseExecute!: (result: { status: "OUTCOME_UNKNOWN"; reason: string }) => void;
+    const executeStarted = new Promise<void>((resolve) => { markExecuteStarted = resolve; });
+    const executeGate = new Promise<{ status: "OUTCOME_UNKNOWN"; reason: string }>((resolve) => { releaseExecute = resolve; });
+    const ui = provider({ execute: vi.fn(async () => { markExecuteStarted(); return executeGate; }) });
+    const phone = createPhoneCompanion({ appium: device, client, provider: ui, trustedApprovalPublicKey: authority.publicKey,
+      accountBinding: "acct:fixture", expectedAccountHandle: "fixture", pollIntervalMs: 30_000 });
+    try {
+      await phone.start();
+      const unsignedTask = { ...task(), writeApproval: undefined };
+      const approvedTask = { ...unsignedTask, writeApproval: authority.sign(unsignedTask) };
+      const handling = phone.handleTask(approvedTask);
+      await executeStarted;
+      const closing = phone.close();
+      expect(phone.close()).toBe(closing);
+      expect(client.submit).not.toHaveBeenCalled();
+      releaseExecute({ status: "OUTCOME_UNKNOWN", reason: "synthetic uncertain completion" });
+      await Promise.all([handling, closing]);
+      expect(client.submit).toHaveBeenCalledOnce();
+      expect(client.submissions[0]?.result).toMatchObject({ status: "OUTCOME_UNKNOWN", reason: "synthetic uncertain completion" });
+      expect(device.close).toHaveBeenCalledOnce();
+      const pollCount = vi.mocked(client.poll).mock.calls.length;
+      await phone.close();
+      expect(vi.mocked(client.poll)).toHaveBeenCalledTimes(pollCount);
+    } finally {
+      releaseExecute({ status: "OUTCOME_UNKNOWN", reason: "synthetic uncertain completion" });
+      await phone.close();
+      await rm(keyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for an active read receipt and rejects later task work after close resolves", async () => {
+    const client = bridge();
+    let markReadStarted!: () => void;
+    let releaseRead!: (result: typeof accountObservation) => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const readGate = new Promise<typeof accountObservation>((resolve) => { releaseRead = resolve; });
+    const observe = vi.fn().mockResolvedValueOnce(accountObservation).mockImplementation(async () => { markReadStarted(); return readGate; });
+    const ui = provider({ observe });
+    const phone = createPhoneCompanion({ appium: appium(), client, provider: ui, accountBinding: "acct:fixture",
+      expectedAccountHandle: "fixture", pollIntervalMs: 30_000 });
+    try {
+      await phone.start();
+      vi.mocked(ui.observe).mockClear();
+      const readTask: BridgeTask = { ...task("write"), id: "task-read-after-close", kind: "read", operation: "account.snapshot",
+        targetRefs: [], payload: {} };
+      const handling = phone.handleTask(readTask);
+      await readStarted;
+      const closing = phone.close();
+      releaseRead(accountObservation);
+      await Promise.all([handling, closing]);
+      expect(client.submit).toHaveBeenCalledOnce();
+      expect(client.submissions[0]).toMatchObject({ taskId: readTask.id, result: accountObservation });
+      await phone.handleTask({ ...readTask, id: "task-after-close" });
+      expect(ui.observe).toHaveBeenCalledOnce();
+      expect(client.submit).toHaveBeenCalledOnce();
+    } finally {
+      releaseRead(accountObservation);
+      await phone.close();
+    }
+  });
+
   it("does not register an unknown Instagram account", async () => {
     const device = appium();
     const client = bridge();

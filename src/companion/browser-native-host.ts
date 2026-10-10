@@ -44,7 +44,7 @@ export interface BrowserWriteApproval {
 
 export interface BrowserNativeHost {
   start(): Promise<void>;
-  close(): void;
+  close(): Promise<void>;
 }
 
 type HostMessage =
@@ -85,8 +85,16 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
   let pollingStarted = false;
   let lastHubHeartbeatAt = 0;
   let lastNativePulseAt = 0;
+  let closing: Promise<void> | undefined;
+  const work = new Set<Promise<unknown>>();
   let liveReadiness: { availability: string; capabilities: string[]; accountHandle?: string } = { availability: "offline", capabilities: [] };
   let beginPolling = () => {};
+
+  const track = <T>(promise: Promise<T>): Promise<T> => {
+    work.add(promise);
+    void promise.then(() => work.delete(promise), () => work.delete(promise));
+    return promise;
+  };
 
   const send = (value: unknown) => {
     if (!closed) output.write(encodeNativeFrame(value));
@@ -97,6 +105,15 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
     if (pollTimer) clearInterval(pollTimer);
     input.removeAllListeners("data");
     emitter.removeAllListeners();
+  };
+  const closeHost = () => {
+    if (!closing) {
+      closeNow();
+      closing = (async () => {
+        while (work.size) await Promise.allSettled([...work]);
+      })();
+    }
+    return closing;
   };
 
   const submitWithoutRetry = async (task: BridgeTask, result: unknown, contextHash?: string) => {
@@ -152,19 +169,19 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
       const failure = task.kind === "write"
         ? { status: "OUTCOME_UNKNOWN", reason: "browser result did not match the assigned account or context" }
         : { availability: "unsupported_ui_version", coverage: "unknown", errors: [{ code: "invalid_result", message: "browser result failed provenance validation" }] };
-      void submitWithoutRetry(task, failure, task.contextHash);
+      track(submitWithoutRetry(task, failure, task.contextHash));
       return;
     }
     if (task.kind === "write") writesDispatched.add(task.id);
-    void submitWithoutRetry(task, raw.result, typeof raw.contextHash === "string" ? raw.contextHash : undefined);
+    track(submitWithoutRetry(task, raw.result, typeof raw.contextHash === "string" ? raw.contextHash : undefined));
   };
 
   input.on("data", (chunk: Buffer | Uint8Array) => {
     try { for (const message of decoder.push(chunk)) onNativeMessage(message); }
-    catch (error) { log(error instanceof Error ? error.message : "native frame rejected"); closeNow(); }
+    catch (error) { log(error instanceof Error ? error.message : "native frame rejected"); void closeHost(); }
   });
-  input.on("end", closeNow);
-  input.on("error", closeNow);
+  input.on("end", () => { void closeHost(); });
+  input.on("error", () => { void closeHost(); });
 
   const poll = async () => {
     if (closed || !connected || busy) return;
@@ -175,11 +192,15 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
         await options.client.heartbeat(bridgeId, { ...liveReadiness, accountBinding: options.accountBinding, surface: "instagram" });
         lastHubHeartbeatAt = now;
       }
+      if (closed) return;
       if (now - lastNativePulseAt >= 15_000) {
         send({ kind: "heartbeat" });
         lastNativePulseAt = now;
       }
-      for (const task of await options.client.poll(bridgeId, 10)) {
+      const tasks = await options.client.poll(bridgeId, 10);
+      if (closed) return;
+      for (const task of tasks) {
+        if (closed) return;
         if (!validTask(task, options.accountBinding)) {
           log("ignored task outside the browser operation allowlist");
           continue;
@@ -187,15 +208,16 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
         if (task.kind === "write" && !allowWrites) {
           if (writesDispatched.has(task.id)) continue;
           writesDispatched.add(task.id);
-          await submitWithoutRetry(task, { status: "FAILED", reason: "browser write gate is disabled" }, task.contextHash);
+          track(submitWithoutRetry(task, { status: "FAILED", reason: "browser write gate is disabled" }, task.contextHash));
           continue;
         }
         if (activeTasks.has(task.id)) continue;
         const approval = task.kind === "write" && allowWrites && options.authorizeWriteLease
           ? await options.authorizeWriteLease(task, bridgeId).catch(() => undefined) : undefined;
+        if (closed) return;
         if (task.kind === "write" && !approvedWriteTask(task, bridgeId, options.accountBinding, approval)) {
           writesDispatched.add(task.id);
-          await submitWithoutRetry(task, { status: "FAILED", reason: "browser write task has no verified MutationSafety approval and durable attempt" }, task.contextHash);
+          track(submitWithoutRetry(task, { status: "FAILED", reason: "browser write task has no verified MutationSafety approval and durable attempt" }, task.contextHash));
           continue;
         }
         if (task.kind === "write" && approval) writeApprovals.set(task.id, approval);
@@ -210,22 +232,24 @@ export function createBrowserNativeHost(options: BrowserNativeHostOptions): Brow
   beginPolling = () => {
     if (pollingStarted || closed || !connected || !bridgeId) return;
     pollingStarted = true;
-    void poll();
-    pollTimer = setInterval(() => { void poll(); }, pollIntervalMs);
+    track(poll());
+    pollTimer = setInterval(() => { track(poll()); }, pollIntervalMs);
     pollTimer.unref?.();
   };
 
   return {
     async start() {
       if (closed) throw new Error("browser native host is closed");
-      bridgeId = (await options.client.register()).bridgeId;
-      if (!bridgeId) throw new Error("bridge registration returned no bridge id");
-      emitter.once("connected", beginPolling);
-      beginPolling();
+      await track((async () => {
+        const registration = await options.client.register();
+        if (closed) return;
+        bridgeId = registration.bridgeId;
+        if (!bridgeId) throw new Error("bridge registration returned no bridge id");
+        emitter.once("connected", beginPolling);
+        beginPolling();
+      })());
     },
-    close() {
-      closeNow();
-    }
+    close: closeHost
   };
 }
 
@@ -263,8 +287,13 @@ export async function runBrowserNativeHostCli(args = process.argv.slice(2), env 
       } });
     await host.start();
     process.stdin.resume();
-    process.stdin.once("end", () => host.close());
-    process.stdin.once("error", () => host.close());
+    const shutdown = () => {
+      void host.close().then(() => process.exit(0), () => { process.exitCode = 1; process.exit(1); });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    process.stdin.once("end", shutdown);
+    process.stdin.once("error", () => { process.exitCode = 1; shutdown(); });
   } catch (error) {
     process.stderr.write(`Instagram Native Host failed to start: ${safeError(error)}\n`);
     process.exitCode = 1;

@@ -54,13 +54,23 @@ export function createPhoneCompanion(options: PhoneCompanionOptions): PhoneCompa
   let timer: NodeJS.Timeout | undefined;
   let closed = false;
   let busy = false;
+  let closing: Promise<void> | undefined;
+  let appiumClose: Promise<void> | undefined;
+  const work = new Set<Promise<unknown>>();
   const inflight = new Set<string>();
   const completedReads = new Map<string, unknown>();
   const attemptedWrites = new Set<string>();
   const submitted = new Set<string>();
   const log = options.log ?? ((message: string) => process.stderr.write(`${message}\n`));
+  const closeAppium = () => appiumClose ??= Promise.resolve().then(() => options.appium.close());
 
-  const handleTask = async (task: BridgeTask): Promise<void> => {
+  const track = <T>(promise: Promise<T>): Promise<T> => {
+    work.add(promise);
+    void promise.then(() => work.delete(promise), () => work.delete(promise));
+    return promise;
+  };
+
+  const runTask = async (task: BridgeTask): Promise<void> => {
     if (!bridgeId || closed || !validAssignedTask(task, bridgeId, options.accountBinding)) return;
     if (submitted.has(task.id) || inflight.has(task.id)) return;
     if (task.kind === "write" && attemptedWrites.has(task.id)) return;
@@ -81,8 +91,14 @@ export function createPhoneCompanion(options: PhoneCompanionOptions): PhoneCompa
         ? { status: "OUTCOME_UNKNOWN", reason: "phone task dispatch outcome is uncertain; no retry was made" }
         : unavailableResult("phone task could not be completed");
       if (task.kind !== "write") completedReads.set(task.id, result);
-    } finally { inflight.delete(task.id); }
-    await submitOnce(task, result);
+    }
+    try { await submitOnce(task, result); }
+    finally { inflight.delete(task.id); }
+  };
+
+  const handleTask = (task: BridgeTask): Promise<void> => {
+    if (!bridgeId || closed || !validAssignedTask(task, bridgeId, options.accountBinding)) return Promise.resolve();
+    return track(runTask(task));
   };
 
   async function executeTask(task: BridgeTask): Promise<unknown> {
@@ -91,6 +107,7 @@ export function createPhoneCompanion(options: PhoneCompanionOptions): PhoneCompa
         const intent = contextRefreshIntent(task, options.accountBinding);
         if (!intent) return unavailableResult("phone context refresh request is malformed");
         const fresh = await options.provider.refreshContext(intent);
+        if (closed) return unavailableResult("phone companion closed while reading context");
         return { source: "phone", accountBinding: options.accountBinding, target: fresh.target, contextHash: fresh.contextHash, availability: fresh.availability };
       }
       const operation = readOperation(task);
@@ -100,6 +117,7 @@ export function createPhoneCompanion(options: PhoneCompanionOptions): PhoneCompa
     const intent = mutationIntent(task, options.accountBinding);
     if (!intent) return { status: "FAILED", reason: "phone write payload or target is invalid" };
     const fresh = await options.provider.refreshContext(intent);
+    if (closed) return { status: "FAILED", reason: "phone companion closed before write dispatch" };
     if (fresh.availability !== "ready" || fresh.contextHash !== task.contextHash) return { status: "FAILED", reason: "phone target or source context changed after preview" };
     if (task.kind === "preview") return { status: "PREVIEW", source: "phone", target: safeTarget(task.targetRefs[0]), contextHash: fresh.contextHash };
     if (!task.writeApproval || !trustedApprovalPublicKey || !verifyUiApproval(task, task.writeApproval as SignedUiApproval, trustedApprovalPublicKey,
@@ -122,54 +140,73 @@ export function createPhoneCompanion(options: PhoneCompanionOptions): PhoneCompa
     busy = true;
     try {
       const readiness = await options.provider.readiness();
+      if (closed) return;
       await options.client.heartbeat(bridgeId, { availability: readiness.availability, capabilities: readiness.capabilities,
         ...(verifiedAccountHandle ? { accountBinding: options.accountBinding, accountHandle: verifiedAccountHandle, surface: "instagram" } : {}) });
+      if (closed) return;
       const tasks = await options.client.poll(bridgeId, 10);
-      for (const task of tasks) await handleTask(task);
+      if (closed) return;
+      for (const task of tasks) {
+        if (closed) return;
+        await handleTask(task);
+      }
     } catch { log("phone bridge poll failed; local task outcome was not inferred"); }
     finally { busy = false; }
   };
 
   return {
     get bridgeId() { return bridgeId; },
-    async start() {
-      if (closed) return phoneReadiness("offline", [], "phone companion is closed");
-      const transport = await options.appium.readiness();
-      if (!transport.transportReady) return transport;
-      try { await options.appium.createSession(); }
-      catch { return phoneReadiness("not_connected", [], "selected phone session could not be established", true); }
-      const ready = await options.appium.readiness();
-      if (ready.availability !== "ready" || ready.selectedDeviceIdentity !== "verified") {
-        await options.appium.close();
-        return phoneReadiness("not_connected", [], ready.reason ?? "selected-device identity was not verified after W3C session creation", ready.transportReady, ready.selectedDeviceIdentity);
-      }
-      const account = await options.provider.observe({ op: "account.snapshot" });
-      if (account.availability !== "ready" || !isExpectedAccount(account.data, options.expectedAccountHandle)) {
-        await options.appium.close();
-        return phoneReadiness("unsupported", [], "Instagram account identity could not be verified", true, "verified");
-      }
-      verifiedAccountHandle = options.expectedAccountHandle;
-      const capabilities = (await options.provider.readiness()).capabilities;
-      try {
-        const registration = await options.client.register(capabilities);
-        bridgeId = registration.bridgeId;
-        trustedApprovalPublicKey ??= registration.approvalPublicKey;
-      }
-      catch {
-        await options.appium.close();
-        return phoneReadiness("offline", [], "phone bridge registration failed", true, "verified");
-      }
-      if (!bridgeId) { await options.appium.close(); return phoneReadiness("offline", [], "phone bridge returned no id", true, "verified"); }
-      void pump();
-      timer = setInterval(() => { void pump(); }, pollIntervalMs);
-      return phoneReadiness("ready", capabilities, undefined, true, "verified");
+    start() {
+      if (closed) return Promise.resolve(phoneReadiness("offline", [], "phone companion is closed"));
+      return track((async () => {
+        const transport = await options.appium.readiness();
+        if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+        if (!transport.transportReady) return transport;
+        try { await options.appium.createSession(); }
+        catch { return phoneReadiness("not_connected", [], "selected phone session could not be established", true); }
+        if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+        const ready = await options.appium.readiness();
+        if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+        if (ready.availability !== "ready" || ready.selectedDeviceIdentity !== "verified") {
+          await closeAppium();
+          return phoneReadiness("not_connected", [], ready.reason ?? "selected-device identity was not verified after W3C session creation", ready.transportReady, ready.selectedDeviceIdentity);
+        }
+        const account = await options.provider.observe({ op: "account.snapshot" });
+        if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+        if (account.availability !== "ready" || !isExpectedAccount(account.data, options.expectedAccountHandle)) {
+          await closeAppium();
+          return phoneReadiness("unsupported", [], "Instagram account identity could not be verified", true, "verified");
+        }
+        verifiedAccountHandle = options.expectedAccountHandle;
+        const capabilities = (await options.provider.readiness()).capabilities;
+        if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+        try {
+          const registration = await options.client.register(capabilities);
+          if (closed) return phoneReadiness("offline", [], "phone companion is closed");
+          bridgeId = registration.bridgeId;
+          trustedApprovalPublicKey ??= registration.approvalPublicKey;
+        }
+        catch {
+          await closeAppium();
+          return phoneReadiness("offline", [], "phone bridge registration failed", true, "verified");
+        }
+        if (!bridgeId) { await closeAppium(); return phoneReadiness("offline", [], "phone bridge returned no id", true, "verified"); }
+        track(pump());
+        timer = setInterval(() => { track(pump()); }, pollIntervalMs);
+        return phoneReadiness("ready", capabilities, undefined, true, "verified");
+      })());
     },
-    async close() {
-      if (closed) return;
-      closed = true;
-      if (timer) clearInterval(timer);
-      timer = undefined;
-      await options.appium.close();
+    close() {
+      if (!closing) {
+        closed = true;
+        if (timer) clearInterval(timer);
+        timer = undefined;
+        closing = (async () => {
+          while (work.size) await Promise.allSettled([...work]);
+          await closeAppium();
+        })();
+      }
+      return closing;
     },
     handleTask
   };
@@ -201,8 +238,11 @@ export async function runPhoneCompanionCli(env: NodeJS.ProcessEnv = process.env)
       process.exitCode = 2;
       return;
     }
-    process.once("SIGINT", () => { void companion.close(); });
-    process.once("SIGTERM", () => { void companion.close(); });
+    const shutdown = () => {
+      void companion.close().then(() => process.exit(0), () => { process.exitCode = 1; process.exit(1); });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   } catch {
     process.stderr.write("Phone companion failed to start; check the private local configuration and Appium readiness.\n");
     process.exitCode = 1;
