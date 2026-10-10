@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer, type ExistingToolHandlers } from "../src/mcp-server.js";
@@ -13,10 +14,11 @@ describe("shared MCP factory", () => {
     const server = createMcpServer(handlers);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "mcp-factory-test", version: "1.0.0" });
+    const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
     try {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
-      expect(client.getServerVersion()).toMatchObject({ name: "meta-instagram-mcp", version: "0.2.0" });
+      expect(client.getServerVersion()).toMatchObject({ name: "meta-instagram-mcp", version: packageVersion });
       expect((await client.listTools()).tools).toHaveLength(18);
       const result = await client.callTool({ name: "meta_scope_presets", arguments: {} });
       expect(result).toMatchObject({ content: [{ type: "text", text: JSON.stringify([{ id: "injected" }], null, 2) }] });
