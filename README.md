@@ -23,6 +23,7 @@ npm ci
 npm run typecheck
 npm test
 npm run build
+npm run test:remote-entrypoint
 npm run test:installer
 npm run test:native-registration
 ```

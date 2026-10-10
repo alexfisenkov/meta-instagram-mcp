@@ -6,22 +6,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createRemoteProxyServer, createRemoteProxyTransport, loadRemoteProxyConfig, startRemoteProxy } from "../src/cli/remote-proxy.js";
-import * as runWrapper from "../tools/run.mjs";
-
-const runtimeEntrypoint = (runWrapper as unknown as { serverEntrypoint(packageRoot: string, env: NodeJS.ProcessEnv): string }).serverEntrypoint;
 
 describe("remote-proxy", () => {
-  it("selects the remote stdio proxy whenever remote config is present and preserves local default", () => {
-    const root = "/fixture/meta-instagram-mcp";
-    expect(runtimeEntrypoint(root, {})).toBe(join(root, "dist", "server.js"));
-    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_URL: "https://mcp.example.test", INSTAGRAM_MCP_REMOTE_BEARER_TOKEN: "x".repeat(40) }))
-      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
-    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_CONFIG: "/private/remote.json" }))
-      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
-    expect(runtimeEntrypoint(root, { INSTAGRAM_MCP_REMOTE_URL: "https://mcp.example.test" }))
-      .toBe(join(root, "dist", "cli", "remote-proxy.js"));
-  });
-
   it("loads a private external remote config and rejects an invalid remote route without local fallback", async () => {
     const directory = await mkdtemp(join(tmpdir(), "instagram-remote-config-"));
     const configPath = join(directory, "remote.json");

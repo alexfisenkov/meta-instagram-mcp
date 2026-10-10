@@ -121,6 +121,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 |---|---|
 | `scripts/build.mjs` | esbuild-based build for `src/**/*.ts` into `dist/`. |
 | `tools/run.mjs` | Portable MCP wrapper. Loads a private external `.env`, applies explicit variable allowlist and starts the shared runtime. |
+| `tools/test-remote-entrypoint.mjs` | Native Node fixture for local/remote stdio selection and fail-closed remote startup. |
 | `tools/test-installer.mjs` | Portable install/update/rollback fixture, wrapper config handoff and doctor redaction checks. |
 | `tools/register-native-host.mjs` | Per-user Chrome Native Messaging manifest/launcher registration with exact-origin and existing-owner conflict guards. |
 | `tools/test-native-registration.mjs` | Isolated macOS/Linux/Windows registration staging fixtures. |

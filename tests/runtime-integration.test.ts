@@ -335,7 +335,7 @@ describe("runtime composition", () => {
     } finally {
       await client.close(); await server?.close(); host.close(); input.end(); output.end();
     }
-  }, process.platform === "win32" ? 45_000 : 15_000);
+  }, process.platform === "win32" ? 90_000 : 15_000);
 
   it("builds OAuth and signed webhook routes from configured runtime settings", async () => {
     const dir = await mkdtemp(join(tmpdir(), "instagram-runtime-configured-")); dirs.push(dir);

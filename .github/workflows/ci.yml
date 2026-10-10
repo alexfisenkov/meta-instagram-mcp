@@ -30,6 +30,7 @@ jobs:
         run: npx vitest run tests/private-fs.test.ts --testTimeout=15000
       - run: npm test
       - run: npm run build
+      - run: npm run test:remote-entrypoint
       - run: npm run test:installer
       - run: npm run test:native-registration
       - name: Check shell installer syntax
