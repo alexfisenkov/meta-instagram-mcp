@@ -5,4 +5,6 @@ export interface SourceReadContext {
   deadlineAt?: number;
   /** Companion identity selected during readiness; later stages must keep the same bridge. */
   companionBridgeId?: string;
+  /** Automatic source selection may discover a verified same-account read bridge; pinned selections may not. */
+  companionBridgeSelection?: "automatic" | "pinned";
 }
