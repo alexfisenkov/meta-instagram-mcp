@@ -3,7 +3,7 @@
   "name": "Instagram Companion",
   "version": "0.1.0",
   "description": "Fixed semantic reads from an explicitly selected Instagram tab.",
-  "permissions": ["nativeMessaging", "alarms"],
+  "permissions": ["nativeMessaging", "alarms", "scripting"],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://instagram.com/*"

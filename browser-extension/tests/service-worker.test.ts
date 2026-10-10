@@ -66,7 +66,104 @@ describe("Instagram extension service worker protocol", () => {
       kind: "execute", allowWrites: true,
       operation: expect.objectContaining({ op: "message.send", target: { accountBinding, nativeId: "thread-7" }, payload: { text: "Exact text" }, contextHash: task.contextHash, approval })
     }));
-    expect(fixture.sendMessage).toHaveBeenCalledTimes(3);
+    expect(fixture.sendMessage).toHaveBeenCalledTimes(6);
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe", "ping", "observe", "ping", "execute"]);
+  });
+
+  it("injects the fixed listener once only after an exact no-receiver ping, then dispatches the operation once", async () => {
+    let firstPing = true;
+    const executeScript = vi.fn(async () => [{ result: undefined }]);
+    const fixture = workerFixture({
+      onSendMessage: async (_tabId, message) => {
+        if (message.kind === "ping" && firstPing) {
+          firstPing = false;
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
+        if (message.kind === "ping") return { kind: "pong", version: 1 };
+        return { status: "ready", availability: "ready", accountBinding, data: { username: "alexfisenkov" } };
+      },
+      executeScript
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-inspect-after-injection", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "account.inspect",
+      accountBinding, targetRefs: [], payload: {}, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "ping", "observe"]);
+    expect(executeScript).toHaveBeenCalledOnce();
+    expect(executeScript).toHaveBeenCalledWith({ target: { tabId: 1 }, files: ["content-script.js"] });
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "result", taskId: "task-inspect-after-injection", result: expect.objectContaining({ data: { username: "alexfisenkov" } })
+    }));
+  });
+
+  it("does not inject or dispatch when ping failure is not the exact no-receiver condition", async () => {
+    const executeScript = vi.fn(async () => []);
+    const fixture = workerFixture({
+      onSendMessage: async () => { throw new Error("The message port closed before a response was received."); },
+      executeScript
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-port-closed-ping", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping"]);
+    expect(executeScript).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "result", taskId: "task-port-closed-ping", result: expect.objectContaining({ availability: "unsupported_ui_version" })
+    }));
+  });
+
+  it("fails closed when fixed-script injection does not produce a pong", async () => {
+    let pingCount = 0;
+    const executeScript = vi.fn(async () => []);
+    const fixture = workerFixture({
+      onSendMessage: async (_tabId, message) => {
+        if (message.kind !== "ping") return { status: "ready" };
+        pingCount++;
+        if (pingCount === 1) throw new Error("Could not establish connection. Receiving end does not exist.");
+        return { kind: "unexpected", version: 1 };
+      },
+      executeScript
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-injection-no-pong", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "ping"]);
+    expect(executeScript).toHaveBeenCalledOnce();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "result", taskId: "task-injection-no-pong", result: expect.objectContaining({
+        availability: "unsupported_ui_version", errors: [{ code: "content_script_unavailable", message: expect.any(String) }]
+      })
+    }));
+  });
+
+  it("does not reinject or replay an operation after its actual dispatch fails", async () => {
+    const executeScript = vi.fn(async () => []);
+    const fixture = workerFixture({
+      onSendMessage: async (_tabId, message) => {
+        if (message.kind === "ping") return { kind: "pong", version: 1 };
+        throw new Error("Could not establish connection. Receiving end does not exist.");
+      },
+      executeScript
+    });
+    await fixture.nativeMessage({ kind: "ready", version: 1, accountBinding, expectedAccountHandle: "alexfisenkov", allowWrites: false });
+    await fixture.nativeMessage({ kind: "task", task: {
+      id: "task-operation-lost", kind: "read", source: "browser", bridgeId: "bridge-1", operation: "inbox.list",
+      accountBinding, targetRefs: [], payload: { limit: 2 }, expiresAt: new Date(Date.now() + 20_000).toISOString()
+    } });
+
+    expect(fixture.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "observe"]);
+    expect(executeScript).not.toHaveBeenCalled();
+    expect(fixture.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "result", taskId: "task-operation-lost", result: expect.objectContaining({ availability: "unsupported_ui_version" })
+    }));
   });
 
   it("does not start browser UI work for an expired read task", async () => {
@@ -142,12 +239,13 @@ describe("Instagram extension service worker protocol", () => {
     await host.start();
     for (const message of worker.startupMessages) input.write(encodeNativeFrame(message));
     await waitFor(() => client.submit.mock.calls.length === 1);
-    expect(worker.sendMessage).toHaveBeenCalledTimes(1);
+    expect(worker.sendMessage).toHaveBeenCalledTimes(2);
+    expect(worker.sendMessage.mock.calls.map(([, message]) => message.kind)).toEqual(["ping", "execute"]);
     expect(worker.sendMessage).toHaveBeenCalledWith(1, expect.objectContaining({ kind: "execute", allowWrites: true }));
     expect(client.submit).toHaveBeenCalledWith(task.bridgeId, task.id,
       { status: "OUTCOME_UNKNOWN", requestId: task.requestId, contextHash: task.contextHash }, task.contextHash);
     await new Promise((resolveWait) => setTimeout(resolveWait, 300));
-    expect(worker.sendMessage).toHaveBeenCalledTimes(1);
+    expect(worker.sendMessage).toHaveBeenCalledTimes(2);
     expect(client.submit).toHaveBeenCalledTimes(1);
     host.close();
   });
@@ -184,11 +282,21 @@ describe("Instagram extension service worker protocol", () => {
   });
 });
 
-function workerFixture(options: { response?: unknown; onPostMessage?: (message: unknown) => void; onTabsQuery?: () => Promise<Array<{ id: number; url: string }>> } = {}) {
+function workerFixture(options: {
+  response?: unknown;
+  onPostMessage?: (message: unknown) => void;
+  onTabsQuery?: () => Promise<Array<{ id: number; url: string }>>;
+  onSendMessage?: (tabId: number, message: any) => Promise<unknown>;
+  executeScript?: ReturnType<typeof vi.fn>;
+} = {}) {
   const listeners: Array<Array<(message: unknown) => unknown>> = [];
   const disconnectListeners: Array<Array<() => void>> = [];
   const alarmListeners: Array<(alarm: { name: string }) => unknown> = [];
-  const sendMessage = vi.fn(async () => options.response ?? ({ status: "OUTCOME_UNKNOWN", requestId: "request-123456789012", contextHash: "a".repeat(64) }));
+  const sendMessage = vi.fn(async (tabId: number, message: any) => {
+    if (options.onSendMessage) return options.onSendMessage(tabId, message);
+    if (message.kind === "ping") return { kind: "pong", version: 1 };
+    return options.response ?? ({ status: "OUTCOME_UNKNOWN", requestId: "request-123456789012", contextHash: "a".repeat(64) });
+  });
   const postMessage = vi.fn((message: unknown) => options.onPostMessage?.(message));
   const connectNative = vi.fn(() => {
     const portIndex = listeners.length;
@@ -208,7 +316,8 @@ function workerFixture(options: { response?: unknown; onPostMessage?: (message: 
     alarms,
     tabs: {
       query: vi.fn(async () => options.onTabsQuery ? options.onTabsQuery() : [{ id: 1, url: "https://www.instagram.com/direct/t/thread-7/" }]), sendMessage
-    }
+    },
+    scripting: { executeScript: options.executeScript ?? vi.fn(async () => []) }
   };
   vm.runInNewContext(source, { chrome, URL, Date, Object, Set, Array, Promise, RegExp, String, Number, Boolean });
   return {

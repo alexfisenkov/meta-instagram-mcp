@@ -14,6 +14,10 @@
   const MAX_SCROLL_PAGES = 5;
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.kind === "ping") {
+      sendResponse({ kind: "pong", version: 1 });
+      return false;
+    }
     if (!message || !["observe", "execute"].includes(message.kind)) return false;
     const task = message.kind === "execute" ? runMutation(message) : runOperation(message);
     void task.then(sendResponse).catch(() => sendResponse(failure(message.accountBinding, "unsupported_ui_version", "browser operation failed")));

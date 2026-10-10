@@ -30,6 +30,12 @@
 - Direct, comments и insights доступны только в рамках scopes/API окон, которые фактически выданы. До app review/Advanced Access/consent не обещайте доступ для стороннего production account.
 - Webhook, Streamable HTTP и удалённая server route не считаются подключёнными, если установленная версия не прошла mounted-route, auth, signature и read-back checks.
 
+## Browser companion: content script
+
+Перед каждой browser task worker отправляет пустой ping без чтения страницы. Если Chrome точно сообщает `Could not establish connection. Receiving end does not exist.`, worker один раз inject-ит только bundled `content-script.js` в уже выбранную Instagram-вкладку и повторяет ping. Операция запускается один раз после pong; ошибка или timeout после её dispatch не приводит к повтору. Иная ошибка ping, сбой injection или отсутствие pong завершаются `unsupported_ui_version`/`content_script_unavailable`.
+- Direct, comments и insights доступны только в рамках scopes/API окон, которые фактически выданы. До app review/Advanced Access/consent не обещайте доступ для стороннего production account.
+- Webhook, Streamable HTTP и удалённая server route не считаются подключёнными, если установленная версия не прошла mounted-route, auth, signature и read-back checks.
+
 ## Browser и телефон
 
 - `browser: not_connected`/`offline`: проверьте extension и Native Host registration, точный 32-character extension ID в `allowed_origins`, стабильный host path, Chrome profile выбранного узла и его сеть. При потере native port extension повторяет соединение через один именованный MV3 alarm с ограниченным backoff. Первый login выполняется владельцем в browser profile узла; не копируйте cookies с другой машины.

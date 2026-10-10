@@ -309,7 +309,7 @@ Registering the host does not install or sign the extension, establish bridge cr
 
 | Часть | Значение |
 |---|---|
-| Extension | `<app>/browser-extension`; `nativeMessaging` plus только Instagram host permissions. |
+| Extension | `<app>/browser-extension`; `nativeMessaging`, `alarms`, `scripting` и только Instagram host permissions. Фиксированный content script внедряется в выбранную вкладку только после точного ping error «Receiving end does not exist»; read/write task затем dispatch once. |
 | Runtime asset | `<app>/dist/companion/browser-native-host.js`; Windows launcher — `<app>/tools/native-host/InstagramNativeHost.exe`. |
 | Host name | `com.alexfisenkov.instagram_companion`; origin allowlist — один `chrome-extension://<id>/`. |
 | Private bridge file | macOS/Linux путь задаётся в launcher как `INSTAGRAM_MCP_BRIDGE_CONFIG`; Windows default — `%LOCALAPPDATA%\MetaInstagramCompanion\browser-bridge.json`. |

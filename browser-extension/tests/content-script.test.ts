@@ -8,6 +8,16 @@ const contentScript = await readFile(resolve(root, "browser-extension/content-sc
 const accountBinding = "owner:alex";
 
 describe("Instagram content script against DOM fixtures", () => {
+  it("answers a readiness ping without inspecting the Instagram page", async () => {
+    const page = new Window({ url: "https://www.instagram.com/direct/inbox/", settings: { disableJavaScriptEvaluation: false } });
+    let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+    Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+    page.eval(contentScript);
+    try {
+      expect(await invoke(listener, { kind: "ping" })).toEqual({ kind: "pong", version: 1 });
+    } finally { page.happyDOM.abort(); }
+  });
+
   it("verifies a Direct-page account through the observed own-profile control and returns to the same tab URL", async () => {
     const { result, clicks, url, followup } = await runOwnProfileInspectFixture({ avatarHandle: "alexfisenkov", editLabel: "Редактировать профиль", followup: true });
 
@@ -260,11 +270,11 @@ describe("Instagram content script against DOM fixtures", () => {
     } finally { page.happyDOM.abort(); }
   });
 
-  it("keeps extension permissions limited to Instagram and Native Messaging", async () => {
+  it("keeps extension permissions bounded to bridge, alarms and fixed Instagram injection", async () => {
     const manifest = JSON.parse(await readFile(resolve(root, "browser-extension/manifest.json"), "utf8"));
-    expect(manifest.permissions).toEqual(["nativeMessaging", "alarms"]);
+    expect(manifest.permissions).toEqual(["nativeMessaging", "alarms", "scripting"]);
     expect(manifest.host_permissions).toEqual(["https://www.instagram.com/*", "https://instagram.com/*"]);
-    expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|cookies|tabs|scripting/i);
+    expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|cookies|"tabs"/i);
   });
 });
 

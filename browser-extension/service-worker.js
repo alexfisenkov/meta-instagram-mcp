@@ -123,6 +123,10 @@ async function onNativeMessage(message) {
     return;
   }
   try {
+    if (!await ensureContentScript(tab.id)) {
+      sendResult(task, unavailable("unsupported_ui_version", "the fixed content script did not answer the readiness ping", "content_script_unavailable"));
+      return;
+    }
     const result = await chrome.tabs.sendMessage(tab.id, {
       kind: task.kind === "write" ? "execute" : "observe", operation,
       accountBinding, expectedAccountHandle, allowWrites, approval: message.approval, taskExpiresAt: task.expiresAt
@@ -131,6 +135,28 @@ async function onNativeMessage(message) {
   } catch {
     sendResult(task, unavailable("unsupported_ui_version", "the fixed content script is not available in the selected tab"));
   }
+}
+
+async function ensureContentScript(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { kind: "ping" });
+    return isContentScriptPong(response);
+  } catch (error) {
+    if (!isMissingMessageReceiver(error)) throw error;
+  }
+
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content-script.js"] });
+  const response = await chrome.tabs.sendMessage(tabId, { kind: "ping" });
+  return isContentScriptPong(response);
+}
+
+function isContentScriptPong(value) {
+  return isRecord(value) && value.kind === "pong" && value.version === 1;
+}
+
+function isMissingMessageReceiver(error) {
+  return typeof error === "object" && error !== null && "message" in error &&
+    error.message === "Could not establish connection. Receiving end does not exist.";
 }
 
 async function selectUniqueTab(task) {
