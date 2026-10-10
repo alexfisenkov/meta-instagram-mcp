@@ -139,11 +139,12 @@ describe("Instagram content script against DOM fixtures", () => {
   });
 
   it("reads a second sidebar row after Inbox → thread A → Inbox list without returning thread A content", async () => {
-    const { firstRead, inboxOnThread, secondRead, clicks, url } = await runInboxThreadSidebarCycleFixture();
+    const { firstRead, inboxOnThread, sameThreadReuse, secondRead, clicks, url } = await runInboxThreadSidebarCycleFixture();
     expect(firstRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-a-message", text: "Thread A message" }] } });
     expect(inboxOnThread.availability).toBe("ready");
     expect(inboxOnThread.data.items[0].target.explicitOwnerRef).toMatch(/^browser-inbox-row:/);
     expect(inboxOnThread.data.items).toHaveLength(2);
+    expect(sameThreadReuse).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-a-message", text: "Thread A message" }] } });
     expect(secondRead).toMatchObject({ availability: "ready", data: { messages: [{ nativeId: "thread-b-message", text: "Thread B message" }] } });
     expect(secondRead.data.messages).not.toContainEqual(expect.objectContaining({ text: "Thread A message" }));
     expect(clicks).toBe(2);
@@ -727,9 +728,11 @@ async function runInboxThreadSidebarCycleFixture() {
       operation: { op: "thread.read", target: inbox.data.items[0]?.target, limit: 2 } });
     const inboxOnThread = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
       operation: { op: "inbox.list", limit: 2 } });
+    const sameThreadReuse = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
+      operation: { op: "thread.read", target: inboxOnThread.data.items[0]?.target, limit: 2 } });
     const secondRead = await invoke(listener, { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", taskExpiresAt: deadline(),
       operation: { op: "thread.read", target: inboxOnThread.data.items[1]?.target, limit: 2 } });
-    return { firstRead, inboxOnThread, secondRead, clicks, url: page.location.href };
+    return { firstRead, inboxOnThread, sameThreadReuse, secondRead, clicks, url: page.location.href };
   } finally { page.happyDOM.abort(); }
 }
 
