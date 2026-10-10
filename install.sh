@@ -28,7 +28,7 @@ done
 
 [[ "$revision" =~ ^[[:xdigit:]]{40}$ ]] || { echo "Pass a full 40-character commit SHA with --revision." >&2; exit 2; }
 for command in git node npm tar; do command -v "$command" >/dev/null 2>&1 || { printf 'Required command is missing: %s\n' "$command" >&2; exit 1; }; done
-node -e 'const m=Number(process.versions.node.split(".")[0]); if (m < 20) process.exit(1)' || { echo "Node.js 20 or newer is required." >&2; exit 1; }
+node -e 'const m=Number(process.versions.node.split(".")[0]); if (m < 22) process.exit(1)' || { echo "Node.js 22 or newer is required." >&2; exit 1; }
 
 source_dir="$(cd "$source_dir" && pwd -P)"
 target="$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$target")"

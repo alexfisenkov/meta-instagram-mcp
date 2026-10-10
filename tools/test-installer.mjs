@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, chmod } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,13 +28,42 @@ function git(args) {
   return execFileSync("git", ["-C", source, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-function runInstaller(revision, configDir = config) {
+function runInstaller(revision, configDir = config, options = {}) {
+  const { env = process.env, targetPath = target } = options;
   if (process.platform === "win32") {
     return execFileSync("pwsh", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installPowerShell,
-      "-Revision", revision, "-SourceDir", source, "-Target", target, "-ConfigDir", configDir], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      "-Revision", revision, "-SourceDir", source, "-Target", targetPath, "-ConfigDir", configDir], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
   }
-  return execFileSync("bash", [installShell, "--revision", revision, "--source-dir", source, "--target", target, "--config-dir", configDir],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("bash", [installShell, "--revision", revision, "--source-dir", source, "--target", targetPath, "--config-dir", configDir],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
+}
+
+async function nodeFloorEnvironment(major) {
+  const directory = join(work, `node-${major}-bin`);
+  await mkdir(directory, { recursive: true });
+  const shim = process.platform === "win32" ? join(directory, "node.cmd") : join(directory, "node");
+  const body = process.platform === "win32"
+    ? `@echo off\r\necho %*| findstr /L /C:"process.versions.node" >nul\r\nif not errorlevel 1 (\r\n  echo %FIXTURE_NODE_MAJOR%\r\n  exit /b 0\r\n)\r\necho FIXTURE_NODE_PREFLIGHT_ACCEPTED 1>&2\r\nexit /b 97\r\n`
+    : `#!/bin/sh\ncase "$*" in\n  *process.versions.node*) if [ "$1" = "-p" ]; then printf '%s\\n' "$FIXTURE_NODE_MAJOR"; exit 0; fi; [ "$FIXTURE_NODE_MAJOR" -ge 22 ]; exit $? ;;\nesac\nprintf 'FIXTURE_NODE_PREFLIGHT_ACCEPTED\\n' >&2\nexit 97\n`;
+  await writeFile(shim, body);
+  if (process.platform !== "win32") await chmod(shim, 0o700);
+  const env = { ...process.env, FIXTURE_NODE_MAJOR: String(major) };
+  const pathKey = Object.keys(env).find((name) => name.toLowerCase() === "path") ?? "PATH";
+  env[pathKey] = `${directory}${process.platform === "win32" ? ";" : ":"}${env[pathKey] ?? ""}`;
+  return env;
+}
+
+function installerFailure(run, expected) {
+  try {
+    run();
+  } catch (error) {
+    const failure = error && typeof error === "object"
+      ? [error.message, error.stdout, error.stderr].map((value) => value?.toString?.() ?? "").join("\n")
+      : String(error);
+    assert.match(failure, expected);
+    return failure;
+  }
+  throw new Error("Installer preflight unexpectedly continued.");
 }
 
 function runMaintenance(kind, backupPath) {
@@ -206,6 +235,14 @@ try {
   const first = git(["rev-parse", "HEAD"]);
   const invalidPin = "0".repeat(40);
   assert.throws(() => runInstaller(invalidPin), "installer must reject a SHA that differs from source HEAD");
+  const rejectedTarget = join(work, "node-20-rejected", "app");
+  const node20 = await nodeFloorEnvironment(20);
+  installerFailure(() => runInstaller(first, join(work, "node-20-config"), { env: node20, targetPath: rejectedTarget }), /Node\.js 22 or newer is required/);
+  await assert.rejects(access(rejectedTarget), { code: "ENOENT" });
+  const acceptedTarget = join(work, "node-22-preflight", "app");
+  const node22 = await nodeFloorEnvironment(22);
+  installerFailure(() => runInstaller(first, join(work, "node-22-config"), { env: node22, targetPath: acceptedTarget }), /FIXTURE_NODE_PREFLIGHT_ACCEPTED/);
+  await assert.rejects(access(acceptedTarget), { code: "ENOENT" });
   const firstOutput = runInstaller(first);
   assert.match(firstOutput, new RegExp(first));
   const initialState = JSON.parse(await readFile(join(target, ".meta-instagram-mcp-install.json"), "utf8"));
