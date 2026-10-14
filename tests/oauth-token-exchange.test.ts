@@ -29,7 +29,7 @@ describe("exchangeCodeForLongLivedToken", () => {
   it("exchanges an Instagram code server-side and returns the long-lived token", async () => {
     httpMock
       .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token", user_id: "ig-user" }))
-      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-token", token_type: "bearer", expires_in: 5183944 }));
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-token", id: "generic-graph-id", token_type: "bearer", expires_in: 5183944 }));
 
     const token = await exchangeCodeForLongLivedToken({
       authMode: "instagram",
@@ -44,19 +44,43 @@ describe("exchangeCodeForLongLivedToken", () => {
       accessToken: "long-token",
       tokenType: "bearer",
       authMode: "instagram",
-      expiresAt: "2026-07-21T23:59:04.000Z"
+      expiresAt: "2026-07-21T23:59:04.000Z",
+      userId: "ig-user"
     });
     expect(calledUrl(0)).toBe("https://api.instagram.com/oauth/access_token");
     expect(httpMock.mock.calls[0][1]?.method).toBe("POST");
+    expect(httpMock.mock.calls.every((call) => call[1]?.allowRouteRetry === false)).toBe(true);
     expect(String(httpMock.mock.calls[0][1]?.body)).toContain("client_secret=secret");
     expect(calledUrl(1)).toContain("https://graph.instagram.com/access_token");
     expect(calledUrl(1)).toContain("grant_type=ig_exchange_token");
     expect(calledUrl(1)).toContain("access_token=short-token");
   });
 
+  it("fails before long-lived exchange when Instagram short response has no user_id", async () => {
+    httpMock.mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token", id: "generic-graph-id" }));
+
+    await expect(exchangeCodeForLongLivedToken({
+      authMode: "instagram", code: "code-123", appId: "123", appSecret: "secret",
+      redirectUri: "http://localhost:8787/callback", graphApiVersion: "v25.0"
+    })).rejects.toThrow("OAUTH_IDENTITY_UNVERIFIED");
+
+    expect(httpMock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a long response user_id that conflicts with the short response user_id", async () => {
+    httpMock
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token", user_id: "ig-user-1" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-token", user_id: "ig-user-2" }));
+
+    await expect(exchangeCodeForLongLivedToken({
+      authMode: "instagram", code: "code-123", appId: "123", appSecret: "secret",
+      redirectUri: "http://localhost:8787/callback", graphApiVersion: "v25.0"
+    })).rejects.toThrow("OAuth identity mismatch.");
+  });
+
   it("never puts the app secret in the query string of the Instagram code exchange", async () => {
     httpMock
-      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token", user_id: "ig-user" }))
       .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-token" }));
 
     await exchangeCodeForLongLivedToken({
@@ -90,10 +114,24 @@ describe("exchangeCodeForLongLivedToken", () => {
 
     expect(token.accessToken).toBe("long-facebook-token");
     expect(token.authMode).toBe("facebook");
+    expect(httpMock.mock.calls.every((call) => call[1]?.allowRouteRetry === false)).toBe(true);
     expect(calledUrl(0)).toContain("https://graph.facebook.com/v25.0/oauth/access_token");
     expect(calledUrl(0)).toContain("code=code-123");
     expect(calledUrl(1)).toContain("grant_type=fb_exchange_token");
     expect(calledUrl(1)).toContain("fb_exchange_token=short-facebook-token");
+  });
+
+  it("does not treat a Facebook provider user_id as the resolved Instagram account ID", async () => {
+    httpMock
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-facebook-token", user_id: "facebook-user-id" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-facebook-token", user_id: "facebook-user-id" }));
+
+    const token = await exchangeCodeForLongLivedToken({
+      authMode: "facebook", code: "code-123", appId: "123", appSecret: "secret",
+      redirectUri: "http://localhost:8787/callback", graphApiVersion: "v25.0"
+    });
+
+    expect(token.userId).toBeUndefined();
   });
 
   it("fails loudly when Meta answers without an access_token", async () => {
@@ -148,6 +186,7 @@ describe("refreshLongLivedToken", () => {
     expect(token.pageId).toBe("fb-page");
     expect(calledUrl(0)).toContain("https://graph.instagram.com/refresh_access_token");
     expect(calledUrl(0)).toContain("grant_type=ig_refresh_token");
+    expect(httpMock.mock.calls[0][1]?.allowRouteRetry).toBe(false);
   });
 
   it("refuses to refresh a Facebook token without app credentials and sends nothing", async () => {

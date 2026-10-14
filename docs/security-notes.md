@@ -11,6 +11,7 @@
 | `.env` | Реальный Meta App ID/Secret и локальные runtime-настройки. |
 | `app secret.md.rtf` | Локальная копия app secret. |
 | `~/.config/meta-instagram-mcp/token.json` | Long-lived access token и сохраненные IG account metadata. На POSIX файл ограничен режимом `0600`; на Windows применяется защищённый NTFS DACL только для текущего пользователя, SYSTEM и локальных администраторов. |
+| `token.json.oauth-state/` | Хеши одноразовых OAuth state и контекст привязки; сам state в каталог не записывается. |
 
 Token-store должен быть приватным: режим `0600` на POSIX; защищённый NTFS DACL на Windows. Windows mode bits не подтверждают приватность, поэтому приложение проверяет ACL и отказывает при неразрешённых allow-правилах.
 
@@ -63,6 +64,8 @@ Token-store должен быть приватным: режим `0600` на POS
 2. Обновленных docs и security notes.
 3. Отдельных tool names, явно показывающих write behavior.
 4. Сильного подтверждения перед destructive или publishing actions.
+
+OAuth callback — отдельный write path для учётных данных. Он разрешён через state-bound `meta_begin_oauth` и callback, после проверки fresh token на ожидаемый Instagram account/Page и до backup/save. `meta_exchange_code` legacy: он может записать только пустой token-store, а существующий отклоняет до обмена; `save=false` не меняет store. OAuth token-endpoint запросы не повторяются по fallback routes; timeout при code exchange оставляет исход неизвестным, поэтому повторно использовать code нельзя. Одна runtime-инсталляция хранит один активный account. Для независимых аккаунтов используйте отдельный runtime/config/token/state root; dedicated remote core позволяет оставить Meta App Secret в приватной серверной конфигурации, тогда локальному proxy нужен только его собственный bearer.
 
 Единственная запись сегодня - публикация (08.09.2026), и все четыре условия у нее выполнены:
 

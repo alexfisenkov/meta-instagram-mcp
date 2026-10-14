@@ -9,7 +9,8 @@ import { promisify } from "node:util";
 import { loadConfig } from "./config.js";
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken, type OAuthToken } from "./oauth.js";
 import { createOAuthStateStore, type OAuthStateBinding, type OAuthStateStore } from "./oauth-state.js";
-import { loadStoredToken, saveStoredToken, type StoredInstagramToken } from "./token-store.js";
+import { loadStoredToken, sameStoredTokenSnapshot, withTokenStoreLock, type StoredInstagramToken } from "./token-store.js";
+import { verifyOAuthAccountIdentity, type OAuthIdentityConstraints, type VerifiedOAuthIdentity } from "./oauth-account-identity.js";
 
 export type ParsedCallback =
   | { type: "code"; code: string; state?: string }
@@ -23,9 +24,11 @@ export interface OAuthCallbackServiceOptions {
   stateStore: OAuthStateStore;
   binding: OAuthStateBinding;
   exchangeCode(code: string): Promise<OAuthToken>;
+  verifyAccount(token: OAuthToken, expected: OAuthIdentityConstraints): Promise<VerifiedOAuthIdentity>;
   readCurrentToken?(): Promise<StoredInstagramToken | undefined>;
   backupToken?(token: StoredInstagramToken): Promise<void>;
-  saveToken(token: OAuthToken): Promise<void>;
+  saveToken?(token: OAuthToken): Promise<void>;
+  commitToken?(expected: StoredInstagramToken | undefined, token: OAuthToken): Promise<void>;
 }
 export interface OAuthCallbackService {
   issueState(): Promise<string>;
@@ -46,7 +49,21 @@ export function parseCallbackRequest(requestUrl: string, expectedPath: string): 
 
 export function createOAuthCallbackService(options: OAuthCallbackServiceOptions): OAuthCallbackService {
   return {
-    issueState: () => options.stateStore.issue(options.binding),
+    async issueState() {
+      const current = await options.readCurrentToken?.();
+      if (current?.authMode && current.authMode !== options.binding.authMode) {
+        throw new Error("OAUTH_STATE_CONTEXT_MISMATCH");
+      }
+      return options.stateStore.issue({
+        ...options.binding,
+        ...(options.binding.expectedAccountId ?? current?.userId
+          ? { expectedAccountId: options.binding.expectedAccountId ?? current?.userId }
+          : {}),
+        ...(options.binding.expectedPageId ?? current?.pageId
+          ? { expectedPageId: options.binding.expectedPageId ?? current?.pageId }
+          : {}),
+      });
+    },
     async handleCallback(input) {
       let url: URL;
       try {
@@ -62,23 +79,56 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
       try {
         const current = await options.readCurrentToken?.();
         if (current?.authMode && current.authMode !== options.binding.authMode) return failed();
-        if (options.binding.expectedAccountId && current?.userId && !constantStringEqual(options.binding.expectedAccountId, current.userId)) return failed();
+        let expectedAccountId = consumed.expectedAccountId ?? options.binding.expectedAccountId ?? current?.userId;
+        let expectedPageId = consumed.expectedPageId ?? options.binding.expectedPageId ?? current?.pageId;
+        if ((expectedAccountId && current?.userId && !constantStringEqual(expectedAccountId, current.userId)) ||
+            (expectedPageId && current?.pageId && !constantStringEqual(expectedPageId, current.pageId))) return failed();
+        const verifyCurrent = Boolean(current?.accessToken && (
+          (!expectedAccountId && !expectedPageId) ||
+          (expectedAccountId && !current.userId) ||
+          (expectedPageId && !current.pageId)
+        ));
+        if (current?.accessToken && verifyCurrent) {
+          const currentIdentity = await options.verifyAccount({
+            ...current,
+            accessToken: current.accessToken,
+            authMode: current.authMode ?? options.binding.authMode,
+          }, {
+            ...(expectedAccountId ? { expectedAccountId } : {}),
+            ...(expectedPageId ? { expectedPageId } : {}),
+          });
+          if ((expectedAccountId && !constantStringEqual(expectedAccountId, currentIdentity.userId)) ||
+              (expectedPageId && (!currentIdentity.pageId || !constantStringEqual(expectedPageId, currentIdentity.pageId)))) return failed();
+          expectedAccountId ??= currentIdentity.userId;
+          expectedPageId ??= currentIdentity.pageId;
+        }
         const next = await options.exchangeCode(parsed.code);
         if (next.authMode && next.authMode !== options.binding.authMode) return failed();
-        const expectedAccountId = options.binding.expectedAccountId ?? current?.userId;
-        if (expectedAccountId && next.userId && !constantStringEqual(expectedAccountId, next.userId)) return failed();
-        if (current?.accessToken) {
-          if (!options.backupToken) return failed();
-          await options.backupToken(current);
-        }
+        const identity = await options.verifyAccount(next, {
+          ...(expectedAccountId ? { expectedAccountId } : {}),
+          ...(expectedPageId ? { expectedPageId } : {}),
+        });
+        if (!identity.userId || (expectedAccountId && !constantStringEqual(expectedAccountId, identity.userId)) ||
+            (expectedPageId && (!identity.pageId || !constantStringEqual(expectedPageId, identity.pageId)))) return failed();
+        if (options.binding.authMode === "instagram" && next.userId &&
+            !constantStringEqual(identity.userId, next.userId)) return failed();
         const merged: OAuthToken = {
           ...next,
           authMode: options.binding.authMode,
-          ...(next.userId || !current?.userId ? {} : { userId: current.userId }),
-          ...(next.pageId || !current?.pageId ? {} : { pageId: current.pageId }),
+          userId: identity.userId,
+          ...(identity.pageId ? { pageId: identity.pageId } : {}),
           ...(next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
         };
-        await options.saveToken(merged);
+        if (options.commitToken) {
+          await options.commitToken(current, merged);
+        } else {
+          if (current?.accessToken) {
+            if (!options.backupToken) return failed();
+            await options.backupToken(current);
+          }
+          if (!options.saveToken) return failed();
+          await options.saveToken(merged);
+        }
         return { status: "success", message: "Authorization complete." };
       } catch { return failed(); }
     },
@@ -110,18 +160,21 @@ export async function runCallbackServer(): Promise<void> {
     throw new Error("Local callback helper only supports loopback HTTP redirect URIs.");
   }
   const current = await loadStoredToken(config.tokenStorePath);
+  const expectedAccountId = config.userId ?? current?.userId;
+  const expectedPageId = config.pageId ?? current?.pageId;
   const binding: OAuthStateBinding = {
-    accountBinding: `${config.authMode}:${current?.userId ?? current?.pageId ?? "local"}`,
+    accountBinding: `${config.authMode}:${expectedAccountId ?? expectedPageId ?? "local"}`,
     authMode: config.authMode, redirectUri: config.redirectUri,
-    ...(current?.userId ? { expectedAccountId: current.userId } : {}),
+    ...(expectedAccountId ? { expectedAccountId } : {}),
+    ...(expectedPageId ? { expectedPageId } : {}),
   };
   const stateStore = createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` });
   const service = createOAuthCallbackService({
     stateStore, binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
+    verifyAccount: (token, expected) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
-    backupToken: () => backupTokenFile(config.tokenStorePath),
-    saveToken: (token) => saveStoredToken(config.tokenStorePath, token),
+    commitToken: (expected, token) => commitStoredOAuthToken(config.tokenStorePath, expected, token),
   });
   const state = await service.issueState();
   const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId, redirectUri: config.redirectUri, scopes: config.defaultScopes ?? defaultScopesForAuthMode(config.authMode), forceReauth: true, graphApiVersion: config.graphApiVersion });
@@ -165,6 +218,15 @@ async function backupTokenFile(path: string): Promise<void> {
   const backupPath = `${path}.backup-${Date.now()}-${randomBytes(6).toString("hex")}`;
   await copyFile(path, backupPath, fsConstants.COPYFILE_EXCL);
   await ensurePrivateFile(backupPath);
+}
+
+export async function commitStoredOAuthToken(path: string, expected: StoredInstagramToken | undefined, token: OAuthToken): Promise<void> {
+  await withTokenStoreLock(path, async (store) => {
+    const current = await store.load();
+    if (!sameStoredTokenSnapshot(expected, current)) throw new Error("TOKEN_STORE_CHANGED");
+    if (current?.accessToken) await backupTokenFile(path);
+    await store.save(token);
+  });
 }
 async function safeConsume(store: OAuthStateStore, state: string, binding: OAuthStateBinding) {
   try { return await store.consume(state, binding); } catch { return undefined; }

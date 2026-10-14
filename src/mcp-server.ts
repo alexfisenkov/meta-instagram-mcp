@@ -58,7 +58,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_exchange_code",
     {
       title: "Exchange Instagram OAuth Code",
-      description: "Exchange an Instagram authorization code for a long-lived token and optionally save it outside the repo.",
+      description: "Legacy exchange for an empty token store only. Existing credentials are never replaced here; use meta_begin_oauth and its state-bound callback to reauthorize. Set save=false to inspect without changing the store.",
       inputSchema: z.object({
         code: z.string().min(1),
         save: z.boolean().optional()

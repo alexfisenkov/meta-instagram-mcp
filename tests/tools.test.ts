@@ -166,6 +166,29 @@ describe("tool handlers", () => {
     }));
   });
 
+  it("does not rebind an active Facebook token store to a different Instagram account", async () => {
+    const save = vi.fn();
+    const get = vi.fn().mockResolvedValue({ id: "ig-account-2", username: "other-account" });
+    const handlers = createToolHandlers({
+      config: {
+        authMode: "facebook",
+        accessToken: "active-token",
+        graphApiVersion: "v25.0",
+        tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
+      },
+      tokenStore: {
+        load: vi.fn().mockResolvedValue({ accessToken: "active-token", authMode: "facebook", userId: "ig-account-1" }),
+        save,
+      },
+      clientFactory: () => ({ get } as never),
+    });
+
+    await expect(handlers.resolveInstagramAccount({ userId: "ig-account-2" })).rejects.toThrow("TOKEN_STORE_IDENTITY_MISMATCH");
+
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("uses Facebook-safe account fields by default", async () => {
     const get = vi.fn().mockResolvedValue({ id: "ig-1", username: "creator" });
     const handlers = createToolHandlers({
@@ -256,5 +279,28 @@ describe("tool handlers", () => {
       userId: "ig-1",
       username: "creator",
     }));
+  });
+
+  it("does not save direct Facebook resolution without a nonempty Instagram username", async () => {
+    const save = vi.fn();
+    const get = vi.fn().mockResolvedValue({ id: "ig-1" });
+    const handlers = createToolHandlers({
+      config: {
+        authMode: "facebook",
+        accessToken: "env-token",
+        graphApiVersion: "v25.0",
+        tokenStorePath: "/tmp/token.json",
+        publishLogPath: "/tmp/publish-log.jsonl",
+      },
+      tokenStore: {
+        load: vi.fn(),
+        save,
+      },
+      clientFactory: () => ({ get } as never),
+    });
+
+    await expect(handlers.resolveInstagramAccount({ userId: "ig-1" })).rejects.toThrow("OAUTH_IDENTITY_UNVERIFIED");
+
+    expect(save).not.toHaveBeenCalled();
   });
 });

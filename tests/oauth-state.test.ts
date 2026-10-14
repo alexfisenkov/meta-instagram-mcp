@@ -38,6 +38,34 @@ describe("OAuthStateStore", () => {
     await expect(store.consume(state, binding)).resolves.toMatchObject(binding);
   });
 
+  it("binds a state to the configured Instagram account and Facebook Page", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-"));
+    const store = new OAuthStateStore({ directory, now: () => 1_000 });
+    const binding = { accountBinding: "facebook:operator", authMode: "facebook" as const,
+      redirectUri: "https://mcp.example/callback", expectedAccountId: "ig-account-1", expectedPageId: "page-1" };
+    const state = await store.issue(binding);
+
+    await expect(store.consume(state, { ...binding, expectedPageId: "page-2" })).resolves.toBeUndefined();
+    await expect(store.consume(state, { ...binding, expectedAccountId: "ig-account-2" })).resolves.toBeUndefined();
+    await expect(store.consume(state, binding)).resolves.toMatchObject(binding);
+  });
+
+  it("keeps same-app OAuth states isolated by per-install state roots", async () => {
+    const firstDirectory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-first-"));
+    const secondDirectory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-second-"));
+    const first = new OAuthStateStore({ directory: firstDirectory, now: () => 1_000 });
+    const second = new OAuthStateStore({ directory: secondDirectory, now: () => 1_000 });
+    const binding = { accountBinding: "facebook:configured", authMode: "facebook" as const,
+      redirectUri: "https://mcp.example/callback" };
+    const firstState = await first.issue(binding);
+    const secondState = await second.issue(binding);
+
+    await expect(first.consume(secondState, binding)).resolves.toBeUndefined();
+    await expect(second.consume(firstState, binding)).resolves.toBeUndefined();
+    await expect(first.consume(firstState, binding)).resolves.toMatchObject(binding);
+    await expect(second.consume(secondState, binding)).resolves.toMatchObject(binding);
+  });
+
   it("rejects expired state", async () => {
     let now = 1_000;
     const directory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-"));

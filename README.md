@@ -37,7 +37,7 @@ npm run test:native-registration
 - `meta_auth_status` - проверяет конфиг и redacted token metadata.
 - `meta_scope_presets` - показывает поддерживаемые OAuth scope presets.
 - `meta_build_login_url` - строит официальный OAuth login URL.
-- `meta_exchange_code` - меняет OAuth `code` на long-lived token и сохраняет его вне репозитория.
+- `meta_exchange_code` - legacy обмен без state binding, сохраняет только в пустой token-store. Для первичной и повторной авторизации используйте state-bound `meta_begin_oauth` и callback.
 - `meta_refresh_token` - обновляет long-lived token.
 - `meta_list_facebook_pages` - показывает Facebook Pages, доступные Facebook Login token, и связанные Instagram Business accounts.
 - `meta_resolve_instagram_account` - сохраняет IG user id из связанной Facebook Page или из direct IG user id.
@@ -53,7 +53,7 @@ npm run test:native-registration
 - `meta_create_media_container` - создает контейнер публикации по публичной ссылке на медиа и читает его `status_code`. Ничего не публикует.
 - `meta_publish_media` - публикует готовый контейнер. Требует `confirm: true` и `META_INSTAGRAM_WRITE=true`.
 
-Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. По умолчанию `tools/run.mjs` запускает локальный MCP по stdio. Если задан любой `INSTAGRAM_MCP_REMOTE_*`, wrapper запускает stdio-proxy к настроенному HTTPS MCP; при ошибке remote-конфигурации он завершается и не создаёт локальное ядро. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
+Portable runtime запускается через `tools/run.mjs`, который читает внешний `~/.config/meta-instagram-mcp/.env`; token-store по умолчанию находится в той же внешней папке. Одна runtime-инсталляция обслуживает один активный Instagram account. Для второго независимого аккаунта используйте отдельный config/token/state root и отдельный процесс. Не запускайте установленный server через `node dist/server.js`, если хотите использовать внешний config. По умолчанию `tools/run.mjs` запускает локальный MCP по stdio. Если задан любой `INSTAGRAM_MCP_REMOTE_*`, wrapper запускает stdio-proxy к настроенному HTTPS MCP; при ошибке remote-конфигурации он завершается и не создаёт локальное ядро. Инструменты tools не отправляют Meta-запрос без соответствующего вызова, а права определяются OAuth consent.
 
 Из приватного внешнего `.env` wrapper принимает только поддерживаемые `META_*` и `INSTAGRAM_MCP_*` имена; неизвестные ключи, включая `META_MCP_CONFIG_DIR`, завершают запуск с безопасным кодом ошибки. Значения читаются как текст без shell substitution. Переменные окружения процесса имеют приоритет над файлом. HTTP включается через `INSTAGRAM_MCP_TRANSPORT=http`; listener требует bearer secret и настраивается через `INSTAGRAM_MCP_HTTP_*`. API, browser и phone write gates независимы: `META_INSTAGRAM_WRITE`, `INSTAGRAM_MCP_BROWSER_WRITES` и `INSTAGRAM_MCP_PHONE_WRITES`. Подробнее — [runtime-параметры](docs/install.md#runtime-параметры-и-transports).
 

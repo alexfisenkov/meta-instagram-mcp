@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { redactToken, type MetaInstagramConfig } from "./config.js";
 import { createAccountContextResolver } from "./account-context.js";
 import { createApiProvider } from "./api-provider.js";
@@ -11,8 +12,9 @@ import {
   type AuthMode,
   type OAuthToken
 } from "./oauth.js";
+import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 import { createPublishHandlers } from "./publish.js";
-import { loadStoredToken, saveStoredToken, type StoredInstagramToken } from "./token-store.js";
+import { loadStoredToken, sameStoredTokenSnapshot, saveStoredToken, withTokenStoreLock, type StoredInstagramToken, type TokenStoreTransaction } from "./token-store.js";
 
 interface TokenStore {
   load: () => Promise<StoredInstagramToken | undefined>;
@@ -53,6 +55,14 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     load: () => loadStoredToken(dependencies.config.tokenStorePath),
     save: (token: StoredInstagramToken) => saveStoredToken(dependencies.config.tokenStorePath, token)
   };
+  const withStoreLock = <T>(operation: (transaction: TokenStoreTransaction) => Promise<T>): Promise<T> =>
+    dependencies.tokenStore
+      ? operation({ load: store.load, save: (token) => store.save(token as StoredInstagramToken) })
+      : withTokenStoreLock(dependencies.config.tokenStorePath, operation);
+  const unlockedStore: TokenStoreTransaction = {
+    load: store.load,
+    save: (token) => store.save(token as StoredInstagramToken),
+  };
   const makeClient = dependencies.clientFactory ?? ((accessToken: string, authMode: AuthMode) => new MetaClient({
     accessToken,
     apiVersion: dependencies.config.graphApiVersion,
@@ -66,7 +76,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     })
   });
 
-  async function resolveToken(explicitToken?: string): Promise<ResolvedToken> {
+  async function resolveToken(explicitToken?: string, tokenStore: Pick<TokenStoreTransaction, "load"> = store): Promise<ResolvedToken> {
     if (explicitToken) return { accessToken: explicitToken, authMode: dependencies.config.authMode };
     if (dependencies.config.accessToken) {
       return {
@@ -76,7 +86,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
         pageId: dependencies.config.pageId
       };
     }
-    const stored = await store.load();
+    const stored = await tokenStore.load();
     if (!stored?.accessToken) {
       throw new Error("No Instagram access token configured. Set META_INSTAGRAM_ACCESS_TOKEN or run meta_exchange_code first.");
     }
@@ -189,31 +199,77 @@ export function createToolHandlers(dependencies: ToolDependencies) {
       requireConfig(dependencies.config.appId, "META_INSTAGRAM_APP_ID");
       requireConfig(dependencies.config.appSecret, "META_INSTAGRAM_APP_SECRET");
       requireConfig(dependencies.config.redirectUri, "META_INSTAGRAM_REDIRECT_URI");
-      const token = await exchangeCodeForLongLivedToken({
-        authMode: dependencies.config.authMode,
-        code: args.code,
-        appId: dependencies.config.appId,
-        appSecret: dependencies.config.appSecret,
-        redirectUri: dependencies.config.redirectUri,
-        graphApiVersion: dependencies.config.graphApiVersion
-      });
-      if (args.save ?? true) await store.save(token as StoredInstagramToken);
-      return redactStoredToken(token);
+      const save = args.save ?? true;
+      const exchange = async (tokenStore: TokenStoreTransaction) => {
+        if (save && await tokenStore.load() !== undefined) {
+          throw new Error("TOKEN_STORE_NOT_EMPTY: use meta_begin_oauth and the configured callback to reauthorize this installation.");
+        }
+        const token = await exchangeCodeForLongLivedToken({
+          authMode: dependencies.config.authMode,
+          code: args.code,
+          appId: dependencies.config.appId!,
+          appSecret: dependencies.config.appSecret!,
+          redirectUri: dependencies.config.redirectUri!,
+          graphApiVersion: dependencies.config.graphApiVersion
+        });
+        if (save) {
+          const identity = await verifyOAuthAccountIdentity({
+            authMode: dependencies.config.authMode,
+            graphApiVersion: dependencies.config.graphApiVersion,
+          }, token, {
+            ...(dependencies.config.userId ? { expectedAccountId: dependencies.config.userId } : {}),
+            ...(dependencies.config.pageId ? { expectedPageId: dependencies.config.pageId } : {}),
+          }, (accessToken, authMode) => makeClient(accessToken, authMode));
+          if (await tokenStore.load() !== undefined) {
+            throw new Error("TOKEN_STORE_NOT_EMPTY: authorization was exchanged but was not saved; use meta_begin_oauth and the configured callback.");
+          }
+          await tokenStore.save({
+            ...token,
+            userId: identity.userId,
+            ...(identity.pageId ? { pageId: identity.pageId } : {}),
+          } as StoredInstagramToken);
+          return redactStoredToken({ ...token, userId: identity.userId, ...(identity.pageId ? { pageId: identity.pageId } : {}) });
+        }
+        return redactStoredToken(token);
+      };
+      return save ? withStoreLock(exchange) : exchange(unlockedStore);
     },
 
     async refreshToken(args: ToolArgs = {}) {
-      const resolved = await resolveToken(args.accessToken);
-      const token = await refreshLongLivedToken({
-        authMode: resolved.authMode,
-        accessToken: resolved.accessToken,
-        appId: dependencies.config.appId,
-        appSecret: dependencies.config.appSecret,
-        userId: resolved.userId,
-        pageId: resolved.pageId,
-        graphApiVersion: dependencies.config.graphApiVersion
-      });
-      if (args.save ?? true) await store.save({ ...resolved.stored, ...token });
-      return redactStoredToken(token);
+      const save = args.save ?? true;
+      const refresh = async (tokenStore: TokenStoreTransaction) => {
+        const resolved = await resolveToken(args.accessToken, tokenStore);
+        const current = save ? resolved.stored ?? await tokenStore.load() : resolved.stored;
+        if (save && current && (!current.accessToken || !sameSecret(resolved.accessToken, current.accessToken))) {
+          throw new Error("TOKEN_STORE_NOT_EMPTY: the supplied refresh token does not match the active token store.");
+        }
+        if (save && current?.authMode && current.authMode !== dependencies.config.authMode) {
+          throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+        }
+        if (save && current?.userId && resolved.userId && current.userId !== resolved.userId) {
+          throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+        }
+        if (save && current?.pageId && resolved.pageId && current.pageId !== resolved.pageId) {
+          throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+        }
+        const beforeRefresh = save ? current : undefined;
+        const token = await refreshLongLivedToken({
+          authMode: resolved.authMode,
+          accessToken: resolved.accessToken,
+          appId: dependencies.config.appId,
+          appSecret: dependencies.config.appSecret,
+          userId: current?.userId ?? resolved.userId,
+          pageId: current?.pageId ?? resolved.pageId,
+          graphApiVersion: dependencies.config.graphApiVersion
+        });
+        if (save) {
+          const latest = await tokenStore.load();
+          if (!sameStoredTokenSnapshot(beforeRefresh, latest)) throw new Error("TOKEN_STORE_CHANGED");
+          await tokenStore.save({ ...current, ...token });
+        }
+        return redactStoredToken(token);
+      };
+      return save ? withStoreLock(refresh) : refresh(unlockedStore);
     },
 
     async getAccountInfo(args: ToolArgs = {}) {
@@ -316,73 +372,88 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     },
 
     async resolveInstagramAccount(args: ToolArgs = {}) {
-      const resolved = await resolveToken(args.accessToken);
-      const client = makeClient(resolved.accessToken, "facebook");
-      if (args.userId) {
-        const instagramAccount = requireRecord(await client.get(`/${encodeURIComponent(args.userId)}`, {
-          fields: defaultAccountFields("facebook")
-        }), "Instagram account");
-        const instagramUserId = toStringValue(instagramAccount.id);
-        if (!instagramUserId) {
-          throw new Error("Instagram account id was not returned by Meta.");
+      const save = args.save ?? true;
+      const resolve = async (tokenStore: TokenStoreTransaction) => {
+        const resolved = await resolveToken(args.accessToken, tokenStore);
+        const current = save ? resolved.stored ?? await tokenStore.load() : resolved.stored;
+        if (save && current && (!current.accessToken || !sameSecret(resolved.accessToken, current.accessToken))) {
+          throw new Error("TOKEN_STORE_NOT_EMPTY: account resolution must use the active token store.");
         }
-        if (args.save ?? true) {
-          await store.save({
-            ...resolved.stored,
+        const client = makeClient(resolved.accessToken, "facebook");
+        if (args.userId) {
+          const instagramAccount = requireRecord(await client.get(`/${encodeURIComponent(args.userId)}`, {
+            fields: defaultAccountFields("facebook")
+          }), "Instagram account");
+          const instagramUserId = toStringValue(instagramAccount.id);
+          const username = typeof instagramAccount.username === "string" && instagramAccount.username.trim()
+            ? instagramAccount.username
+            : undefined;
+          if (!instagramUserId || (save && !username)) {
+            throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+          }
+          if (save && current?.userId && current.userId !== instagramUserId) throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+          if (save && current?.pageId && !current.userId) throw new Error("TOKEN_STORE_IDENTITY_UNVERIFIED");
+          if (save) {
+            await tokenStore.save({
+              ...current,
+              accessToken: resolved.accessToken,
+              tokenType: current?.tokenType ?? "bearer",
+              authMode: "facebook",
+              userId: instagramUserId,
+              username,
+              pageId: resolved.pageId ?? current?.pageId ?? dependencies.config.pageId,
+              expiresAt: current?.expiresAt,
+              permissions: current?.permissions
+            });
+          }
+          return {
+            authMode: "facebook",
+            resolutionMode: "direct_user_id",
+            instagramBusinessAccount: instagramAccount,
+            saved: save
+          };
+        }
+
+        const selectedPageId = args.pageId ?? resolved.pageId ?? dependencies.config.pageId;
+        const page = selectedPageId
+          ? await client.get(`/${encodeURIComponent(selectedPageId)}`, {
+            fields: ["id", "name", "instagram_business_account{id,username,name,profile_picture_url}"]
+          })
+          : findPageWithInstagram(await client.get("/me/accounts", {
+            fields: ["id", "name", "instagram_business_account{id,username,name,profile_picture_url}"],
+            limit: 100
+          }));
+        const pageRecord = requireRecord(page, "Facebook Page");
+        const instagramAccount = requireRecord(pageRecord.instagram_business_account, "instagram_business_account");
+        const instagramUserId = toStringValue(instagramAccount.id);
+        const pageId = toStringValue(pageRecord.id);
+        if (!instagramUserId || !pageId) {
+          throw new Error("Connected Instagram Business account was not found on the selected Facebook Page.");
+        }
+        if (save && current?.userId && current.userId !== instagramUserId) throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+        if (save && current?.pageId && !current.userId && current.pageId !== pageId) throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+        if (save) {
+          await tokenStore.save({
+            ...current,
             accessToken: resolved.accessToken,
-            tokenType: resolved.stored?.tokenType ?? "bearer",
+            tokenType: current?.tokenType ?? "bearer",
             authMode: "facebook",
             userId: instagramUserId,
             username: toStringValue(instagramAccount.username),
-            pageId: resolved.pageId ?? dependencies.config.pageId,
-            expiresAt: resolved.stored?.expiresAt,
-            permissions: resolved.stored?.permissions
+            pageId,
+            expiresAt: current?.expiresAt,
+            permissions: current?.permissions
           });
         }
         return {
           authMode: "facebook",
-          resolutionMode: "direct_user_id",
+          resolutionMode: "facebook_page",
+          page: pageRecord,
           instagramBusinessAccount: instagramAccount,
-          saved: args.save ?? true
+          saved: save
         };
-      }
-
-      const selectedPageId = args.pageId ?? resolved.pageId ?? dependencies.config.pageId;
-      const page = selectedPageId
-        ? await client.get(`/${encodeURIComponent(selectedPageId)}`, {
-          fields: ["id", "name", "instagram_business_account{id,username,name,profile_picture_url}"]
-        })
-        : findPageWithInstagram(await client.get("/me/accounts", {
-          fields: ["id", "name", "instagram_business_account{id,username,name,profile_picture_url}"],
-          limit: 100
-        }));
-      const pageRecord = requireRecord(page, "Facebook Page");
-      const instagramAccount = requireRecord(pageRecord.instagram_business_account, "instagram_business_account");
-      const instagramUserId = toStringValue(instagramAccount.id);
-      const pageId = toStringValue(pageRecord.id);
-      if (!instagramUserId || !pageId) {
-        throw new Error("Connected Instagram Business account was not found on the selected Facebook Page.");
-      }
-      if (args.save ?? true) {
-        await store.save({
-          ...resolved.stored,
-          accessToken: resolved.accessToken,
-          tokenType: resolved.stored?.tokenType ?? "bearer",
-          authMode: "facebook",
-          userId: instagramUserId,
-          username: toStringValue(instagramAccount.username),
-          pageId,
-          expiresAt: resolved.stored?.expiresAt,
-          permissions: resolved.stored?.permissions
-        });
-      }
-      return {
-        authMode: "facebook",
-        resolutionMode: "facebook_page",
-        page: pageRecord,
-        instagramBusinessAccount: instagramAccount,
-        saved: args.save ?? true
       };
+      return save ? withStoreLock(resolve) : resolve(unlockedStore);
     },
 
     async rawGet(args: ToolArgs) {
@@ -413,6 +484,12 @@ function redactStoredToken(token: OAuthToken): Partial<OAuthToken> {
     permissions: token.permissions,
     expiresAt: token.expiresAt
   };
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
 }
 
 function graphBaseUrl(authMode: AuthMode): string {

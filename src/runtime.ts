@@ -6,10 +6,11 @@ import { createCompanionSourceProvider } from "./companion-source-provider.js";
 import { CompanionHub } from "./companion-hub.js";
 import type { MetaInstagramConfig } from "./config.js";
 import { loadConfig } from "./config.js";
-import { createOAuthCallbackHandler, createOAuthCallbackService, type OAuthCallbackService } from "./callback-server.js";
+import { commitStoredOAuthToken, createOAuthCallbackHandler, createOAuthCallbackService, type OAuthCallbackService } from "./callback-server.js";
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken } from "./oauth.js";
 import { createOAuthStateStore, type OAuthStateBinding } from "./oauth-state.js";
-import { loadStoredToken, saveStoredToken } from "./token-store.js";
+import { loadStoredToken } from "./token-store.js";
+import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 import type { WebhookReceiver } from "./webhooks.js";
 import { createWebhookReceiver } from "./webhooks.js";
 import { WebhookJournal } from "./webhook-journal.js";
@@ -22,12 +23,10 @@ import { MutationSafety } from "./action-safety.js";
 import { createUiApprovalAuthority, type UiApprovalAuthority } from "./ui-approval.js";
 import { createMutationExecutors } from "./mutation-executors.js";
 import { createMutationToolHandlers } from "./mutation-tools.js";
-import { copyFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
 import { registerMutationTools, type MutationToolHandlers } from "./mutation-tools.js";
 import type { MutationExecutor } from "./action-safety.js";
 import { FileActionReadbackStore } from "./action-readback.js";
-import { assertOutsideDirectory, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
+import { assertOutsideDirectory } from "./private-fs.js";
 
 export interface RuntimeOptions {
   config?: MetaInstagramConfig;
@@ -135,18 +134,14 @@ function configuredOAuth(config: MetaInstagramConfig): { service: OAuthCallbackS
   if (redirect.protocol !== "https:" && !(redirect.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(redirect.hostname))) return undefined;
   const expectedAccountId = config.userId;
   const binding: OAuthStateBinding = { accountBinding: `${config.authMode}:${expectedAccountId ?? "configured"}`, authMode: config.authMode,
-    redirectUri: config.redirectUri, ...(expectedAccountId ? { expectedAccountId } : {}) };
+    redirectUri: config.redirectUri, ...(expectedAccountId ? { expectedAccountId } : {}),
+    ...(config.pageId ? { expectedPageId: config.pageId } : {}) };
   const service = createOAuthCallbackService({
     stateStore: createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` }), binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
+    verifyAccount: (token, expected) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
-    backupToken: async () => {
-      await ensurePrivateDirectory(dirname(config.tokenStorePath));
-      const backup = `${config.tokenStorePath}.backup-${Date.now()}-${randomBytes(6).toString("hex")}`;
-      await copyFile(config.tokenStorePath, backup);
-      await ensurePrivateFile(backup);
-    },
-    saveToken: (token) => saveStoredToken(config.tokenStorePath, token)
+    commitToken: (current, token) => commitStoredOAuthToken(config.tokenStorePath, current, token)
   });
   return { service, redirectUri: config.redirectUri };
 }

@@ -121,12 +121,18 @@ export async function exchangeCodeForLongLivedToken(options: {
     code: options.code
   });
   const accessToken = requireString(shortToken.access_token, "Instagram short-lived access_token");
+  const shortUserId = normalizeUserId(shortToken.user_id);
+  if (!shortUserId) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
   const longToken = await graphGet("https://graph.instagram.com/access_token", {
     grant_type: "ig_exchange_token",
     client_secret: options.appSecret,
     access_token: accessToken
   });
-  return normalizeToken(longToken, "instagram");
+  const longUserId = normalizeUserId(longToken.user_id);
+  if (longUserId && shortUserId !== longUserId) {
+    throw new Error("OAuth identity mismatch.");
+  }
+  return { ...normalizeToken(longToken, "instagram"), userId: shortUserId };
 }
 
 export async function refreshLongLivedToken(options: {
@@ -169,14 +175,15 @@ export async function refreshLongLivedToken(options: {
 async function graphGet(urlString: string, params: Record<string, string>): Promise<Record<string, unknown>> {
   const url = new URL(urlString);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-  return requestJson(url, { method: "GET" });
+  return requestJson(url, { method: "GET", allowRouteRetry: false });
 }
 
 async function graphPostForm(urlString: string, params: Record<string, string>): Promise<Record<string, unknown>> {
   return requestJson(new URL(urlString), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(params)
+    body: new URLSearchParams(params),
+    allowRouteRetry: false
   });
 }
 
@@ -198,9 +205,9 @@ function normalizeToken(raw: Record<string, unknown>, authMode: AuthMode): OAuth
   // callback-server сохраняет userId в токен-стор, иначе аккаунт приходится
   // отдельно доразрешать через meta_resolve_instagram_account. Рефакторинг
   // транспорта их потерял — восстановлено 20.08.2026.
-  const userId = typeof raw.user_id === "string" ? raw.user_id
-    : typeof raw.user_id === "number" ? String(raw.user_id)
-    : undefined;
+  // A Facebook access token's provider user_id is not an Instagram account id.
+  // The Instagram ID is resolved separately from a direct account or Facebook Page.
+  const userId = authMode === "instagram" ? normalizeUserId(raw.user_id) : undefined;
   return {
     accessToken,
     tokenType: typeof raw.token_type === "string" ? raw.token_type : "bearer",
@@ -209,6 +216,12 @@ function normalizeToken(raw: Record<string, unknown>, authMode: AuthMode): OAuth
     ...(userId ? { userId } : {}),
     ...(normalizePermissions(raw.permissions) ? { permissions: normalizePermissions(raw.permissions) } : {})
   };
+}
+
+function normalizeUserId(value: unknown): string | undefined {
+  if (typeof value === "string" && value) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  return undefined;
 }
 
 // Meta отдаёт permissions то массивом, то строкой через запятую — приводим к массиву.

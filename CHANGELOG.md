@@ -2,6 +2,15 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
+## 0.2.6 — Unreleased
+
+- `meta_exchange_code` refuses to save into an occupied token-store before exchanging the code; state-bound OAuth callback verifies the fresh Instagram account/Page before backup and save. Refresh and account resolution serialize token-store changes and preserve the active account metadata.
+- Instagram OAuth requires `user_id` in the short exchange response, preserves it when the long-lived response omits it, and compares the long-response `user_id` when present; generic `id` is not treated as an alias. Facebook provider `user_id` is not treated as an Instagram account ID. OAuth token-endpoint requests do not retry fallback routes after an uncertain outcome.
+- Remote stdio proxy accepts an explicit restricted HTTPS MCP endpoint path for a dedicated single-account core while preserving origin-to-`/mcp` configuration.
+- One runtime/token-store remains single-account. A dedicated remote core can retain the Meta App Secret server-side; separate config, token and OAuth-state roots remain isolated.
+- CI ignores `v*` version tags to avoid a duplicate workflow run after the final branch check; branch pushes, pull requests and manual runs remain enabled.
+- Local mock regressions and fixtures cover identity verification, overwrite refusal, store locking, refresh metadata, endpoint/path isolation and no-replay behavior. They do not establish Meta app eligibility, permissions or live OAuth acceptance.
+
 ## 0.2.5 — 2026-10-11
 
 - На Linux/macOS browser companion получает до 8 секунд на отдельную read task, чтобы ограниченное создание и проверка холодной Inbox-вкладки успевали завершиться в пределах общего 12-секундного router deadline. Телефонный default остаётся 4 секунды, Windows defaults — 30 секунд; caller deadline и явный `waitMs` продолжают ограничивать ожидание. Это не гарантирует чтение при задержке сети, входе или проверке аккаунта.

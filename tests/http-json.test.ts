@@ -35,4 +35,24 @@ describe("JSON HTTP cancellation", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(requestMock).toHaveBeenCalledOnce();
   });
+
+  it("does not replay a one-shot OAuth exchange after a timeout when route retry is disabled", async () => {
+    vi.stubEnv("META_GRAPH_FALLBACK_IPS", "203.0.113.10,203.0.113.11");
+    requestMock.mockImplementation(() => {
+      const listeners = new Map<string, (...args: unknown[]) => void>();
+      const request = {
+        on(event: string, listener: (...args: unknown[]) => void) { listeners.set(event, listener); return request; },
+        write() {},
+        end() { listeners.get("timeout")?.(); },
+        destroy(error?: Error) { if (error) listeners.get("error")?.(error); return request; }
+      };
+      return request;
+    });
+
+    await expect(requestJsonHttp(new URL("https://api.instagram.com/oauth/access_token"), {
+      method: "POST", body: new URLSearchParams({ code: "fixture-code" }), allowRouteRetry: false
+    })).rejects.toMatchObject({ name: "JsonHttpNetworkError", attempts: [{ route: "system-dns", ok: false }] });
+
+    expect(requestMock).toHaveBeenCalledOnce();
+  });
 });

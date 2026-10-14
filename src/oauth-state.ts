@@ -10,6 +10,7 @@ export interface OAuthStateBinding {
   authMode: OAuthAuthMode;
   redirectUri: string;
   expectedAccountId?: string;
+  expectedPageId?: string;
 }
 
 export interface OAuthStateRecord extends OAuthStateBinding {
@@ -121,7 +122,8 @@ function sameBinding(record: OAuthStateRecord, expected: OAuthStateBinding): boo
   return equal(record.accountBinding, expected.accountBinding)
     && equal(record.authMode, expected.authMode)
     && equal(record.redirectUri, expected.redirectUri)
-    && equal(record.expectedAccountId ?? "", expected.expectedAccountId ?? "");
+    && (expected.expectedAccountId === undefined || equal(record.expectedAccountId ?? "", expected.expectedAccountId))
+    && (expected.expectedPageId === undefined || equal(record.expectedPageId ?? "", expected.expectedPageId));
 }
 
 function equal(left: string, right: string): boolean {
@@ -136,5 +138,7 @@ function isRecord(value: unknown): value is OAuthStateRecord {
     && "expiresAt" in value && typeof value.expiresAt === "number"
     && "accountBinding" in value && typeof value.accountBinding === "string"
     && "redirectUri" in value && typeof value.redirectUri === "string"
+    && (!("expectedAccountId" in value) || typeof value.expectedAccountId === "string")
+    && (!("expectedPageId" in value) || typeof value.expectedPageId === "string")
     && "authMode" in value && (value.authMode === "facebook" || value.authMode === "instagram");
 }

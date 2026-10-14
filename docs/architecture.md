@@ -39,6 +39,8 @@
 - API использует официальный Graph API; browser companion извлекает только поля фиксированных semantic operations из текущей авторизованной страницы и сообщает coverage/side effects. Это не гарантирует полноту UI, стабильность Instagram DOM или доступность непредоставленных Meta permissions.
 - Парольный вход, перенос cookies/session, caller-supplied selectors, raw click/tap и произвольный page script запрещены.
 - Токены не печатаются в MCP-ответах.
+- Каждый runtime/config/token-store изолирует ровно один активный Instagram account. Независимые account подключаются к отдельным runtime processes с отдельными config, OAuth-state, token-store и bearer credentials; один shared core не является multi-tenant брокером.
+- OAuth callback сверяет fresh token с ожидаемым Instagram account и при наличии Facebook Page. Facebook token `user_id` не считается Instagram ID; без надёжно разрешённого ID/Page callback отказывает до backup/save.
 - Mutation tools используют source-specific gates, точный target/context, однократный audit attempt и per-request confirmation. UI writes дополнительно требуют свежий Hub-signed grant. Это кодовый guard, не доказательство live access или отправки.
 - `meta_raw_get` не превращает сервер в произвольный HTTP-клиент: абсолютный URL принимается
   только для хостов `graph.facebook.com` и `graph.instagram.com`, любой другой отклоняется;
@@ -54,4 +56,4 @@
 - `~/.config/meta-instagram-mcp/token.json` содержит long-lived token и сохраненный IG user id;
 - локальные handoff/live-логи могут фиксировать текущий аккаунт, expiry и smoke evidence.
 
-Если OAuth consent возвращает Page permissions как declined, `/me/accounts` может быть пустым. Это не обязательно означает сломанный token: direct IG user id path может продолжать работать для account/media/insights endpoints.
+Если OAuth consent возвращает Page permissions как declined, `/me/accounts` может быть пустым. Это не обязательно означает сломанный token: direct IG user id path может продолжать работать для account/media/insights endpoints. При Facebook Login для первоначального callback в таком случае требуется заранее известный `META_INSTAGRAM_USER_ID`, иначе аккаунт нельзя безопасно определить.

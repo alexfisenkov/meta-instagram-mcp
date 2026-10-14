@@ -46,15 +46,32 @@ export async function loadRemoteProxyConfig(env: NodeJS.ProcessEnv = process.env
   } else {
     config = { url: env.INSTAGRAM_MCP_REMOTE_URL ?? "", bearerToken: env.INSTAGRAM_MCP_REMOTE_BEARER_TOKEN ?? "" };
   }
-  const url = new URL(config.url);
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("remote URL must be an HTTPS origin");
+  if (!config || typeof config.url !== "string") throw new Error("remote URL must be an HTTPS MCP endpoint");
+  const url = normalizeRemoteMcpEndpoint(config.url);
   if (typeof config.bearerToken !== "string" || Buffer.byteLength(config.bearerToken) < 32) throw new Error("remote bearer token is invalid");
-  return config;
+  return { url: url.href, bearerToken: config.bearerToken };
+}
+
+/** Accept legacy HTTPS origins or an explicit, restricted HTTPS MCP endpoint path. */
+export function normalizeRemoteMcpEndpoint(value: string): URL {
+  const rawPath = value.match(/^https:\/\/[^/?#]*(\/[^?#]*)?/i)?.[1] ?? "/";
+  if (value.includes("\\")) throw new Error("remote URL must be an HTTPS MCP endpoint without traversal");
+  let url: URL;
+  try { url = new URL(value); }
+  catch { throw new Error("remote URL must be an HTTPS MCP endpoint"); }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("remote URL must be an HTTPS MCP endpoint");
+  }
+  if (rawPath === "/") return new URL("/mcp", url.origin);
+  if (!/^\/(?:[A-Za-z0-9_-]+\/)*mcp$/.test(rawPath) || url.pathname !== rawPath) {
+    throw new Error("remote URL must be an HTTPS MCP endpoint without traversal");
+  }
+  return new URL(rawPath, url.origin);
 }
 
 export async function startRemoteProxy(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = await loadRemoteProxyConfig(env);
-  const clientTransport = createRemoteProxyTransport(new URL("/mcp", config.url), config.bearerToken);
+  const clientTransport = createRemoteProxyTransport(new URL(config.url), config.bearerToken);
   const upstream = new Client({ name: "meta-instagram-remote-proxy", version: "0.1.0" });
   await upstream.connect(clientTransport);
   const proxyClient: RemoteClientPort = {

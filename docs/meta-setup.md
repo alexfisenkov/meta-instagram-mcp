@@ -73,7 +73,7 @@ instagram_business_manage_comments
 6. Выполнить `meta_resolve_instagram_account`.
 7. Для чужих аккаунтов или production-доступа пройти App Review / Advanced Access.
 
-Для `instagram` режима нужен отдельный app/use case `API setup with Instagram login`, где Meta показывает отдельные `Instagram App ID` и `Instagram App Secret`. У приложения может быть только одна API-конфигурация такого типа, поэтому этот режим не совместим с ошибкой `Invalid platform app` без пересоздания или перенастройки приложения.
+Для `instagram` режима в Meta App Dashboard требуется подходящий setup для `API setup with Instagram login`; Meta показывает для него `Instagram App ID` и `Instagram App Secret`. Совместимость уже существующего Meta app с этим режимом здесь не подтверждена. Перед использованием проверьте доступные продукты, Login setup и callback settings в Dashboard владельца приложения; необходимость отдельного приложения зависит от фактической конфигурации Meta.
 
 ## Не хранить в git
 

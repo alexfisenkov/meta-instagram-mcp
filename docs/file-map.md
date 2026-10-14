@@ -60,7 +60,8 @@
 | `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
 | `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с приватными POSIX mode или Windows ACL. |
 | `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook login URLs, меняет auth code на long-lived token, refreshes token, задает scope presets. |
-| `src/callback-server.ts` | Local OAuth helper | Стартует localhost callback, обрабатывает Meta redirect, меняет `code`, сохраняет token. |
+| `src/oauth-account-identity.ts` | OAuth identity verification | Проверяет fresh Instagram token identity или разрешает Facebook token через известный/единственный Page. |
+| `src/callback-server.ts` | OAuth callback | Обрабатывает state-bound Meta redirect, проверяет account/Page identity до backup и сохранения token; CLI helper поднимает localhost callback. |
 | `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | Правка сетевого слоя, отладка отказов DNS, отмена активного read-only запроса без запуска следующего маршрута. |
 | `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token, прокидывает read cancellation signal. |
 | `src/tools.ts` | Legacy API use cases | Реализует auth, account/media/comments/insights, page list, resolver, raw GET и legacy publish handlers. |
@@ -80,7 +81,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 | `meta_auth_status` | Показывает config и redacted token metadata. |
 | `meta_scope_presets` | Показывает OAuth scope presets для текущего auth mode. |
 | `meta_build_login_url` | Строит официальный OAuth login URL. |
-| `meta_exchange_code` | Меняет OAuth code на long-lived token и опционально сохраняет. |
+| `meta_exchange_code` | Legacy-путь для пустого token-store; existing store отклоняется до обмена. Для reauth используйте `meta_begin_oauth` и callback. |
 | `meta_refresh_token` | Обновляет текущий long-lived token и опционально сохраняет. |
 | `meta_list_facebook_pages` | Показывает Pages, доступные Facebook token. |
 | `meta_resolve_instagram_account` | Сохраняет IG user id из Page-linked account или direct `userId`. |
