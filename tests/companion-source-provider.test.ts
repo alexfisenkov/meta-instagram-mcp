@@ -14,11 +14,19 @@ function observation(source: "api" | "browser" | "phone", accountBinding = "inst
 describe("companion source provider", () => {
   it("uses the runtime browser default long enough for a cold inbox while respecting the shared router deadline", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-06T12:00:00.000Z"));
+    const fixedNow = Date.now();
     const inbox = observation("browser");
     let taskCreatedAt = 0;
+    let resolveTaskEnqueued = () => {};
+    const taskEnqueued = new Promise<void>((resolve) => { resolveTaskEnqueued = resolve; });
     const hub = {
       sourceStatus: vi.fn(async () => ({ source: "browser", availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: "bridge-1" })),
-      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { taskCreatedAt = Date.now(); return { id: `task-${ttlMs}` }; }),
+      enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => {
+        taskCreatedAt = Date.now();
+        resolveTaskEnqueued();
+        return { id: `task-${ttlMs}` };
+      }),
       result: vi.fn(async () => Date.now() - taskCreatedAt >= 5_000 ? { status: "complete", result: inbox } : { status: "queued" }),
       cancelReadTask: vi.fn(async () => true)
     } as unknown as CompanionHub;
@@ -28,15 +36,16 @@ describe("companion source provider", () => {
       read: vi.fn(async () => ({ ...observation("api"), availability: "missing_scope" as const, coverage: "unknown" as const,
         historyCompleteness: "unknown" as const, errors: [{ code: "missing_scope", message: "Direct scope unavailable." }] }))
     } as unknown as SourceProvider;
-    const browser = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", pollMs: 50 });
+    const browser = createCompanionSourceProvider({ hub, source: "browser", accountBinding: "instagram:42", pollMs: 50, now: () => fixedNow });
     const router = createSourceRouter({ providers: [api, browser], timeoutMs: 12_000 });
 
     try {
       const pending = router.read({ operation: "inbox.list", limit: 2 });
+      await taskEnqueued;
+      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "inbox.list", ttlMs: process.platform === "win32" ? 11_750 : 8_000 }));
       await vi.advanceTimersByTimeAsync(5_000);
       const routed = await pending;
 
-      expect(hub.enqueue).toHaveBeenCalledWith(expect.objectContaining({ operation: "inbox.list", ttlMs: process.platform === "win32" ? 11_750 : 8_000 }));
       expect(routed.triedSources).toEqual(["browser"]);
       expect(routed.observations.at(-1)).toEqual(inbox);
     } finally {
@@ -46,6 +55,8 @@ describe("companion source provider", () => {
   });
 
   it("keeps explicit provider waits and the phone default unchanged", async () => {
+    const fixedNow = Date.now();
+    const now = () => fixedNow;
     const createHub = (source: "browser" | "phone", taskTtls: number[]) => ({
       sourceStatus: vi.fn(async () => ({ source, availability: "ready", capabilities: ["inbox.list"], accountBinding: "instagram:42", bridgeId: `${source}-bridge` })),
       enqueue: vi.fn(async ({ ttlMs }: { ttlMs: number }) => { taskTtls.push(ttlMs); return { id: `${source}-task` }; }),
@@ -54,11 +65,11 @@ describe("companion source provider", () => {
     const browserTtls: number[] = [];
     const phoneTtls: number[] = [];
 
-    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", pollMs: 5 })
+    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", pollMs: 5, now })
       .read({ operation: "inbox.list", limit: 1 });
-    await createCompanionSourceProvider({ hub: createHub("phone", phoneTtls), source: "phone", pollMs: 5 })
+    await createCompanionSourceProvider({ hub: createHub("phone", phoneTtls), source: "phone", pollMs: 5, now })
       .read({ operation: "inbox.list", limit: 1 });
-    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", waitMs: 4_000, pollMs: 5 })
+    await createCompanionSourceProvider({ hub: createHub("browser", browserTtls), source: "browser", waitMs: 4_000, pollMs: 5, now })
       .read({ operation: "inbox.list", limit: 1 });
 
     expect(browserTtls).toEqual([process.platform === "win32" ? 30_000 : 8_000, 4_000]);
