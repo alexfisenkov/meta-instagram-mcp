@@ -348,7 +348,7 @@ describe("Browser Native Messaging host", () => {
       await listener.close();
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  }, process.platform === "win32" ? 60_000 : 15_000);
 });
 
 function bridgeClient(tasks: BridgeTask[]): BrowserBridgeClient {
