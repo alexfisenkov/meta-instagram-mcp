@@ -2,7 +2,11 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
-## 0.2.6 — Unreleased
+## 0.2.7 — Unreleased
+
+- The production dependency graph now resolves patched, semver-compatible SDK and transitive packages. No MCP tools or API contracts changed; development-only audit findings remain separate.
+
+## 0.2.6 — 2026-10-15
 
 - `meta_exchange_code` refuses to save into an occupied token-store before exchanging the code; state-bound OAuth callback verifies the fresh Instagram account/Page before backup and save. Refresh and account resolution serialize token-store changes and preserve the active account metadata.
 - Instagram OAuth requires `user_id` in the short exchange response, preserves it when the long-lived response omits it, and compares the long-response `user_id` when present; generic `id` is not treated as an alias. Facebook provider `user_id` is not treated as an Instagram account ID. OAuth token-endpoint requests do not retry fallback routes after an uncertain outcome.

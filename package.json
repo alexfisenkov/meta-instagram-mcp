@@ -1,6 +1,6 @@
 {
   "name": "meta-instagram-mcp",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "description": "Unified Instagram MCP with official Meta API and connected browser/phone companions.",
@@ -38,8 +38,13 @@
     "meta:callback": "node tools/cli.mjs callback"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "zod": "^4.1.13"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": {
+      "@hono/node-server": "1.19.15"
+    }
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
