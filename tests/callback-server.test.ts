@@ -151,7 +151,7 @@ describe("callback server helpers", () => {
 
     expect(verifyAccount).toHaveBeenCalledWith(expect.objectContaining({ accessToken: "new", authMode: "facebook" }), {
       expectedAccountId: "ig-account-1", expectedPageId: "page-1"
-    });
+    }, { allowKnownPageFallback: true });
     expect(backupToken).not.toHaveBeenCalled();
     expect(saveToken).not.toHaveBeenCalled();
   });
@@ -159,13 +159,14 @@ describe("callback server helpers", () => {
   it("accepts a Facebook token only after its fresh token resolves to the expected Instagram Page account", async () => {
     const stateStore = createOAuthStateStore({ directory: await mkdtemp(join(tmpdir(), "oauth-callback-")) });
     const binding = { accountBinding: "operator-session", authMode: "facebook" as const,
-      redirectUri: "https://mcp.example/oauth/callback", expectedAccountId: "ig-account-1", expectedPageId: "page-1" };
+      redirectUri: "https://mcp.example/oauth/callback", expectedAccountId: "ig-account-1", expectedPageId: "page-1", requiredScopes: ["instagram_basic"] };
     const backupToken = vi.fn(async () => undefined);
     const saveToken = vi.fn(async () => undefined);
     const verifyAccount = vi.fn(async () => ({ userId: "ig-account-1", pageId: "page-1" }));
     const service = createOAuthCallbackService({
       stateStore, binding, readCurrentToken: async () => ({ accessToken: "old", authMode: "facebook", userId: "ig-account-1", pageId: "page-1" }),
       backupToken, saveToken, verifyAccount,
+      readGrantedPermissions: async () => ["instagram_basic"],
       exchangeCode: async () => ({ accessToken: "new", authMode: "facebook", userId: "provider-user-id" }),
     });
     const state = await service.issueState();
@@ -175,7 +176,7 @@ describe("callback server helpers", () => {
 
     expect(verifyAccount).toHaveBeenCalledWith(expect.objectContaining({ accessToken: "new" }), {
       expectedAccountId: "ig-account-1", expectedPageId: "page-1"
-    });
+    }, { allowKnownPageFallback: true });
     expect(saveToken).toHaveBeenCalledWith(expect.objectContaining({ userId: "ig-account-1", pageId: "page-1" }));
     expect(backupToken).toHaveBeenCalledTimes(1);
   });

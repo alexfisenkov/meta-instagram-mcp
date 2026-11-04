@@ -66,6 +66,17 @@ describe("OAuthStateStore", () => {
     await expect(second.consume(secondState, binding)).resolves.toMatchObject(binding);
   });
 
+  it("binds configured required scopes and refuses old Facebook state without that pin", async () => {
+    const store = new OAuthStateStore({ directory: await mkdtemp(join(tmpdir(), "oauth-scope-pin-")) });
+    const binding = { accountBinding: "fixture", authMode: "facebook" as const, redirectUri: "https://mcp.example/callback" };
+    const legacy = await store.issue(binding);
+    const pinned = { ...binding, requiredScopes: ["instagram_basic", "pages_show_list"] };
+    await expect(store.consume(legacy, pinned)).resolves.toBeUndefined();
+    const state = await store.issue(pinned);
+    await expect(store.consume(state, { ...pinned, requiredScopes: ["instagram_basic"] })).resolves.toBeUndefined();
+    await expect(store.consume(state, pinned)).resolves.toMatchObject(pinned);
+  });
+
   it("rejects expired state", async () => {
     let now = 1_000;
     const directory = await mkdtemp(join(tmpdir(), "instagram-oauth-state-"));

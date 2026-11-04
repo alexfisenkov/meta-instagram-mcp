@@ -130,7 +130,7 @@ export class MetaClient {
   }
 
   /** Resolve one Facebook Page and create a client bound to its Page token. */
-  async forFacebookPage(pageId: string, options: { signal?: AbortSignal } = {}): Promise<FacebookPageClient> {
+  async forFacebookPage(pageId: string, options: { signal?: AbortSignal; allowKnownPageFallback?: boolean } = {}): Promise<FacebookPageClient> {
     if (new URL(this.#baseUrl).hostname !== "graph.facebook.com") {
       throw new Error("Facebook Page lookup requires graph.facebook.com.");
     }
@@ -172,7 +172,36 @@ export class MetaClient {
       seenCursors.add(cursor);
       after = cursor;
     }
+    // OAuth may already be bound to an exact Page that discovery omits. Other
+    // callers retain the existing optional-Page semantics and request counts.
+    if (options.allowKnownPageFallback && /^\d+$/.test(pageId)) {
+      return this.forKnownFacebookPage(pageId, options);
+    }
     throw new Error("The requested Facebook Page was not found in the available Pages.");
+  }
+
+  private async forKnownFacebookPage(pageId: string, options: { signal?: AbortSignal }): Promise<FacebookPageClient> {
+    options.signal?.throwIfAborted();
+    const url = this.buildUrl(`/${pageId}`);
+    url.searchParams.set("fields", "id,name,access_token,instagram_business_account{id,username}");
+    url.searchParams.set("access_token", this.#accessToken);
+    // Raw Page token remains inside this client; public get() redacts it.
+    const page = await this.request(url, { method: "GET", headers: { accept: "application/json" }, signal: options.signal });
+    if (!isRecord(page) || page.id !== pageId) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+    const pageToken = typeof page.access_token === "string" ? page.access_token : "";
+    if (!pageToken.trim()) throw new Error("The requested Facebook Page has no usable Page access token.");
+    const instagramId = isRecord(page.instagram_business_account) ? page.instagram_business_account.id : undefined;
+    if (typeof instagramId !== "string" || !/^\d+$/.test(instagramId)) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+    const client = new MetaClient({ accessToken: pageToken, apiVersion: this.#apiVersion, baseUrl: this.#baseUrl });
+    options.signal?.throwIfAborted();
+    const owner = await client.get("/me", { fields: ["id"] }, options);
+    if (!isRecord(owner) || owner.id !== pageId) throw new Error("OAUTH_IDENTITY_MISMATCH");
+    options.signal?.throwIfAborted();
+    const instagram = await client.get(`/${instagramId}`, { fields: ["id", "username"] }, options);
+    if (!isRecord(instagram) || instagram.id !== instagramId) throw new Error("OAUTH_IDENTITY_MISMATCH");
+    if (typeof instagram.username !== "string" || !instagram.username.trim()) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+    // This proof establishes identity, not Page tasks or messaging permissions.
+    return { client, pageId, instagramUserId: instagramId, tasks: [] };
   }
 
   private async request(url: URL, init: Parameters<typeof requestJsonHttp>[1]): Promise<unknown> {

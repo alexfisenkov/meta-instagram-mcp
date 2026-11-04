@@ -11,6 +11,8 @@ export interface OAuthStateBinding {
   redirectUri: string;
   expectedAccountId?: string;
   expectedPageId?: string;
+  /** Trusted authorization-request requirements, not evidence of provider grants. */
+  requiredScopes?: string[];
 }
 
 export interface OAuthStateRecord extends OAuthStateBinding {
@@ -112,6 +114,7 @@ function validateBinding(binding: OAuthStateBinding): void {
   if (!binding.accountBinding || !binding.redirectUri || !["instagram", "facebook"].includes(binding.authMode)) {
     throw new Error("OAuth state binding is incomplete.");
   }
+  if (binding.requiredScopes !== undefined && !isScopeList(binding.requiredScopes)) throw new Error("OAuth scope binding is invalid.");
   const redirect = new URL(binding.redirectUri);
   if (redirect.protocol !== "https:" && !(redirect.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(redirect.hostname))) {
     throw new Error("OAuth redirect URI must use HTTPS or loopback HTTP.");
@@ -123,7 +126,8 @@ function sameBinding(record: OAuthStateRecord, expected: OAuthStateBinding): boo
     && equal(record.authMode, expected.authMode)
     && equal(record.redirectUri, expected.redirectUri)
     && (expected.expectedAccountId === undefined || equal(record.expectedAccountId ?? "", expected.expectedAccountId))
-    && (expected.expectedPageId === undefined || equal(record.expectedPageId ?? "", expected.expectedPageId));
+    && (expected.expectedPageId === undefined || equal(record.expectedPageId ?? "", expected.expectedPageId))
+    && equal([...(record.requiredScopes ?? [])].sort().join(","), [...(expected.requiredScopes ?? [])].sort().join(","));
 }
 
 function equal(left: string, right: string): boolean {
@@ -140,5 +144,12 @@ function isRecord(value: unknown): value is OAuthStateRecord {
     && "redirectUri" in value && typeof value.redirectUri === "string"
     && (!("expectedAccountId" in value) || typeof value.expectedAccountId === "string")
     && (!("expectedPageId" in value) || typeof value.expectedPageId === "string")
+    && (!("requiredScopes" in value) || isScopeList(value.requiredScopes))
     && "authMode" in value && (value.authMode === "facebook" || value.authMode === "instagram");
+}
+
+function isScopeList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 100
+    && value.every((scope) => typeof scope === "string" && /^[a-zA-Z][a-zA-Z0-9_]{0,127}$/.test(scope))
+    && new Set(value).size === value.length;
 }

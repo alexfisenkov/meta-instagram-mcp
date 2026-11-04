@@ -10,7 +10,8 @@ import { loadConfig } from "./config.js";
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken, type OAuthToken } from "./oauth.js";
 import { createOAuthStateStore, type OAuthStateBinding, type OAuthStateStore } from "./oauth-state.js";
 import { loadStoredToken, sameStoredTokenSnapshot, withTokenStoreLock, type StoredInstagramToken } from "./token-store.js";
-import { verifyOAuthAccountIdentity, type OAuthIdentityConstraints, type VerifiedOAuthIdentity } from "./oauth-account-identity.js";
+import { readFacebookGrantedPermissions, verifyOAuthAccountIdentity, type OAuthIdentityConstraints, type OAuthIdentityVerificationOptions, type VerifiedOAuthIdentity } from "./oauth-account-identity.js";
+import { MetaApiError, MetaTransportError } from "./meta-client.js";
 
 export type ParsedCallback =
   | { type: "code"; code: string; state?: string }
@@ -20,15 +21,28 @@ export type CallbackHtmlModel =
   | { type: "success"; title: string; details: Record<string, unknown> }
   | { type: "error"; title: string; details: Record<string, unknown> };
 
+export interface OAuthCallbackFailure {
+  event: "oauth_callback_failed";
+  phase: "state" | "exchange" | "identity" | "commit";
+  reason: "callback_rejected" | "state_rejected" | "authorization_rejected" | "context_mismatch"
+    | "identity_mismatch" | "auth_mode_mismatch" | "commit_unavailable" | "operation_failed"
+    | "identity_unverified" | "identity_ambiguous" | "page_unavailable" | "page_token_unavailable"
+    | "invalid_page_response" | "token_store_changed" | "permissions_unverified";
+  errorClass?: "MetaApiError" | "MetaTransportError" | "TypeError" | "Error" | "Unknown";
+}
+
 export interface OAuthCallbackServiceOptions {
   stateStore: OAuthStateStore;
   binding: OAuthStateBinding;
   exchangeCode(code: string): Promise<OAuthToken>;
-  verifyAccount(token: OAuthToken, expected: OAuthIdentityConstraints): Promise<VerifiedOAuthIdentity>;
+  verifyAccount(token: OAuthToken, expected: OAuthIdentityConstraints, verification?: OAuthIdentityVerificationOptions): Promise<VerifiedOAuthIdentity>;
+  readGrantedPermissions?(token: OAuthToken): Promise<string[]>;
   readCurrentToken?(): Promise<StoredInstagramToken | undefined>;
   backupToken?(token: StoredInstagramToken): Promise<void>;
   saveToken?(token: OAuthToken): Promise<void>;
   commitToken?(expected: StoredInstagramToken | undefined, token: OAuthToken): Promise<void>;
+  /** Receives controlled metadata only, never the callback, raw exception or credentials. */
+  onFailure?(failure: OAuthCallbackFailure): void | Promise<void>;
 }
 export interface OAuthCallbackService {
   issueState(): Promise<string>;
@@ -65,24 +79,37 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
       });
     },
     async handleCallback(input) {
+      let phase: OAuthCallbackFailure["phase"] = "state";
+      const reject = (reason: OAuthCallbackFailure["reason"], error?: unknown) => {
+        // Diagnostics must not change the public response or make a failed flow retryable.
+        try {
+          const failure: OAuthCallbackFailure = { event: "oauth_callback_failed", phase, reason,
+            ...(error === undefined ? {} : { errorClass: callbackErrorClass(error) }) };
+          if (options.onFailure) void Promise.resolve(options.onFailure(failure)).catch(() => undefined);
+          else console.error(JSON.stringify(failure));
+        } catch { /* A failing diagnostic sink cannot expose the original exception. */ }
+        return failed();
+      };
       let url: URL;
       try {
         url = new URL(input.url);
-        if (!matchesRedirect(url, options.binding.redirectUri)) return failed();
-      } catch { return failed(); }
+        if (!matchesRedirect(url, options.binding.redirectUri)) return reject("callback_rejected");
+      } catch { return reject("callback_rejected"); }
       const parsed = parseCallbackRequest(url.href, new URL(options.binding.redirectUri).pathname);
-      if (parsed.type === "ignored" || !parsed.state) return failed();
+      if (parsed.type === "ignored" || !parsed.state) return reject("state_rejected");
       const consumed = await safeConsume(options.stateStore, parsed.state, options.binding);
-      if (!consumed) return failed();
-      if (parsed.type !== "code" || !parsed.code) return failed();
+      if (!consumed) return reject("state_rejected");
+      if (parsed.type !== "code" || !parsed.code) return reject("authorization_rejected");
 
+      phase = "identity";
       try {
+        const verification = { allowKnownPageFallback: Boolean(consumed.expectedPageId) };
         const current = await options.readCurrentToken?.();
-        if (current?.authMode && current.authMode !== options.binding.authMode) return failed();
+        if (current?.authMode && current.authMode !== options.binding.authMode) return reject("context_mismatch");
         let expectedAccountId = consumed.expectedAccountId ?? options.binding.expectedAccountId ?? current?.userId;
         let expectedPageId = consumed.expectedPageId ?? options.binding.expectedPageId ?? current?.pageId;
         if ((expectedAccountId && current?.userId && !constantStringEqual(expectedAccountId, current.userId)) ||
-            (expectedPageId && current?.pageId && !constantStringEqual(expectedPageId, current.pageId))) return failed();
+            (expectedPageId && current?.pageId && !constantStringEqual(expectedPageId, current.pageId))) return reject("context_mismatch");
         const verifyCurrent = Boolean(current?.accessToken && (
           (!expectedAccountId && !expectedPageId) ||
           (expectedAccountId && !current.userId) ||
@@ -96,41 +123,51 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
           }, {
             ...(expectedAccountId ? { expectedAccountId } : {}),
             ...(expectedPageId ? { expectedPageId } : {}),
-          });
+          }, verification);
           if ((expectedAccountId && !constantStringEqual(expectedAccountId, currentIdentity.userId)) ||
-              (expectedPageId && (!currentIdentity.pageId || !constantStringEqual(expectedPageId, currentIdentity.pageId)))) return failed();
+              (expectedPageId && (!currentIdentity.pageId || !constantStringEqual(expectedPageId, currentIdentity.pageId)))) return reject("identity_mismatch");
           expectedAccountId ??= currentIdentity.userId;
           expectedPageId ??= currentIdentity.pageId;
         }
+        phase = "exchange";
         const next = await options.exchangeCode(parsed.code);
-        if (next.authMode && next.authMode !== options.binding.authMode) return failed();
+        if (next.authMode && next.authMode !== options.binding.authMode) return reject("auth_mode_mismatch");
+        phase = "identity";
         const identity = await options.verifyAccount(next, {
           ...(expectedAccountId ? { expectedAccountId } : {}),
           ...(expectedPageId ? { expectedPageId } : {}),
-        });
+        }, verification);
         if (!identity.userId || (expectedAccountId && !constantStringEqual(expectedAccountId, identity.userId)) ||
-            (expectedPageId && (!identity.pageId || !constantStringEqual(expectedPageId, identity.pageId)))) return failed();
+            (expectedPageId && (!identity.pageId || !constantStringEqual(expectedPageId, identity.pageId)))) return reject("identity_mismatch");
         if (options.binding.authMode === "instagram" && next.userId &&
-            !constantStringEqual(identity.userId, next.userId)) return failed();
+            !constantStringEqual(identity.userId, next.userId)) return reject("identity_mismatch");
+        let permissions = next.permissions;
+        if (options.binding.authMode === "facebook") {
+          if (!consumed.requiredScopes?.length || !options.readGrantedPermissions) return reject("permissions_unverified");
+          permissions = await options.readGrantedPermissions(next);
+          if (!Array.isArray(permissions) || permissions.some((permission) => typeof permission !== "string")
+            || !consumed.requiredScopes.every((scope) => permissions!.includes(scope))) return reject("permissions_unverified");
+        }
         const merged: OAuthToken = {
           ...next,
           authMode: options.binding.authMode,
           userId: identity.userId,
           ...(identity.pageId ? { pageId: identity.pageId } : {}),
-          ...(next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
+          ...(options.binding.authMode === "facebook" ? { permissions } : next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
         };
+        phase = "commit";
         if (options.commitToken) {
           await options.commitToken(current, merged);
         } else {
           if (current?.accessToken) {
-            if (!options.backupToken) return failed();
+            if (!options.backupToken) return reject("commit_unavailable");
             await options.backupToken(current);
           }
-          if (!options.saveToken) return failed();
+          if (!options.saveToken) return reject("commit_unavailable");
           await options.saveToken(merged);
         }
         return { status: "success", message: "Authorization complete." };
-      } catch { return failed(); }
+      } catch (error) { return reject(callbackFailureReason(error), error); }
     },
   };
 }
@@ -162,22 +199,25 @@ export async function runCallbackServer(): Promise<void> {
   const current = await loadStoredToken(config.tokenStorePath);
   const expectedAccountId = config.userId ?? current?.userId;
   const expectedPageId = config.pageId ?? current?.pageId;
+  const authorizationScopes = [...(config.defaultScopes ?? defaultScopesForAuthMode(config.authMode))];
   const binding: OAuthStateBinding = {
     accountBinding: `${config.authMode}:${expectedAccountId ?? expectedPageId ?? "local"}`,
     authMode: config.authMode, redirectUri: config.redirectUri,
     ...(expectedAccountId ? { expectedAccountId } : {}),
     ...(expectedPageId ? { expectedPageId } : {}),
+    ...(config.authMode === "facebook" ? { requiredScopes: [...authorizationScopes] } : {}),
   };
   const stateStore = createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` });
   const service = createOAuthCallbackService({
     stateStore, binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
-    verifyAccount: (token, expected) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected),
+    verifyAccount: (token, expected, verification) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected, undefined, verification),
+    readGrantedPermissions: (token) => readFacebookGrantedPermissions(config.graphApiVersion, token),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
     commitToken: (expected, token) => commitStoredOAuthToken(config.tokenStorePath, expected, token),
   });
   const state = await service.issueState();
-  const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId, redirectUri: config.redirectUri, scopes: config.defaultScopes ?? defaultScopesForAuthMode(config.authMode), forceReauth: true, graphApiVersion: config.graphApiVersion });
+  const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId, redirectUri: config.redirectUri, scopes: authorizationScopes, forceReauth: true, graphApiVersion: config.graphApiVersion });
   loginUrl.searchParams.set("state", state);
   const server = createServer(createOAuthCallbackHandler(service, config.redirectUri));
   await new Promise<void>((resolve, reject) => {
@@ -240,6 +280,30 @@ function matchesRedirect(incoming: URL, redirectUri: string): boolean {
   return true;
 }
 function failed(): { status: "failed"; message: string } { return { status: "failed", message: "Authorization failed. Close this page and restart the authorization flow." }; }
+function callbackErrorClass(error: unknown): OAuthCallbackFailure["errorClass"] {
+  if (error instanceof MetaApiError) return "MetaApiError";
+  if (error instanceof MetaTransportError) return "MetaTransportError";
+  if (error instanceof TypeError) return "TypeError";
+  return error instanceof Error ? "Error" : "Unknown";
+}
+function callbackFailureReason(error: unknown): OAuthCallbackFailure["reason"] {
+  // Exact known local errors map to fixed codes. No arbitrary text or error.name reaches a sink.
+  try {
+    if (error instanceof Error) {
+      switch (error.message) {
+        case "OAUTH_IDENTITY_UNVERIFIED": return "identity_unverified";
+        case "OAUTH_IDENTITY_MISMATCH": return "identity_mismatch";
+        case "OAUTH_IDENTITY_AMBIGUOUS": return "identity_ambiguous";
+        case "The requested Facebook Page was not found in the available Pages.": return "page_unavailable";
+        case "The requested Facebook Page has no usable Page access token.": return "page_token_unavailable";
+        case "Meta returned an invalid Facebook Pages response.": return "invalid_page_response";
+        case "TOKEN_STORE_CHANGED": return "token_store_changed";
+        case "OAUTH_PERMISSIONS_UNVERIFIED": return "permissions_unverified";
+      }
+    }
+  } catch { /* Untrusted exception metadata stays opaque. */ }
+  return "operation_failed";
+}
 function writeResponse(response: ServerResponse, status: number, message: string): void {
   response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
   response.end(renderCallbackHtml({ type: status < 400 ? "success" : "error", title: message, details: {} }));

@@ -1,6 +1,6 @@
 # Операционный runbook
 
-Обновлено: 2026-10-11.
+Обновлено: 2026-11-04.
 
 ## Контракты и границы
 
@@ -23,6 +23,27 @@ node tools/doctor.mjs
 Doctor делает локальные MCP initialize/listTools и read-only status checks. `toolCount` относится к подключённому runtime, а статусы источников не доказывают доступ Meta, авторизацию Chrome, готовность физического телефона или опубликованный серверный deployment. Если Codex использует локальный сервер, отдельно проверьте его подключение в настройках MCP-клиента.
 
 Секреты, OAuth-коды, cookies, browser storage и полные account identifiers не копируйте в логи, issues или этот репозиторий. Конфигурация и token-store должны оставаться во внешнем приватном каталоге.
+
+## Диагностика отказа OAuth callback
+
+Callback сохраняет общее публичное сообщение об отказе. В stderr отдельной JSON-строкой пишется `oauth_callback_failed`: этап `state`, `exchange`, `identity` или `commit`, фиксированный `reason` и, для исключений, класс из закрытого списка. Проверки state, Instagram account/Page и backup/commit остаются обязательными. `identity` включает чтение текущего token-store и проверку текущего токена до обмена, если она нужна; этап сам по себе не доказывает, что новый токен уже получен. `state_rejected` объединяет отсутствующий, неподходящий, просроченный и уже использованный state. Ошибки синхронного или асинхронного диагностического hook подавляются без вывода исходного исключения.
+
+Для systemd-инсталляции оператор подставляет имя core unit и время начала проверки вместо `TIME`. Фильтр выводит только известные значения; остальной журнал, URL/query, exception message/stack, state, code, tokens и account identifiers не выводятся:
+
+```bash
+journalctl -u mcp-instagram.service --since TIME --no-pager -o cat |
+  jq -Rc 'fromjson? | select(type == "object") | select(.event == "oauth_callback_failed") |
+    select(.phase | IN("state", "exchange", "identity", "commit")) |
+    select(.reason | IN("callback_rejected", "state_rejected", "authorization_rejected", "context_mismatch", "identity_mismatch", "auth_mode_mismatch", "commit_unavailable", "operation_failed", "identity_unverified", "identity_ambiguous", "page_unavailable", "page_token_unavailable", "invalid_page_response", "token_store_changed", "permissions_unverified")) |
+    select(.errorClass == null or (.errorClass | IN("MetaApiError", "MetaTransportError", "TypeError", "Error", "Unknown"))) |
+    {event, phase, reason} + (if .errorClass == null then {} else {errorClass} end)'
+```
+
+`page_unavailable` означает, что ожидаемая Page не найдена в доступных Pages при проверке identity; `identity_mismatch` — несовпадение привязки; `token_store_changed` — конкурентное изменение перед commit. Остальные неизвестные исключения дают `operation_failed` без текста. Отсутствие записи не доказывает успех: запрос мог не дойти до core, версия могла не содержать диагностику или журнал мог быть недоступен. Повторный OAuth — отдельное действие владельца; использованный code/state повторять нельзя. Локальные тесты диагностики не подтверждают live OAuth и не обновляют токен.
+
+Для callback с уже закреплённой в consumed state ожидаемой Facebook Page отсутствие этой Page в корректном `/me/accounts` допускает один прямой lookup её точного числового ID. До принятия результата обязательны совпадение Page ID, пригодный Page token, подтверждение того же Page ID через `/me` с этим токеном и успешное чтение `id,username` связанного Instagram тем же Page token. Затем остаётся прежняя проверка ожидаемых Instagram ID и Page ID перед backup/save. Ошибки списка Pages и найденная Page без токена этот fallback не включают; без закреплённой Page прямого поиска нет. Raw Page token остаётся внутри клиента, tasks из этого доказательства не выводятся. Legacy exchange, обычные account/Direct reads и verifier по умолчанию этот внутренний callback opt-in не включают.
+
+Facebook callback закрепляет в state тот же список запрошенных scopes, который runtime и standalone helper используют для authorization URL. Список запроса не доказывает выдачу прав: до любого backup/commit новый user token отдельно читает `/me/permissions`; каждый закреплённый scope должен иметь фактический `granted`. Сохраняются реальные новые grants, без переноса старых labels или доверия полю `permissions` из обмена. Отсутствующие, declined, malformed, неполные или недоступные данные означают отказ без изменения старого токена. `permissions_unverified` — закрытый код такого отказа; API/transport ошибки остаются без raw payload в журнале. Старые Facebook state без scope pin требуют нового flow. Новых requested scopes, прав публикации или Direct это не добавляет; Instagram Login сохраняет прежний путь.
 
 ## Остановить companion
 

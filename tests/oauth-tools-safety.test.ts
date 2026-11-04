@@ -30,6 +30,24 @@ function handlers(token: unknown, accessToken?: string) {
 }
 
 describe("meta_exchange_code safety", () => {
+  it("does not authorize known-Page fallback through legacy exchange/save without state", async () => {
+    httpMock.mockReset()
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-token" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "new-token" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ data: [] }))
+      .mockResolvedValueOnce(jsonHttpResponse({ id: "123456789", access_token: "page-token", instagram_business_account: { id: "178400001" } }))
+      .mockResolvedValueOnce(jsonHttpResponse({ id: "123456789" }))
+      .mockResolvedValueOnce(jsonHttpResponse({ id: "178400001", username: "fixture" }));
+    const save = vi.fn(async () => undefined);
+    const subject = createToolHandlers({
+      config: { authMode: "facebook", appId: "fixture-app", appSecret: "fixture-secret", redirectUri: "https://mcp.example/callback",
+        userId: "178400001", pageId: "123456789", graphApiVersion: "v25.0", tokenStorePath: "/tmp/unused-token.json", publishLogPath: "/tmp/unused-publish.jsonl" },
+      tokenStore: { load: async () => undefined, save },
+    });
+    await expect(subject.exchangeCode({ code: "fixture-code" })).rejects.toThrow("requested Facebook Page was not found");
+    expect(httpMock).toHaveBeenCalledTimes(3);
+    expect(save).not.toHaveBeenCalled();
+  });
   it("rejects a save to an occupied token store before exchanging the code", async () => {
     httpMock.mockReset();
     const current = { accessToken: "existing-private-token", authMode: "instagram", userId: "existing-account" };
