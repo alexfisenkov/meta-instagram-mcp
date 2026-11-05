@@ -337,6 +337,36 @@ describe("runtime marker provenance", () => {
     expect(captureRuntimeStatus(dir).sourceRevision).toBe("unknown");
   });
 
+  it.each([
+    `${revision}\n# deployed by operator\n`,
+    `${revision}\r\n# generic operator note\r\n\r\n`,
+    `${revision}\n\n# operator deployment note\n \t\n`,
+  ])("accepts an exact first-line server SHA followed only by operator comments or blanks (%j)", async (marker) => {
+    const dir = await root();
+    await writeFile(join(dir, ".VERSION"), marker);
+    expect(captureRuntimeStatus(dir)).toMatchObject({ sourceRevision: revision, revisionSource: "server_version" });
+  });
+
+  it.each([
+    `not-a-revision\n# operator note\n`,
+    ` ${revision}\n# operator note\n`,
+    `${revision} \n# operator note\n`,
+    `${revision}\noperator deployment note\n`,
+    `${revision}\n${"b".repeat(40)}\n`,
+  ])("keeps malformed first-line or non-comment extra server marker content unknown (%j)", async (marker) => {
+    const dir = await root();
+    await writeFile(join(dir, ".VERSION"), marker);
+    expect(captureRuntimeStatus(dir)).toMatchObject({ sourceRevision: "unknown", revisionSource: "unknown" });
+  });
+
+  it("still rejects an installer SHA conflicting with a valid operator-annotated server marker", async () => {
+    const dir = await root();
+    await writeFile(join(dir, ".VERSION"), `${revision}\n# generic operator note\n`);
+    expect(captureRuntimeStatus(dir).sourceRevision).toBe(revision);
+    await writeFile(join(dir, ".meta-instagram-mcp-install.json"), JSON.stringify({ version: "0.2.8", revision: "b".repeat(40), installedAt: "2026-11-05T00:00:00.000Z" }));
+    expect(captureRuntimeStatus(dir)).toMatchObject({ sourceRevision: "unknown", revisionSource: "unknown" });
+  });
+
   it("shares one startup snapshot between auth and capability tools in the composed runtime", async () => {
     const dir = await privateDirectory();
     const runtime = createRuntime({ config: config({ tokenStorePath: join(dir, "token.json") }), providers: [],

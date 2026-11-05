@@ -21,7 +21,7 @@ export function captureRuntimeStatus(root = dirname(dirname(fileURLToPath(import
     if (packageVersion !== "unknown") {
       const stampPath = join(root, ".meta-instagram-mcp-install.json");
       const serverPath = join(root, ".VERSION");
-      const serverRevision = existsSync(serverPath) ? readFileSync(serverPath, "utf8").trim() : undefined;
+      const serverRevision = existsSync(serverPath) ? readServerRevision(serverPath) : undefined;
       if (existsSync(stampPath)) {
         const stamp: unknown = JSON.parse(readFileSync(stampPath, "utf8"));
         if (isRecord(stamp) && stamp.version === packageVersion && isRevision(stamp.revision)
@@ -39,6 +39,10 @@ export function captureRuntimeStatus(root = dirname(dirname(fileURLToPath(import
 
 function isRevision(value: unknown): value is string { return typeof value === "string" && /^[a-f\d]{40}$/i.test(value); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function readServerRevision(path: string): string | null {
+  const [revision, ...annotations] = readFileSync(path, "utf8").split(/\r?\n/);
+  return isRevision(revision) && annotations.every((line) => line.trim() === "" || line.startsWith("#")) ? revision : null;
+}
 function validInstalledAt(value: unknown): boolean {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(?:\d{3}|\d{7})Z$/.test(value)) return false;
   const milliseconds = value.replace(/(\.\d{3})\d{4}Z$/, "$1Z");

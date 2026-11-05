@@ -7,7 +7,7 @@
 
 ## Диагностика установленной v0.2.8
 
-Версия checkout не подтверждает опубликованный или установленный release. В status tools сверяйте `runtime.packageVersion` и `runtime.sourceRevision`; метаданные фиксируются при создании runtime, после обновления нужен перезапуск. Installer marker сопоставляется с версией пакета; server `.VERSION` содержит полный source SHA. Ошибочный/несовместимый marker даёт unknown, совпавший не доказывает отсутствие ручных изменений файлов.
+Версия checkout не подтверждает опубликованный или установленный release. В status tools сверяйте `runtime.packageVersion` и `runtime.sourceRevision`; метаданные фиксируются при создании runtime, после обновления нужен перезапуск. Installer marker сопоставляется с версией пакета; первая строка server `.VERSION` содержит ровно полный source SHA, далее допустимы только пустые строки или комментарии оператора с `#`. Ошибочный/несовместимый marker даёт unknown, совпавший не доказывает отсутствие ручных изменений файлов.
 
 `meta_auth_status` с `{}` не выполняет новую Meta/UI проверку. Для свежей диагностики Facebook credential — `{"verify":true}`: один read-only `debug_token` GET, максимум 5 секунд, без retry, OAuth, refresh или записи token-store. Token expiry и data-access expiry независимы; числовой `0` — `no_expiry_reported`, не бессрочность. Cached proof живёт только в памяти, помечается cached/stale и не заменяет read-back нужного endpoint. Детали — в [операционном runbook](operations-runbook.md#проверить-версию-и-авторизацию).
 
