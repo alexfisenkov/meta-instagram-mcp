@@ -13,7 +13,7 @@
 
 ## Приватный операционный контекст
 
-Необязательный `operational-context.json` хранится рядом с внешним token-store, вне checkout, с теми же приватными правами (POSIX `0600` либо защищённый Windows ACL). Новых env keys нет. Разрешённая схема:
+Необязательный `operational-context.json` хранится рядом с внешним token-store того core-процесса, который отвечает на MCP-вызов, вне checkout, с теми же приватными правами (POSIX `0600` либо защищённый Windows ACL). Для remote MCP файл настраивается на узле core; файл рядом с token-store локального proxy-клиента не влияет на status удалённого core. Новых env keys нет. Разрешённая схема:
 
 ```json
 {
@@ -23,7 +23,7 @@
 }
 ```
 
-Используйте собственные публичные HTTPS страницы с явными legal paths: privacy/privacy-policy, data-deletion/data-deletion-instructions, delete-data или deletion; допустим префикс вроде `/legal/` или `/product-privacy`. Query, fragment, userinfo, нестандартный port, IP/локальный hostname, account/dashboard/admin/contact paths и encoded paths отклоняются. Не добавляйте email, account IDs, dashboard links или credentials. Неизвестные поля не проецируются; отсутствующий, слишком большой, нечитабельный или некорректный файл даёт unknown. `deletionWorkflow` принимает `manual` или `unknown`; callback удаления этот файл не создаёт.
+Используйте собственные публичные HTTPS страницы с конечным legal slug: privacy/privacy-policy, data-deletion/data-deletion-instructions, delete-data или deletion; допустимы `/legal/privacy`, `/product-privacy`, `/product-data-deletion` и один завершающий `/`. Сегменты после legal slug, hostname с завершающей точкой, query, fragment, userinfo, нестандартный port, IP/локальный hostname, account/dashboard/admin/contact paths и encoded paths отклоняются. Не добавляйте email, account IDs, dashboard links или credentials. Неизвестные поля не проецируются; отсутствующий, слишком большой, нечитабельный или некорректный файл даёт unknown. `deletionWorkflow` принимает `manual` или `unknown`; callback удаления этот файл не создаёт.
 
 Разрешённые значения в `meta_auth_status.operationalContext` имеют `status: "configured"`, `verification: "configuration_only"`. Это не проверка доступности URL, требований Meta или реального удаления данных. Файл остаётся внешним приватным state, не входит в release assets или Git.
 
@@ -47,7 +47,8 @@
 git clone https://github.com/alexfisenkov/meta-instagram-mcp.git meta-instagram-mcp-source
 cd meta-instagram-mcp-source
 git fetch --tags origin
-read -r -p "Commit SHA из release: " REVISION
+printf 'Commit SHA из release: '
+IFS= read -r REVISION
 git checkout --detach "$REVISION"
 ./install.sh --revision "$REVISION"
 ```
@@ -358,4 +359,4 @@ Registering the host does not install or sign the extension, establish bridge cr
 node tools/doctor.mjs
 ```
 
-Он устанавливает локальное MCP SDK соединение, делает `initialize`, перечисляет tools, вызывает `meta_auth_status` и, только если сервер выставил read-only capability/status tool, читает его статусы. Вывод содержит только booleans, число tools и известные статусы источников; account IDs, scopes, tokens и ответы API не печатаются. Doctor не проверяет доступ Meta live, Chrome login, телефон, внешний HTTPS gateway или фактическую отправку.
+Он устанавливает MCP SDK соединение, делает `initialize`, перечисляет tools, вызывает `meta_auth_status` и, только если сервер выставил read-only capability/status tool, читает его статусы. Вывод включает booleans, число tools, известные статусы источников и разрешённые поля runtime/version/revision, authorization (включая scope names и expiry) и public legal context. Полные tokens/secrets, account identifiers, локальные пути и raw API/context payload в вывод не входят. `app` помечен как installation metadata; `runtime` относится к подключённому core. Doctor не включает `verify:true` и не подтверждает Chrome login, телефон, внешний HTTPS gateway или фактическую отправку.

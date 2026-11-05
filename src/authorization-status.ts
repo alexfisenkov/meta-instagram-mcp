@@ -1,5 +1,7 @@
-import type { AuthMode } from "./oauth.js";
+import { getScopePresets, type AuthMode } from "./oauth.js";
 import { requestJsonHttp } from "./http-json.js";
+
+const SUPPORTED_SCOPES = new Set([...Object.values(getScopePresets("facebook")).flat(), "public_profile", "email"]);
 
 type Truth = boolean | "unknown";
 export interface ExpiryStatus { state: "expires_at" | "no_expiry_reported" | "unknown"; expiresAt?: string }
@@ -66,14 +68,17 @@ export function createAuthorizationStatus() {
       if (!isRecord(data) || typeof data.is_valid !== "boolean") return unknown("malformed_response");
       const hasAppId = typeof data.app_id === "string" && data.app_id.length > 0;
       if (data.is_valid && !hasAppId) return unknown("malformed_response");
+      if (data.is_valid && (!Array.isArray(data.scopes) || !data.scopes.every((scope) => typeof scope === "string"
+        && SUPPORTED_SCOPES.has(scope) && !/^[a-f\d]{32}$/i.test(scope) && scope !== credential.accessToken && scope !== credential.appSecret))) {
+        return unknown("malformed_response");
+      }
       const tokenValid = data.is_valid;
       const appMatches = hasAppId ? data.app_id === credential.appId : "unknown";
       const checkedAtMs = Date.now();
       const status: AuthorizationStatus = {
         verification: "live", source: "meta_debug_token", credentialSource: credential.credentialSource,
         reason: !tokenValid ? "token_invalid" : !appMatches ? "app_mismatch" : "verified", tokenValid, appMatches,
-        scopes: Array.isArray(data.scopes) ? [...new Set(data.scopes.filter((scope): scope is string =>
-          typeof scope === "string" && /^[a-z][a-z\d_]{0,127}$/.test(scope)))].slice(0, 200) : [],
+        scopes: data.is_valid ? [...new Set(data.scopes as string[])] : [],
         tokenExpiry: expiry(data.expires_at), dataAccessExpiry: expiry(data.data_access_expires_at),
         checkedAt: new Date(checkedAtMs).toISOString(), freshness: "fresh"
       };

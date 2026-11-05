@@ -63,7 +63,7 @@ describe("safe additive auth status", () => {
   });
 
   it("checks the selected environment credential once by bounded GET and only projects safe fields", async () => {
-    respond(proof({ scopes: ["instagram_basic", "dummy_CANARY_SCOPE_SECRET", "invalid contact@example.com", "instagram_basic"], arbitrary: secret }));
+    respond(proof({ scopes: ["instagram_basic", "instagram_basic"], arbitrary: secret }));
     const { handlers, store } = fixture();
     const result = await handlers.authStatus({ verify: true });
     expect(result.authorization).toMatchObject({ verification: "live", source: "meta_debug_token", freshness: "fresh", reason: "verified",
@@ -78,6 +78,34 @@ describe("safe additive auth status", () => {
     const safe = JSON.stringify({ runtime: result.runtime, authorization: result.authorization, operationalContext: result.operationalContext });
     for (const canary of [token, secret, appId, "dummy_CANARY_STORED_TOKEN", "dummy_CANARY_USER_ID", "dummy_CANARY_RAW_RESPONSE", "dummy_CANARY_SCOPE_SECRET", "/synthetic-private"]) expect(safe).not.toContain(canary);
     expect(http).toHaveBeenCalledTimes(1); expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, "instagram_basic", {}, ["instagram_basic", 7], ["unknown_permission"], [token], [secret], ["a".repeat(32)]])(
+    "rejects malformed, unsupported or sensitive scope proof (%j)", async (scopes) => {
+      respond(proof({ scopes }));
+      const { handlers } = fixture();
+      const result = await handlers.authStatus({ verify: true });
+      expect(result.authorization).toMatchObject({ reason: "malformed_response", tokenValid: "unknown", appMatches: "unknown", scopes: [] });
+      for (const canary of [token, secret, "a".repeat(32)]) expect(JSON.stringify(result.authorization)).not.toContain(canary);
+      expect((await handlers.authStatus()).authorization.verification).toBe("not_requested");
+    }
+  );
+
+  it.each([{ accessToken: "instagram_basic" }, { appSecret: "email" }])("does not project dummy credential values even if they are known scope names (%j)", async (extra) => {
+    respond(proof({ scopes: ["instagram_basic", "email"] }));
+    expect((await fixture(config(extra)).handlers.authStatus({ verify: true })).authorization).toMatchObject({ reason: "malformed_response", scopes: [] });
+  });
+
+  it("accepts supported Facebook permission names and public identity scopes without requesting new scopes", async () => {
+    respond(proof({ scopes: ["instagram_basic", "pages_show_list", "pages_read_engagement", "instagram_manage_insights", "instagram_manage_comments",
+      "pages_manage_metadata", "instagram_content_publish", "instagram_manage_messages", "public_profile", "email"] }));
+    expect((await fixture().handlers.authStatus({ verify: true })).authorization).toMatchObject({ reason: "verified", scopes: ["instagram_basic", "pages_show_list",
+      "pages_read_engagement", "instagram_manage_insights", "instagram_manage_comments", "pages_manage_metadata", "instagram_content_publish", "instagram_manage_messages", "public_profile", "email"] });
+  });
+
+  it("reports a minimal invalid Meta response without projecting any untrusted scope strings", async () => {
+    respond({ is_valid: false, scopes: [token, secret, "a".repeat(32), "instagram_basic"] });
+    expect((await fixture().handlers.authStatus({ verify: true })).authorization).toMatchObject({ reason: "token_invalid", tokenValid: false, appMatches: "unknown", scopes: [] });
   });
 
   it.each([
@@ -207,6 +235,16 @@ describe("safe additive auth status", () => {
 });
 
 describe("operational context whitelist and source snapshot", () => {
+  it.each([
+    ["https://example.com/legal/privacy", "https://example.com/legal/data-deletion"],
+    ["https://example.com/legal/privacy/", "https://example.com/legal/data-deletion/"],
+    ["https://example.com/product-privacy/", "https://example.com/product-data-deletion/"],
+  ])("accepts only terminal legal slugs while preserving legal/product prefixes (%s)", async (privacyPolicyUrl, dataDeletionUrl) => {
+    const dir = await privateDirectory();
+    await writeContext(dir, JSON.stringify({ privacyPolicyUrl, dataDeletionUrl }));
+    expect((await fixture(config({ tokenStorePath: join(dir, "token.json") })).handlers.authStatus()).operationalContext)
+      .toMatchObject({ status: "configured", privacyPolicyUrl, dataDeletionUrl });
+  });
   it("accepts public product-prefixed privacy/deletion pages", async () => {
     const dir = await privateDirectory();
     await writeContext(dir, JSON.stringify({ privacyPolicyUrl: "https://example.com/product-privacy",
@@ -225,6 +263,8 @@ describe("operational context whitelist and source snapshot", () => {
 
   it.each(["http://example.com/privacy", "https://user:pass@example.com/privacy", "https://example.com/privacy?token=secret", "https://example.com/privacy#secret",
     "https://example.com/privacy?", "https://example.com/privacy#", "https://@example.com/privacy",
+    "https://localhost./privacy", "https://local.internal./privacy", "https://127.0.0.1./privacy", "https://example.com./privacy",
+    "https://example.com/privacy/customer_123456", "https://example.com/data-deletion/customer_123456", "https://example.com/product-privacy/customer_123456",
     "https://127.0.0.1/privacy", "https://[::1]/privacy", "https://192.168.1.2/privacy", "https://local.internal/privacy", "https://localhost/privacy",
     "https://business.facebook.com/privacy", "https://example.com/accounts/privacy", "https://example.com/dashboard/privacy", "https://example.com/contact/person@example.com",
     "https://example.com/ordinary-profile", "https://example.com/privacy%2Fsecret"]) ("rejects private/account/contact URL %s", async (url) => {

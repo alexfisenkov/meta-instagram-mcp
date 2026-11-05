@@ -2,7 +2,7 @@
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
-## 0.2.8 — Unreleased
+## 0.2.8 — 2026-11-05
 
 - `meta_auth_status` сохраняет legacy поля и добавляет `verify` (default false), безопасную проекцию Meta `debug_token`, независимые token/data-access expiry и закрытые reason codes. Facebook verification ограничена одним GET и 5 секундами с отменой, без retry/refresh/token-store write. In-memory proof привязан к выбранным credentials; cache/stale помечены явно. Token fragments заменены на `[redacted]` с сохранением типа.
 - Оба status tools показывают startup package/source identity из валидированного installer stamp или server `.VERSION`. Неизвестное, несовместимое или конфликтующее происхождение остаётся unknown; marker не проверяет целостность файлов. Capability schema version остаётся 1.

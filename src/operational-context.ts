@@ -44,12 +44,12 @@ function publicLegalUrl(value: unknown, purpose: "privacy" | "deletion"): string
     const url = new URL(value);
     const host = url.hostname.toLowerCase();
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.port
-      || isIP(host.replace(/^\[|\]$/g, "")) || !host.includes(".") || !/^[a-z\d.-]+$/.test(host)
+      || host.endsWith(".") || isIP(host.replace(/^\[|\]$/g, "")) || !host.includes(".") || !/^[a-z\d.-]+$/.test(host)
       || /(?:^|\.)(?:localhost|local|internal|home|lan|test|invalid|onion)$/.test(host)
       || /(?:^|\.)(?:accounts?|admin|dashboard|developers?|business|console)\./.test(host)) return undefined;
     const path = url.pathname.toLowerCase();
     if (!/^[a-z\d/_-]+$/.test(path) || /(?:^|\/)(?:accounts?|admin|dashboard|console|settings|oauth|login|auth|profiles?|users?|contact)(?:\/|$)/.test(path)) return undefined;
-    const legalPath = purpose === "privacy" ? /(?:^|[\/_-])privacy(?:[-_]policy)?(?:\/|$)/ : /(?:^|[\/_-])(?:data[-_]deletion(?:[-_]instructions)?|delete[-_]data|deletion)(?:\/|$)/;
+    const legalPath = purpose === "privacy" ? /(?:^|[\/_-])privacy(?:[-_]policy)?\/?$/ : /(?:^|[\/_-])(?:data[-_]deletion(?:[-_]instructions)?|delete[-_]data|deletion)\/?$/;
     return legalPath.test(path) ? url.toString() : undefined;
   } catch { return undefined; }
 }
