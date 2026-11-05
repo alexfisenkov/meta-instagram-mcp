@@ -3,6 +3,10 @@ import { requestJsonHttp } from "./http-json.js";
 
 const SUPPORTED_SCOPES = new Set([...Object.values(getScopePresets("facebook")).flat(), "public_profile", "email"]);
 
+export function isSupportedScopeName(scope: unknown): scope is string {
+  return typeof scope === "string" && SUPPORTED_SCOPES.has(scope) && !/^[a-f\d]{32}$/i.test(scope);
+}
+
 type Truth = boolean | "unknown";
 export interface ExpiryStatus { state: "expires_at" | "no_expiry_reported" | "unknown"; expiresAt?: string }
 type Reason = "verification_not_requested" | "no_token" | "unsupported_auth_mode" | "missing_app_credentials" | "token_store_unavailable"
@@ -68,8 +72,8 @@ export function createAuthorizationStatus() {
       if (!isRecord(data) || typeof data.is_valid !== "boolean") return unknown("malformed_response");
       const hasAppId = typeof data.app_id === "string" && data.app_id.length > 0;
       if (data.is_valid && !hasAppId) return unknown("malformed_response");
-      if (data.is_valid && (!Array.isArray(data.scopes) || !data.scopes.every((scope) => typeof scope === "string"
-        && SUPPORTED_SCOPES.has(scope) && !/^[a-f\d]{32}$/i.test(scope) && scope !== credential.accessToken && scope !== credential.appSecret))) {
+      if (data.is_valid && (!Array.isArray(data.scopes) || !data.scopes.every((scope) => isSupportedScopeName(scope)
+        && scope !== credential.accessToken && scope !== credential.appSecret))) {
         return unknown("malformed_response");
       }
       const tokenValid = data.is_valid;

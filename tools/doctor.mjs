@@ -83,7 +83,7 @@ function isoDate(value) {
     && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
-function safeAuthorization(value) {
+async function safeAuthorization(value) {
   if (!value || typeof value !== "object") return undefined;
   const result = {};
   const enums = {
@@ -95,7 +95,12 @@ function safeAuthorization(value) {
   for (const [key, allowed] of Object.entries(enums)) if (allowed.includes(value[key])) result[key] = value[key];
   for (const key of ["tokenValid", "appMatches"]) if ([true, false, "unknown"].includes(value[key])) result[key] = value[key];
   if (isoDate(value.checkedAt)) result.checkedAt = value.checkedAt;
-  if (Array.isArray(value.scopes)) result.scopes = [...new Set(value.scopes.filter((scope) => typeof scope === "string" && /^[a-z][a-z\d_]{0,127}$/.test(scope)))].slice(0, 200);
+  if (Array.isArray(value.scopes)) {
+    try {
+      const { isSupportedScopeName } = await import("../dist/authorization-status.js");
+      result.scopes = [...new Set(value.scopes.filter(isSupportedScopeName))].slice(0, 200);
+    } catch { result.scopes = []; }
+  }
   for (const key of ["tokenExpiry", "dataAccessExpiry"]) {
     const expiry = value[key];
     if (expiry?.state === "expires_at" && isoDate(expiry.expiresAt)) result[key] = { state: "expires_at", expiresAt: expiry.expiresAt };
@@ -189,7 +194,7 @@ async function runDoctor() {
             report.mcp.appCredentialsPresent = Boolean(payload.config?.hasAppId && payload.config?.hasAppSecret);
             report.mcp.accessTokenPresent = Boolean(payload.envToken || payload.storedToken?.accessToken);
             const runtime = safeRuntime(payload.runtime);
-            const authorization = safeAuthorization(payload.authorization);
+            const authorization = await safeAuthorization(payload.authorization);
             const operationalContext = await safeOperationalContext(payload.operationalContext);
             if (runtime) report.runtime = runtime;
             if (authorization) report.authorization = authorization;
