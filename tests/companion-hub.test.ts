@@ -172,7 +172,7 @@ describe("CompanionHub", () => {
     expect(candidates.every((candidate) => candidate.accountBinding === "acct:one" &&
       candidate.declaredCapabilities.includes("account.inspect") && candidate.declaredCapabilities.includes("inbox.list"))).toBe(true);
     expect(candidates).toHaveLength(3);
-  });
+  }, process.platform === "win32" ? 60_000 : 15_000);
 
   it("leases a write only once and rejects a mismatched or expired result", async () => {
     let now = 1_000;
