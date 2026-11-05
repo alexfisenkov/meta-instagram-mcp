@@ -7,7 +7,7 @@
 - `meta_auth_status` сохраняет legacy поля и добавляет `verify` (default false), безопасную проекцию Meta `debug_token`, независимые token/data-access expiry и закрытые reason codes. Facebook verification ограничена одним GET и 5 секундами с отменой, без retry/refresh/token-store write. In-memory proof привязан к выбранным credentials; cache/stale помечены явно. Token fragments заменены на `[redacted]` с сохранением типа.
 - Оба status tools показывают startup package/source identity из валидированного installer stamp или server `.VERSION`. Неизвестное, несовместимое или конфликтующее происхождение остаётся unknown; marker не проверяет целостность файлов. Capability schema version остаётся 1.
 - Приватный `operational-context.json` проецируется только в public HTTPS privacy/deletion URLs и manual/unknown deletion workflow; конфигурация не выдаётся за live verification.
-- Совместимый dependency refresh: MCP SDK 1.32.2, Zod 4.6.7, поддерживаемый SDK Hono override 2.1.6 и исправленные transitive body-parser/fast-uri/qs. Новых requested scopes, tools и dependencies нет. SDK v2 требует отдельной миграции.
+- Dependency refresh: MCP SDK 1.32.2, Zod 4.6.7, поддерживаемый SDK Hono override 2.1.6 и исправленные transitive packages. Dev-инструменты обновлены в текущих диапазонах: Vitest 4.1.12, tsx 4.23.15, Node 24 types 24.19.2; test-only happy-dom закреплён на 21.0.4 для исправления security advisories. TypeScript остаётся 5.9.3. Новых requested scopes, tools и прямых dependencies нет. SDK v2, Vitest 5 и TypeScript 7 требуют отдельной миграции.
 - Документация различает конфигурацию, runtime snapshot и новую проверку. Публикация release, установка конкретного SHA и live acceptance проверяются отдельно.
 
 ## 0.2.7
