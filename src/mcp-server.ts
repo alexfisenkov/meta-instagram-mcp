@@ -23,11 +23,11 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_auth_status",
     {
       title: "Meta Auth Status",
-      description: "Show Meta Instagram MCP configuration and redacted token metadata.",
-      inputSchema: z.object({}),
+      description: "Show configuration, startup runtime identity and safe authorization metadata. verify=true performs one bounded read-only Facebook token check; the default makes no verification request or UI action.",
+      inputSchema: z.object({ verify: z.boolean().default(false) }),
       annotations: { readOnlyHint: true }
     },
-    async () => jsonToolResult(await handlers.authStatus())
+    async (args) => jsonToolResult(await handlers.authStatus(args))
   );
   server.registerTool(
     "meta_scope_presets",

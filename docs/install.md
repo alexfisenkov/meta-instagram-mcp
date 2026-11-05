@@ -5,6 +5,28 @@
 - portable MCP для Node.js с конфигурацией и token-store вне каталога приложения;
 - четыре профиля: API stdio, API + server-owned persistent Chrome/extension/Native Host, external desktop browser и connected phone companion. Shared runtime paths для stdio/HTTP/API/browser/phone подключены в checkout. Выбранный release SHA, server deployment, host registration, OAuth scopes и live UI/device QA — отдельные gates: наличие опубликованной версии не доказывает, что конкретный runtime установлен или готов. Сверяйтесь с [матрицей возможностей](capabilities.md).
 
+## Диагностика установленной v0.2.8
+
+Версия checkout не подтверждает опубликованный или установленный release. В status tools сверяйте `runtime.packageVersion` и `runtime.sourceRevision`; метаданные фиксируются при создании runtime, после обновления нужен перезапуск. Installer marker сопоставляется с версией пакета; server `.VERSION` содержит полный source SHA. Ошибочный/несовместимый marker даёт unknown, совпавший не доказывает отсутствие ручных изменений файлов.
+
+`meta_auth_status` с `{}` не выполняет новую Meta/UI проверку. Для свежей диагностики Facebook credential — `{"verify":true}`: один read-only `debug_token` GET, максимум 5 секунд, без retry, OAuth, refresh или записи token-store. Token expiry и data-access expiry независимы; числовой `0` — `no_expiry_reported`, не бессрочность. Cached proof живёт только в памяти, помечается cached/stale и не заменяет read-back нужного endpoint. Детали — в [операционном runbook](operations-runbook.md#проверить-версию-и-авторизацию).
+
+## Приватный операционный контекст
+
+Необязательный `operational-context.json` хранится рядом с внешним token-store, вне checkout, с теми же приватными правами (POSIX `0600` либо защищённый Windows ACL). Новых env keys нет. Разрешённая схема:
+
+```json
+{
+  "privacyPolicyUrl": "https://example.com/privacy",
+  "dataDeletionUrl": "https://example.com/data-deletion",
+  "deletionWorkflow": "manual"
+}
+```
+
+Используйте собственные публичные HTTPS страницы с явными legal paths: privacy/privacy-policy, data-deletion/data-deletion-instructions, delete-data или deletion; допустим префикс вроде `/legal/` или `/product-privacy`. Query, fragment, userinfo, нестандартный port, IP/локальный hostname, account/dashboard/admin/contact paths и encoded paths отклоняются. Не добавляйте email, account IDs, dashboard links или credentials. Неизвестные поля не проецируются; отсутствующий, слишком большой, нечитабельный или некорректный файл даёт unknown. `deletionWorkflow` принимает `manual` или `unknown`; callback удаления этот файл не создаёт.
+
+Разрешённые значения в `meta_auth_status.operationalContext` имеют `status: "configured"`, `verification: "configuration_only"`. Это не проверка доступности URL, требований Meta или реального удаления данных. Файл остаётся внешним приватным state, не входит в release assets или Git.
+
 ## Требования
 
 - Git 2.30+;

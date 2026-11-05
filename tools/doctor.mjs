@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,20 +57,59 @@ function safeConfigSummary(configDirectory) {
   };
 }
 
-function safeInstallSummary(installDirectory) {
+async function safeInstallSummary(installDirectory) {
   try {
-    const pkg = JSON.parse(readFileSync(join(installDirectory, "package.json"), "utf8"));
-    const result = { version: typeof pkg.version === "string" ? pkg.version : "unknown" };
-    try {
-      const state = JSON.parse(readFileSync(join(installDirectory, ".meta-instagram-mcp-install.json"), "utf8"));
-      if (typeof state.revision === "string" && /^[a-f0-9]{40}$/i.test(state.revision)) result.revision = state.revision.toLowerCase();
-    } catch {
-      // A source checkout has no installer state marker.
-    }
-    return result;
+    const { captureRuntimeStatus } = await import("../dist/runtime-status.js");
+    const snapshot = captureRuntimeStatus(installDirectory);
+    return { version: snapshot.packageVersion, ...(snapshot.sourceRevision !== "unknown" ? { revision: snapshot.sourceRevision } : {}),
+      verification: "installation_metadata_only" };
   } catch {
-    return { version: "unknown" };
+    return { version: "unknown", verification: "installation_metadata_only" };
   }
+}
+
+function safeRuntime(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const result = { integrity: "not_verified" };
+  if (typeof value.packageVersion === "string" && /^(?:\d+\.\d+\.\d+(?:-[\da-z.-]+)?|unknown)$/i.test(value.packageVersion)) result.packageVersion = value.packageVersion;
+  if (typeof value.sourceRevision === "string" && /^(?:[a-f\d]{40}|unknown)$/i.test(value.sourceRevision)) result.sourceRevision = value.sourceRevision;
+  if (["installer_stamp", "server_version", "unknown"].includes(value.revisionSource)) result.revisionSource = value.revisionSource;
+  if (isoDate(value.capturedAt)) result.capturedAt = value.capturedAt;
+  return result;
+}
+
+function isoDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function safeAuthorization(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const result = {};
+  const enums = {
+    verification: ["not_requested", "live", "cached", "unavailable"], source: ["meta_debug_token", "none"],
+    credentialSource: ["environment", "stored", "none"], freshness: ["fresh", "cached", "stale"],
+    reason: ["verification_not_requested", "no_token", "unsupported_auth_mode", "missing_app_credentials", "token_store_unavailable",
+      "verification_failed", "verification_timeout", "malformed_response", "token_invalid", "app_mismatch", "verified"]
+  };
+  for (const [key, allowed] of Object.entries(enums)) if (allowed.includes(value[key])) result[key] = value[key];
+  for (const key of ["tokenValid", "appMatches"]) if ([true, false, "unknown"].includes(value[key])) result[key] = value[key];
+  if (isoDate(value.checkedAt)) result.checkedAt = value.checkedAt;
+  if (Array.isArray(value.scopes)) result.scopes = [...new Set(value.scopes.filter((scope) => typeof scope === "string" && /^[a-z][a-z\d_]{0,127}$/.test(scope)))].slice(0, 200);
+  for (const key of ["tokenExpiry", "dataAccessExpiry"]) {
+    const expiry = value[key];
+    if (expiry?.state === "expires_at" && isoDate(expiry.expiresAt)) result[key] = { state: "expires_at", expiresAt: expiry.expiresAt };
+    else if (["no_expiry_reported", "unknown"].includes(expiry?.state)) result[key] = { state: expiry.state };
+  }
+  return result;
+}
+
+async function safeOperationalContext(value) {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    const { projectOperationalContext } = await import("../dist/operational-context.js");
+    return projectOperationalContext(value);
+  } catch { return undefined; }
 }
 
 function textPayload(result) {
@@ -107,7 +146,7 @@ async function runDoctor() {
     tokenFilePresent = false;
   }
   const report = {
-    app: safeInstallSummary(options.installDirectory),
+    app: await safeInstallSummary(options.installDirectory),
     installPresent: existsSync(join(options.installDirectory, "dist", "server.js")),
     config: { ...configSummary, tokenFilePresent },
     mcp: { connected: false, toolCount: 0, authStatusAvailable: false, authStatusCall: "unavailable" },
@@ -149,6 +188,12 @@ async function runDoctor() {
             const payload = JSON.parse(textPayload(result));
             report.mcp.appCredentialsPresent = Boolean(payload.config?.hasAppId && payload.config?.hasAppSecret);
             report.mcp.accessTokenPresent = Boolean(payload.envToken || payload.storedToken?.accessToken);
+            const runtime = safeRuntime(payload.runtime);
+            const authorization = safeAuthorization(payload.authorization);
+            const operationalContext = await safeOperationalContext(payload.operationalContext);
+            if (runtime) report.runtime = runtime;
+            if (authorization) report.authorization = authorization;
+            if (operationalContext) report.operationalContext = operationalContext;
           } catch {
             report.mcp.authStatusCall = "unreadable";
           }

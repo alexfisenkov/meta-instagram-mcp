@@ -9,8 +9,16 @@ MCP для работы с собственным Instagram-аккаунтом �
 - Доступ возможен только в рамках permissions, которые выдаст Meta App и подтвердит пользователь.
 - `META_AUTH_MODE=facebook` использует Facebook Login + Instagram Graph API. Page-linked resolve требует Facebook Page permissions, но direct Instagram access может работать и без `/me/accounts`, если OAuth consent выдал доступ к конкретному professional account.
 - `META_AUTH_MODE=instagram` нужен для отдельного Instagram Login-приложения с Instagram App ID/Secret и scopes вроде `instagram_business_basic`, `instagram_business_manage_insights`, `instagram_business_manage_comments`.
-- Long-lived токены действуют около 60 дней и должны обновляться до истечения срока.
+- Срок зависит от типа и способа выдачи токена. Проверяйте отдельно token expiry и data-access expiry; значение `0` в Meta debug response означает только отсутствие сообщённого срока, а не бессрочный доступ.
 - Официального "полного бесконечного доступа ко всему Instagram" нет. Этот MCP расширяемо читает то, что разрешают Meta permissions и текущий аккаунт.
+
+## Диагностика v0.2.8
+
+Обычный `meta_auth_status` (`{}` или `{"verify":false}`) читает локальные метаданные без новой проверки Meta или UI. `{"verify":true}` проверяет выбранный Facebook credential через один GET `debug_token` с общим лимитом 5 секунд, без retry, refresh или записи token-store. Environment token приоритетнее сохранённого; неподдержанный auth mode и неполная конфигурация дают безопасный reason code.
+
+В `authorization` раздельно показаны `tokenValid`, `appMatches`, scope names, `tokenExpiry` и `dataAccessExpiry`. Только `verification: "live"` относится к новой проверке. Последний proof хранится в памяти процесса и привязан к выбранным credentials; обычный вызов маркирует его `cached`, через 5 минут — `freshness: "stale"`. Это не подтверждает доступность конкретного API endpoint или UI. Legacy поля сохраняются; строки токенов теперь непрозрачны: `[redacted]`.
+
+Оба status tools возвращают `runtime`: `packageVersion`, `sourceRevision`, `revisionSource`, `capturedAt` и `integrity: "not_verified"`. Снимок фиксируется при создании runtime из согласованного installer stamp либо server `.VERSION`; неизвестное или несовместимое происхождение остаётся `unknown`. Marker не доказывает отсутствие ручных изменений файлов. `meta_capabilities.version: 1` — версия схемы, а не пакета. Приватный `operationalContext` означает только конфигурацию; настройка описана в [install runbook](docs/install.md#приватный-операционный-контекст).
 
 ## Установка
 
@@ -34,7 +42,7 @@ npm run test:native-registration
 
 Ниже перечислена существующая legacy API surface. Точный текущий набор tools проверяется через MCP client/doctor; permissions и per-source readiness ограничивают доступность функций.
 
-- `meta_auth_status` - проверяет конфиг и redacted token metadata.
+- `meta_auth_status` - показывает config, opaque token metadata, startup runtime identity и optional bounded live verification.
 - `meta_scope_presets` - показывает поддерживаемые OAuth scope presets.
 - `meta_build_login_url` - строит официальный OAuth login URL.
 - `meta_exchange_code` - legacy обмен без state binding, сохраняет только в пустой token-store. Для первичной и повторной авторизации используйте state-bound `meta_begin_oauth` и callback.

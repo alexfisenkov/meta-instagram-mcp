@@ -33,7 +33,7 @@ describe("config", () => {
   });
 
   it("redacts tokens instead of returning raw credentials", () => {
-    expect(redactToken("sample-long-token-value")).toBe("samp...alue");
+    expect(redactToken("sample-long-token-value")).toBe("[redacted]");
     expect(redactToken("short")).toBe("[redacted]");
     expect(redactToken(undefined)).toBe(undefined);
   });

@@ -27,6 +27,7 @@ import { registerMutationTools, type MutationToolHandlers } from "./mutation-too
 import type { MutationExecutor } from "./action-safety.js";
 import { FileActionReadbackStore } from "./action-readback.js";
 import { assertOutsideDirectory } from "./private-fs.js";
+import { captureRuntimeStatus } from "./runtime-status.js";
 
 export interface RuntimeOptions {
   config?: MetaInstagramConfig;
@@ -58,8 +59,9 @@ export interface InstagramRuntime {
 /** Composes the legacy API handlers, layered source tools, and shared Hub for stdio or HTTP. */
 export function createRuntime(options: RuntimeOptions = {}): InstagramRuntime {
   const config = options.config ?? loadConfig();
+  const runtimeStatus = captureRuntimeStatus();
   const authorizationScopes = [...(config.defaultScopes ?? defaultScopesForAuthMode(config.authMode))];
-  const existingHandlers = options.existingHandlers ?? createToolHandlers({ config });
+  const existingHandlers = options.existingHandlers ?? createToolHandlers({ config, runtimeStatus });
   const hub = options.hub ?? new CompanionHub({
     storagePath: options.hubStoragePath ?? process.env.INSTAGRAM_MCP_HUB_STATE_PATH ?? join(homedir(), ".config", "meta-instagram-mcp", "companion-hub.json")
   });
@@ -72,7 +74,7 @@ export function createRuntime(options: RuntimeOptions = {}): InstagramRuntime {
   const readbackPath = options.readbackPath ?? join(dirname(config.tokenStorePath), "mutation-readback.json");
   assertPrivatePath(readbackPath);
   const readbackStore = new FileActionReadbackStore(readbackPath);
-  const layeredHandlers = createLayeredToolHandlers({ router, hostAnalysis: options.hostAnalysis, actionReadbacks: readbackStore });
+  const layeredHandlers = createLayeredToolHandlers({ router, hostAnalysis: options.hostAnalysis, actionReadbacks: readbackStore, runtimeStatus });
   const oauth = options.oauth ?? configuredOAuth(config, authorizationScopes);
   const webhook = options.webhook ?? configuredWebhook(config);
   let authorityPromise: Promise<UiApprovalAuthority> | undefined;

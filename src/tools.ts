@@ -14,6 +14,9 @@ import {
 } from "./oauth.js";
 import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 import { createPublishHandlers } from "./publish.js";
+import { captureRuntimeStatus, type RuntimeStatus } from "./runtime-status.js";
+import { createAuthorizationStatus } from "./authorization-status.js";
+import { readOperationalContext } from "./operational-context.js";
 import { loadStoredToken, sameStoredTokenSnapshot, saveStoredToken, withTokenStoreLock, type StoredInstagramToken, type TokenStoreTransaction } from "./token-store.js";
 
 interface TokenStore {
@@ -33,6 +36,7 @@ interface ToolDependencies {
   config: MetaInstagramConfig;
   tokenStore?: TokenStore;
   clientFactory?: (accessToken: string, authMode: AuthMode) => MetaClient;
+  runtimeStatus?: Readonly<RuntimeStatus>;
 }
 
 type ToolArgs = Record<string, any>;
@@ -51,6 +55,8 @@ interface MediaSummary {
 }
 
 export function createToolHandlers(dependencies: ToolDependencies) {
+  const runtimeStatus = dependencies.runtimeStatus ?? captureRuntimeStatus();
+  const authorizationStatus = createAuthorizationStatus();
   const store = dependencies.tokenStore ?? {
     load: () => loadStoredToken(dependencies.config.tokenStorePath),
     save: (token: StoredInstagramToken) => saveStoredToken(dependencies.config.tokenStorePath, token)
@@ -114,9 +120,23 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     createMediaContainer: publish.createMediaContainer,
     publishMedia: publish.publishMedia,
 
-    async authStatus() {
-      const stored = await store.load();
+    async authStatus(args: { verify?: boolean } = {}) {
+      let storeUnavailable = false;
+      const stored = await store.load().catch(() => { storeUnavailable = true; return undefined; });
+      const environmentSelected = Boolean(dependencies.config.accessToken);
+      const active = environmentSelected ? dependencies.config : stored;
+      const { accessToken } = active ?? {};
+      const { appId, appSecret } = dependencies.config;
+      const authorization = await authorizationStatus({
+        accessToken, appId, appSecret,
+        authMode: environmentSelected ? dependencies.config.authMode : stored?.authMode ?? dependencies.config.authMode,
+        graphApiVersion: dependencies.config.graphApiVersion,
+        credentialSource: accessToken ? environmentSelected ? "environment" : "stored" : "none", storeUnavailable
+      }, args.verify === true);
       return {
+        runtime: runtimeStatus,
+        authorization,
+        operationalContext: await readOperationalContext(dependencies.config.tokenStorePath),
         config: {
           authMode: dependencies.config.authMode,
           hasAppId: Boolean(dependencies.config.appId),

@@ -93,8 +93,8 @@ describe("tool handlers", () => {
       "instagram_business_manage_insights",
       "instagram_business_manage_comments",
     ]);
-    expect(result.envToken).toBe("env-...oken");
-    expect(result.storedToken?.accessToken).toBe("stor...oken");
+    expect(result.envToken).toBe("[redacted]");
+    expect(result.storedToken?.accessToken).toBe("[redacted]");
   });
 
   it("builds Facebook Login URLs when configured for Facebook auth mode", () => {

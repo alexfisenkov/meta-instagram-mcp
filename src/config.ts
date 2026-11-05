@@ -59,8 +59,7 @@ export function loadConfig(env: Env = process.env): MetaInstagramConfig {
 
 export function redactToken(token: string | undefined): string | undefined {
   if (!token) return undefined;
-  if (token.length < 9) return "[redacted]";
-  return `${token.slice(0, 4)}...${token.slice(-4)}`;
+  return "[redacted]";
 }
 
 function blankToUndefined(value: string | undefined): string | undefined {

@@ -1,6 +1,6 @@
 # Карта проекта
 
-Обновлено: 2026-10-10.
+Обновлено: 2026-11-05.
 
 ## Как читать репозиторий
 
@@ -56,6 +56,9 @@
 | Путь | Слой | Назначение |
 |---|---|---|
 | `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes, находит token store path, редактирует tokens. |
+| `src/runtime-status.ts` | Startup identity | Фиксирует package version и валидированный installer/server revision; не проверяет целостность файлов. |
+| `src/authorization-status.ts` | Read-only status verification | Bounded Facebook debug GET, безопасная проекция expiry/scopes и private credential-bound in-memory cache. |
+| `src/operational-context.ts` | Private config projection | Возвращает только разрешённые public legal URLs и manual/unknown workflow. |
 | `src/read-context.ts` | Read execution context | Carries an advisory provider deadline/signal; underlying cancellation is operation-specific (currently Direct triage and companion queue reads). |
 | `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
 | `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с приватными POSIX mode или Windows ACL. |
@@ -78,7 +81,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 
 | Tool | Назначение |
 |---|---|
-| `meta_auth_status` | Показывает config и redacted token metadata. |
+| `meta_auth_status` | Показывает config, opaque token metadata, startup runtime identity и optional bounded live verification. |
 | `meta_scope_presets` | Показывает OAuth scope presets для текущего auth mode. |
 | `meta_build_login_url` | Строит официальный OAuth login URL. |
 | `meta_exchange_code` | Legacy-путь для пустого token-store; existing store отклоняется до обмена. Для reauth используйте `meta_begin_oauth` и callback. |
@@ -104,6 +107,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 | Путь | Что покрывает |
 |---|---|
 | `tests/config.test.ts` | Config parsing, scope parsing, token redaction. |
+| `tests/status-contract.test.ts` | Auth/runtime/capability contract, MCP verify schema, independent expiry, credential cache invalidation, deadline/redaction и legal context whitelist. |
 | `tests/token-store.test.ts` | Token store write/read behavior and file mode. |
 | `tests/oauth.test.ts` | Instagram and Facebook OAuth URL/exchange/refresh logic. |
 | `tests/meta-client.test.ts` | Graph URL construction and token-safe error normalization. |
@@ -127,6 +131,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 |---|---|
 | `scripts/build.mjs` | esbuild-based build for `src/**/*.ts` into `dist/`. |
 | `tools/run.mjs` | Portable MCP wrapper. Loads a private external `.env`, applies explicit variable allowlist and starts the shared runtime. |
+| `tools/doctor.mjs` | Разделяет installed metadata и runtime, проецирует безопасные новые status blocks; по умолчанию не делает live token verification. |
 | `tools/test-remote-entrypoint.mjs` | Native Node fixture for local/remote stdio selection and fail-closed remote startup. |
 | `tools/test-installer.mjs` | Portable install/update/rollback fixture, wrapper config handoff and doctor redaction checks. |
 | `tools/register-native-host.mjs` | Per-user Chrome Native Messaging manifest/launcher registration with exact-origin and existing-owner conflict guards. |

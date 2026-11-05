@@ -1,6 +1,6 @@
 # Операционный runbook
 
-Обновлено: 2026-11-04.
+Обновлено: 2026-11-05.
 
 ## Контракты и границы
 
@@ -22,7 +22,21 @@ node tools/doctor.mjs
 
 Doctor делает локальные MCP initialize/listTools и read-only status checks. `toolCount` относится к подключённому runtime, а статусы источников не доказывают доступ Meta, авторизацию Chrome, готовность физического телефона или опубликованный серверный deployment. Если Codex использует локальный сервер, отдельно проверьте его подключение в настройках MCP-клиента.
 
+Doctor v0.2.8 выводит только разрешённые поля новых `runtime`, `authorization` и `operationalContext` из status ответа. `app.verification: "installation_metadata_only"` относится к прочитанной установке, `runtime` — к подключённому процессу; совпадение версии файлов само по себе не подтверждает перезапуск. Doctor не включает `verify:true`; для новой проверки используйте MCP-вызов ниже.
+
 Секреты, OAuth-коды, cookies, browser storage и полные account identifiers не копируйте в логи, issues или этот репозиторий. Конфигурация и token-store должны оставаться во внешнем приватном каталоге.
+
+## Проверить версию и авторизацию
+
+1. Вызовите `meta_auth_status` с `{}`. `config` и legacy `storedToken` описывают настройки/сохранённые данные; это не live proof. Token strings содержат только `[redacted]`.
+2. Сверьте `runtime.packageVersion` и `runtime.sourceRevision` с release SHA. `revisionSource` показывает `installer_stamp`, `server_version` или `unknown`; `capturedAt` относится к стартовому снимку. Installer stamp требует совпадения версии пакета, полного SHA и корректного `installedAt`; server `.VERSION` содержит полный SHA. Ошибочный stamp, несовпадение версий или конфликт markers дают unknown. Marker не доказывает, что файлы не меняли вручную.
+3. Для новой read-only проверки Facebook credential вызовите `meta_auth_status` с `{"verify":true}`. Это один GET `debug_token`, максимум 5 секунд wall-clock, без retry, OAuth, refresh или сохранения токена. Для Instagram Login — `unsupported_auth_mode`; для отсутствующих credentials — `no_token`/`missing_app_credentials`. Ошибки транспорта/Meta и некорректные ответы дают `verification_failed`, `verification_timeout` или `malformed_response` без upstream payload.
+4. Читайте `authorization.tokenValid` и `appMatches` независимо. `token_invalid` и `app_mismatch` не подтверждают исправную авторизацию. `scopes` — names из проверенного ответа, не requested presets. Успешный debug не доказывает доступ к account/media/insights/comments или UI.
+5. Читайте оба срока: `tokenExpiry` и `dataAccessExpiry`. `expires_at` содержит ISO `expiresAt`; `no_expiry_reported` соответствует числовому нулю; отсутствующие/невалидные значения имеют `unknown`. Ноль не означает бессрочный доступ. Не вычисляйте неизвестный срок из даты сохранения токена.
+
+Обычный status не отправляет verification request. После проверки он может вернуть `verification: "cached"` с прежним `checkedAt`; спустя 5 минут — `freshness: "stale"`. Новая проверка имеет `verification: "live"`, `source: "meta_debug_token"`, `freshness: "fresh"`. Cache существует только в памяти runtime, сбрасывается при смене выбранных token/app/secret/auth mode или credential source. Environment token приоритетнее сохранённого; stored metadata не переносится в proof environment token. Ошибка новой попытки убирает прежний proof.
+
+`meta_capabilities` сохраняет `version: 1` и `verification: "runtime_status_only"` и добавляет тот же startup `runtime`. Запрос не запускает UI или новую token verification. `operationalContext.verification: "configuration_only"` не подтверждает доступность legal URLs или выполнение удаления данных. Секреты, raw debug response и raw context не копируйте в отчёт.
 
 ## Диагностика отказа OAuth callback
 

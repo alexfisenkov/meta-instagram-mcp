@@ -1,6 +1,7 @@
 import type { Availability, Coverage, HistoryCompleteness, MutationAction, Observation, SourceId, TargetRef } from "./domain-types.js";
 import type { ReadRequest, RoutedRead, SourceRouter, SourceProvider } from "./source-router.js";
 import type { ActionReadbackStore } from "./action-readback.js";
+import { captureRuntimeStatus, type RuntimeStatus } from "./runtime-status.js";
 
 export type Truth = true | false | "unknown";
 export interface ReviewQueueItem {
@@ -52,10 +53,11 @@ export interface LayeredToolHandlers {
 export interface CapabilityReport {
   version: 1;
   verification: "runtime_status_only";
+  runtime: Readonly<RuntimeStatus>;
   sources: Array<{ source: SourceId; availability: Availability; reason?: string; capabilities: string[] }>;
   operations: Array<{ operation: ReadRequest["operation"]; sources: Array<{ source: SourceId; status: Availability; reason?: string }> }>;
 }
-export interface LayeredToolOptions { router: SourceRouter; hostAnalysis?: HostAnalysisPort; actionReadbacks?: Pick<ActionReadbackStore, "latestFor">; now?: () => Date }
+export interface LayeredToolOptions { router: SourceRouter; hostAnalysis?: HostAnalysisPort; actionReadbacks?: Pick<ActionReadbackStore, "latestFor">; now?: () => Date; runtimeStatus?: Readonly<RuntimeStatus> }
 
 const READ_OPERATIONS: ReadRequest["operation"][] = ["account.inspect", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"];
 const LIMIT_MAX = 100;
@@ -63,6 +65,7 @@ const COMMENT_TARGETS_MAX = 20;
 const BROWSER_INBOX_ROW_REF_PREFIX = "browser-inbox-row:";
 
 export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredToolHandlers {
+  const runtimeStatus = options.runtimeStatus ?? captureRuntimeStatus();
   const now = options.now ?? (() => new Date());
   async function queue(input: { source: "auto"; limit: number; cursor?: string; commentTargets?: TargetRef[] }): Promise<ReviewQueue> {
     const limit = boundedLimit(input.limit);
@@ -121,7 +124,7 @@ export function createLayeredToolHandlers(options: LayeredToolOptions): LayeredT
         const statuses = await options.router.status(operation);
         return { operation, sources: statuses.map((item) => ({ source: item.source, status: item.availability, ...(item.reason ? { reason: item.reason } : {}) })) };
       }));
-      return { version: 1, verification: "runtime_status_only", sources, operations };
+      return { version: 1, verification: "runtime_status_only", runtime: runtimeStatus, sources, operations };
     },
     triageInbox: queue,
     readInbox: queue,
