@@ -53,6 +53,10 @@
 
 ## Исходный код
 
+Hosted multi-user: `src/student-server.ts` — отдельный entrypoint; `src/student/types.ts`, `config.ts`, `registry.ts` — contracts/config; `auth.ts` — service+subject boundary; `vault.ts` — encrypted single-writer persistence; `broker.ts` — state-bound OAuth и собственные connections; `meta-provider.ts`/`provider.ts` — fixed official API adapters; `grant-lifecycle.ts` — bounded Threads refresh и reauth; `mcp.ts`/`http.ts` — restricted transport; `webhooks.ts` — signature-first per-asset routing; `legal.ts` — operator-configured escaped privacy/deletion pages. Общая инструкция — `docs/student-broker.md`; шаблон реестра без секретов — `student-broker.config.example.json`; адресные проверки — `tests/student-*.test.ts`. Этот контур не разделяет single-account tokens или companions.
+
+`src/student/retention.ts` задаёт TTL кэша сообщений и lifecycle sweep; `src/student/purge-subject.ts` — owner-only offline CLI/service для проверенного удаления одного subject с тем же process lock и counts-only результатом. Build entrypoint: `dist/student/purge-subject.js`; stop/purge/start регламент — в `docs/student-broker.md`.
+
 | Путь | Слой | Назначение |
 |---|---|---|
 | `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes, находит token store path, редактирует tokens. |

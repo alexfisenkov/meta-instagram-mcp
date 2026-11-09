@@ -4,6 +4,8 @@
 
 ## Контракты и границы
 
+Для hosted multi-user подключений используйте отдельный [student broker runbook](student-broker.md): entrypoint `dist/student-server.js`, private registry/env/vault и ограниченный `/student/mcp`. Он не запускает legacy owner runtime или companions. Проверка `/health` относится к listener; проверка Meta grants, внешнего admission и callbacks выполняется отдельно. Публичные legal endpoints `/privacy` и `/data-deletion` требуют операторские name/contact из environment, иначе возвращают 503.
+
 - Нативные stdio и Streamable HTTP server регистрируют 27 инструментов: 18 legacy и 9 layered/mutation. Согласованный cloud allowlist содержит 19 инструментов: прежние 18 и named exception `meta_read_source`; `meta_capabilities` уже был разрешён. Фактический deployed cloud catalog нужно читать отдельно — этот checkout не доказывает deployment приватного allowlist. Это исключение не открывает остальные layered/mutation tools; write/auth/stateful resolver операции остаются закрыты. `meta_read_source` честно помечен `readOnlyHint: false`, потому что UI-read может иметь side effect `may_mark_seen`.
 - `meta_read_source` разрешает только read operations `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`. Это не разрешение на send/reply/reaction или другие writes. Проверяйте их результат отдельно от общего snapshot `meta_capabilities`.
 - Для объединённого чтения Direct используйте `meta_read_inbox` или `meta_read_source`. Они маршрутизируют чтение API → browser → phone и возвращают источники, coverage, ограничения и ошибки.

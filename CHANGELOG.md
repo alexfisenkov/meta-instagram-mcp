@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — hosted student connections (not yet released)
+
+- Separate loopback hosted Meta broker with five subject-bound MCP tools; legacy single-account runtime preserved.
+- Strict service bearer plus short HS256 subject JWT, encrypted single-writer grant/asset/state vault, one-use bound OAuth, own-asset read checks and disconnect generation fencing.
+- Product-specific Instagram Unified/BISU, Facebook Pages, Messenger, Threads, Ads and WhatsApp discovery/read adapters; actual grant capabilities, safe DTOs and signature-first scoped webhooks.
+- Threads long-lived upgrade and scheduled refresh with ciphertext CAS; revoked/expired grants require reconnect, disconnected assets cannot be resurrected by late OAuth/refresh.
+- Generic admission/configuration/runbook and focused security/lifecycle/provider/real-MCP tests. Meta App Review, live OAuth, webhook subscription and deployment remain separate acceptance gates.
+- Review fixes: complete reconsent retires missing own assets and fences superseded callbacks; operational admission/webhook configuration no longer invalidates OAuth grants; discovery follows fresh cursors after empty pages.
+- Post-rename fsync uncertainty quarantines reads and ordinary writes while retaining CAS-safe disconnect recovery. Message TTL is enforced on read and scheduled sweep; verified owner deletion has an offline subject purge CLI. Privacy pages state message content, retention/history and backup limits explicitly.
+
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
 ## 0.2.8 — 2026-11-05

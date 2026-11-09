@@ -1,0 +1,102 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { authorizationUrl, configFingerprint, LABELS, StudentRegistry } from "./registry.js";
+import type { ProviderAdapter } from "./provider.js";
+import { StudentVault } from "./vault.js";
+import { invalidateGrant } from "./grant-lifecycle.js";
+import { eventWithinRetention } from "./retention.js";
+import { BrokerError, PRODUCTS, sameSubject, type Connection, type Grant, type Product, type ReadInput, type Subject } from "./types.js";
+function hash(state: string): string { return createHash("sha256").update(state).digest("hex"); }
+function generationKey(subject: Subject, product: Product): string { return JSON.stringify([subject.tenantId, subject.sub, product]); }
+function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
+  grant.status = "revoked"; grant.credential = vault.seal(grant, { accessToken: "", assetTokens: {} });
+  grant.providerUserId = ""; grant.scopes = []; delete grant.clientBusinessId; delete grant.expiresAt; delete grant.refreshedAt;
+}
+function safeConnection(c: Connection) { return { id: c.id, product: c.product, status: c.status, account: { id: c.providerId, label: c.label }, capabilities: c.status === "connected" ? c.capabilities : [], updatedAt: c.updatedAt, ...(c.reason ? { reason: c.reason } : {}) }; }
+export class StudentBroker {
+  private readonly returnTarget: string;
+  constructor(private readonly vault: StudentVault, private readonly registry: StudentRegistry, private readonly provider: ProviderAdapter, platformOrigin: string, private readonly now = Date.now) {
+    const origin = new URL(platformOrigin);
+    if (origin.protocol !== "https:" || origin.origin !== platformOrigin || origin.username || origin.password) throw new BrokerError("invalid_platform_origin");
+    this.returnTarget = `${origin.origin}/social`;
+  }
+  catalog(subject: Subject) { return { products: PRODUCTS.map((product) => { const status = this.registry.status(product, subject); return { product, label: LABELS[product], status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }; }) }; }
+  async list(subject: Subject) {
+    const db = await this.vault.snapshot();
+    return { connections: db.connections.filter((c) => sameSubject(c, subject)).map((c) => {
+      const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject)); const config = this.registry.get(c.product);
+      if (c.status === "connected" && (!grant || grant.status !== "active" || !config || grant.fingerprint !== configFingerprint(config) || (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000))) return safeConnection({ ...c, status: "reauth_required", reason: "grant_unavailable" });
+      return safeConnection(c);
+    }) };
+  }
+  async begin(subject: Subject, product: Product) {
+    const status = this.registry.status(product, subject); if (status !== "ready") throw new BrokerError(status);
+    const config = this.registry.get(product)!; const state = randomBytes(32).toString("base64url"); const expiresAt = this.now() + 600_000;
+    await this.vault.transaction((db) => {
+      db.states = db.states.filter((s) => s.expiresAt > this.now() && (!sameSubject(s, subject) || s.product !== product));
+      if (db.states.filter((s) => sameSubject(s, subject)).length >= 10) throw new BrokerError("too_many_oauth_flows");
+      const key = generationKey(subject, product); db.generations[key] = (db.generations[key] ?? 0) + 1;
+      db.states.push({ ...subject, hash: hash(state), product, provider: config.provider, configKey: config.key, fingerprint: configFingerprint(config), expiresAt, returnTarget: this.returnTarget, generation: db.generations[key] });
+    });
+    return { authorizationUrl: authorizationUrl(config, state), expiresAt: new Date(expiresAt).toISOString() };
+  }
+  async callback(input: { state?: string; code?: string; error?: string }): Promise<string> {
+    let outcome = "error";
+    try {
+      if (!input.state || !/^[A-Za-z0-9_-]{43}$/.test(input.state)) throw new BrokerError("state_rejected");
+      const state = await this.vault.transaction((db) => { const index = db.states.findIndex((s) => s.hash === hash(input.state!)); if (index < 0) throw new BrokerError("state_rejected"); return db.states.splice(index, 1)[0]; });
+      const config = this.registry.get(state.product);
+      if (state.expiresAt <= this.now() || state.returnTarget !== this.returnTarget || !config || config.key !== state.configKey || config.provider !== state.provider || configFingerprint(config) !== state.fingerprint || this.registry.status(state.product, state) !== "ready") throw new BrokerError("state_rejected");
+      if (input.error && !input.code) outcome = "cancelled";
+      else {
+        if (!input.code || input.error || input.code.length > 4096) throw new BrokerError("callback_rejected");
+        const result = await this.provider.exchange(config, input.code);
+        if (!result.accessToken || !result.providerUserId || !result.assets.length || result.assets.some((asset) => asset.product !== state.product || !asset.providerId || !asset.capabilities.includes("account"))) throw new BrokerError("no_authorized_assets");
+        const id = randomUUID(), updatedAt = new Date(this.now()).toISOString();
+        const binding = { tenantId: state.tenantId, sub: state.sub, id, provider: config.provider };
+        const grant: Grant = { ...binding, configKey: config.key, fingerprint: state.fingerprint, providerUserId: result.providerUserId, clientBusinessId: result.clientBusinessId, scopes: result.scopes, expiresAt: result.expiresAt, status: "active", credential: this.vault.seal(binding, { accessToken: result.accessToken, assetTokens: result.assetTokens }), createdAt: updatedAt };
+        await this.vault.transaction((db) => {
+          if ((db.generations[generationKey(state, state.product)] ?? 0) !== state.generation) throw new BrokerError("oauth_cancelled");
+          db.grants.push(grant);
+          const confirmed = new Set(result.assets.map((asset) => asset.providerId)); const retiredIds = new Set<string>();
+          for (const previous of db.connections.filter((c) => sameSubject(c, state) && c.product === state.product && !confirmed.has(c.providerId))) {
+            previous.status = "disconnected"; previous.capabilities = []; previous.reason = "consent_asset_removed"; previous.updatedAt = updatedAt; retiredIds.add(previous.id);
+          }
+          db.events = db.events.filter((event) => !retiredIds.has(event.connectionId));
+          for (const asset of result.assets) {
+            const previous = db.connections.find((c) => sameSubject(c, state) && c.product === asset.product && c.providerId === asset.providerId);
+            const connection: Connection = { tenantId: state.tenantId, sub: state.sub, id: previous?.id ?? randomUUID(), grantId: id, ...asset, status: "connected", updatedAt };
+            if (previous) Object.assign(previous, connection, { reason: undefined }); else db.connections.push(connection);
+          }
+          for (const old of db.grants.filter((g) => sameSubject(g, state) && g.id !== id && g.status === "active")) if (!db.connections.some((c) => c.grantId === old.id && c.status === "connected")) revokeUnusedGrant(this.vault, old);
+        }); outcome = "connected";
+      }
+    } catch { /* OAuth codes, states, provider payloads and exception messages never leave the boundary. */ }
+    return `${this.returnTarget}?meta=${outcome}`;
+  }
+  async disconnect(subject: Subject, connectionId: string) {
+    return this.vault.transaction((db) => {
+      const c = db.connections.find((candidate) => candidate.id === connectionId && sameSubject(candidate, subject)); if (!c) throw new BrokerError("connection_not_found");
+      c.status = "disconnected"; c.capabilities = []; c.updatedAt = new Date(this.now()).toISOString(); c.reason = "user_disconnected"; db.events = db.events.filter((e) => e.connectionId !== c.id);
+      const key = generationKey(subject, c.product); db.generations[key] = (db.generations[key] ?? 0) + 1;
+      db.states = db.states.filter((s) => !sameSubject(s, subject) || s.product !== c.product);
+      const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject));
+      if (grant && !db.connections.some((other) => other.grantId === grant.id && other.status === "connected")) revokeUnusedGrant(this.vault, grant);
+      return { connection: safeConnection(c) };
+    }, { allowUncertain: true });
+  }
+  async read(subject: Subject, input: ReadInput) {
+    const db = await this.vault.snapshot(); const c = db.connections.find((candidate) => candidate.id === input.connectionId && sameSubject(candidate, subject)); if (!c) throw new BrokerError("connection_not_found");
+    const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject)); const config = this.registry.get(c.product);
+    if (c.status !== "connected" || !grant || grant.status !== "active" || !config || this.registry.status(c.product, subject) !== "ready" || configFingerprint(config) !== grant.fingerprint || (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000)) throw new BrokerError("connection_unavailable");
+    if (!c.capabilities.includes(input.operation)) throw new BrokerError("operation_unavailable");
+    let result;
+    try { result = c.product === "whatsapp" && input.operation === "inbox"
+      ? { data: { items: db.events.filter((e) => e.connectionId === c.id && eventWithinRetention(e, this.now())).slice(-(input.limit ?? 20)).map((e) => ({ ...e.data, receivedAt: e.receivedAt })) }, coverage: "partial", limitations: ["webhook_events_since_connection_only", "no_whatsapp_history_api"] }
+      : await this.provider.read(config, c, this.vault.credential(grant), input);
+    } catch (error) { if (error instanceof BrokerError && ["reauth_required", "permission_unavailable", "grant_verification_failed"].includes(error.code)) await invalidateGrant(this.vault, grant, "provider_authorization_revoked"); throw error; }
+    // A concurrent disconnect invalidates an already-running read before disclosure.
+    const current = (await this.vault.snapshot()).connections.find((candidate) => candidate.id === c.id);
+    if (!current || current.status !== "connected" || current.grantId !== c.grantId) throw new BrokerError("connection_unavailable");
+    return { ...result, source: c.product === "whatsapp" && input.operation === "inbox" ? "meta_webhook" : "meta_graph_api", updatedAt: new Date(this.now()).toISOString() };
+  }
+}

@@ -6,6 +6,8 @@
 
 ## Runtime
 
+Hosted multi-user контур изолирован от legacy factory: `src/student-server.ts` собирает subject auth, encrypted vault, provider registry/adapters, OAuth/grant lifecycle и пять safe tools из `src/student/`. У него отдельные listener/config/state/keys; owner tools, raw Graph paths и global environment token туда не импортируются. Подробные контракты, процессный writer lock, CAS и границы Meta admission — [student-broker.md](student-broker.md).
+
 Одна factory сохраняет 18 legacy API tools и добавляет per-source reads, inbox triage/analysis и guarded action flow. Нативный stdio/HTTP каталог содержит 27 tools; согласованный cloud allowlist — отдельные 19 entries (прежние 18 и named exception `meta_read_source`), но source tree не доказывает, что приватное gateway изменение развернуто. Источники читаются API → browser → phone с ограниченным общим бюджетом и явным coverage/provenance. Если unpinned browser read не находит ready bridge, provider может последовательно выполнить ограниченный `account.inspect` максимум на трёх свежих bridge того же account binding, заявивших эту проверку и нужную read capability; после сверки username, owner status и live capability выбранный bridge закрепляется для этой операции. Явный bridge/ref остаётся pinned и не переназначается. Общий summary, operation status, declared capability, account verification и live read — разные доказательства. Legacy media publish живёт отдельно от Direct/comments/phone/browser actions.
 
 ## OAuth modes
