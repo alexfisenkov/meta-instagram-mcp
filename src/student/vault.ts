@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { ensurePrivateDirectory, assertPrivateFile } from "../private-fs.js";
+import { ensurePrivateDirectory, ensurePrivateFile, assertPrivateFile } from "../private-fs.js";
 import { BrokerError, type Credential, type Database, type Sealed, type Subject } from "./types.js";
 
 interface Binding extends Subject { id: string; provider: string }
@@ -65,7 +65,8 @@ export class StudentVault {
       let renamed = false;
       try {
         const file = await open(tmp, "wx", 0o600);
-        try { await file.writeFile(encoded, "utf8"); await file.sync(); } finally { await file.close(); }
+        // POSIX mode bits alone do not protect a Windows file's inherited DACL.
+        try { await ensurePrivateFile(tmp); await file.writeFile(encoded, "utf8"); await file.sync(); } finally { await file.close(); }
         await rename(tmp, join(this.directory, "vault.json"));
         renamed = true;
         if (process.platform !== "win32") { const dir = await open(this.directory, "r"); try { await dir.sync(); } finally { await dir.close(); } }

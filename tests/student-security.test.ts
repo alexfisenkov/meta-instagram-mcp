@@ -9,6 +9,7 @@ import { authenticateSubject } from "../src/student/auth.js";
 import { StudentVault, openCredential, sealCredential } from "../src/student/vault.js";
 import { StudentBroker } from "../src/student/broker.js";
 import { StudentRegistry } from "../src/student/registry.js";
+import * as privateFs from "../src/private-fs.js";
 
 const key = randomBytes(32);
 const now = 1_800_000_000;
@@ -52,6 +53,18 @@ describe("student encrypted single-writer vault", () => {
     const reopened = await StudentVault.open(dir, key);
     expect((await reopened.snapshot()).events[0].data).toEqual({ text: "private-message" });
     await reopened.close();
+  });
+  it("refuses a vault commit when private file protection fails before any contents are written", async () => {
+    const { dir, store } = await vault();
+    const protection = vi.spyOn(privateFs, "ensurePrivateFile").mockImplementationOnce(async (path) => {
+      expect(await readFile(path, "utf8")).toBe("");
+      throw new Error("private_file_protection_refused");
+    });
+    try {
+      await expect(store.transaction((db) => { db.events.push({ connectionId: "connection", eventId: "event", receivedAt: "now", data: { text: "private-message" } }); })).rejects.toThrow("private_file_protection_refused");
+      expect((await store.snapshot()).revision).toBe(0);
+      await expect(readFile(join(dir, "vault.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { protection.mockRestore(); await store.close(); }
   });
   it("serializes transactions and fails CAS after external ciphertext replacement", async () => {
     const { dir, store } = await vault();

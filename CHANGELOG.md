@@ -9,6 +9,7 @@
 - Generic admission/configuration/runbook and focused security/lifecycle/provider/real-MCP tests. Meta App Review, live OAuth, webhook subscription and deployment remain separate acceptance gates.
 - Review fixes: complete reconsent retires missing own assets and fences superseded callbacks; operational admission/webhook configuration no longer invalidates OAuth grants; discovery follows fresh cursors after empty pages.
 - Post-rename fsync uncertainty quarantines reads and ordinary writes while retaining CAS-safe disconnect recovery. Message TTL is enforced on read and scheduled sweep; verified owner deletion has an offline subject purge CLI. Privacy pages state message content, retention/history and backup limits explicitly.
+- Vault commits protect temporary files before writing ciphertext, including a protected Windows DACL; failure leaves the prior vault revision intact.
 
 Изменения относятся к публичным возможностям и инструкциям. [GitHub Releases](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest) показывает опубликованные версии, commit SHA и assets; changelog описывает состав версии, но не служит доказательством её публикации или live-проверки.
 
