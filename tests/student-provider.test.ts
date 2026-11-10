@@ -5,9 +5,10 @@ import { BrokerError, type Connection, type ProductConfig } from "../src/student
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
 const instagramLoginConfig: ProductConfig = { ...config, provider: "instagram_login", configId: undefined };
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
-it("forces reauthentication only for direct Instagram Login using Meta's current parameter", () => {
+it("keeps the canonical direct Instagram URL compatible with the existing platform during rollout", () => {
   const direct = new URL(authorizationUrl(instagramLoginConfig, "state"));
-  expect(direct.searchParams.get("force_reauth")).toBe("true");
+  expect([...direct.searchParams.keys()].sort()).toEqual(["client_id", "redirect_uri", "response_type", "scope", "state"]);
+  expect(direct.searchParams.has("force_reauth")).toBe(false);
   expect(direct.searchParams.has("force_authentication")).toBe(false);
   expect(direct.searchParams.has("enable_fb_login")).toBe(false);
   for (const other of [config, { ...config, product: "facebook" as const, provider: "facebook_business" as const }, { ...config, product: "threads" as const, provider: "threads" as const }]) {

@@ -2,8 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
-- Direct Instagram Login requests Meta’s current `force_reauth`, accepts one explicit flat/wrapped profile and bounded actual CSV/array permissions, preserves raw numeric identity precision and binds app-scoped identity to the verified professional account without returning provider payloads. Failed reauthorization retains existing connections.
-- Threads long-lived exchange/refresh use the documented query token contract and fixed short/long/app/refresh diagnostic stages. Loopback health exposes a bounded process-local callback arrival count, including unknown state, without per-request logs; restart resets it.
+- Direct Instagram Login retains the canonical desktop URL while trusted clients can select Meta’s current mobile/recovery `force_reauth`; the broker accepts one explicit flat/wrapped profile and bounded actual CSV/array permissions, preserves raw numeric identity precision and binds app-scoped identity to the verified professional account without returning provider payloads. Failed reauthorization retains existing connections.
+- Threads long-lived exchange/refresh use the documented query token contract and fixed short/long/app/refresh diagnostic stages. Loopback health preserves its exact release-probe response. A separate service-authenticated loopback diagnostic endpoint exposes a bounded process-local callback arrival count, including unknown state, without per-request logs; restart resets it.
 
 - Separate loopback hosted Meta broker with five subject-bound MCP tools; legacy single-account runtime preserved.
 - Strict service bearer plus short HS256 subject JWT, encrypted single-writer grant/asset/state vault, one-use bound OAuth, own-asset read checks and disconnect generation fencing.

@@ -11,7 +11,7 @@ import { StudentRegistry } from "../src/student/registry.js";
 import { StudentVault } from "../src/student/vault.js";
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-it("counts callback arrivals without states or payloads on loopback health, including rejected attempts", async () => {
+it("preserves the exact release health contract and restricts callback counts to authenticated loopback diagnostics", async () => {
   const dir = await mkdtemp(join(tmpdir(), "student-arrival-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const vault = await StudentVault.open(dir, randomBytes(32)); cleanup.push(() => vault.close());
   const registry = new StudentRegistry([]);
@@ -19,19 +19,34 @@ it("counts callback arrivals without states or payloads on loopback health, incl
   const broker = new StudentBroker(vault, registry, { exchange: async () => { providerCalls++; throw new Error(); }, read: async () => { throw new Error(); } }, "https://platform.example");
   const options = { broker, vault, registry, auth: { serviceToken: "s".repeat(40), subjectKey: randomBytes(32) }, port: 0 };
   const server = await startStudentServer(options); cleanup.push(() => server.close());
-  expect(await (await fetch(`${server.url}/health`)).json()).toEqual({ status: "ok", callbacksReceived: 0 });
+  // Release build/install compare this exact unauthenticated JSON object.
+  const initialHealth = await fetch(`${server.url}/health`);
+  expect(initialHealth.status).toBe(200);
+  expect(await initialHealth.text()).toBe('{"status":"ok"}');
+  const diagnosticUrl = `${server.url}/student/diagnostics/callback-count`;
+  const diagnosticHeaders = { Authorization: `Bearer ${options.auth.serviceToken}` };
+  expect((await fetch(diagnosticUrl)).status).toBe(401);
+  expect((await fetch(diagnosticUrl, { headers: { Authorization: "Bearer PRIVATE-wrong" } })).status).toBe(401);
+  expect((await fetch(diagnosticUrl, { headers: { ...diagnosticHeaders, Origin: "https://platform.example" } })).status).toBe(403);
+  expect((await fetch(diagnosticUrl, { method: "POST", headers: diagnosticHeaders })).status).toBe(405);
+  expect((await fetch(`${diagnosticUrl}?state=PRIVATE-query`, { headers: diagnosticHeaders })).status).toBe(400);
+  expect((await fetch(`${server.url}/meta/diagnostics/callback-count`, { headers: diagnosticHeaders })).status).toBe(404);
+  expect(await (await fetch(diagnosticUrl, { headers: diagnosticHeaders })).json()).toEqual({ callbacksReceived: 0 });
   for (let i = 0; i < 12; i++) {
     const response = await fetch(`${server.url}/student/oauth/callback?state=${"x".repeat(43)}&code=PRIVATE-code`, { redirect: "manual" });
     expect(response.status).toBe(303);
   }
   expect((await fetch(`${server.url}/student/oauth/callback?state=PRIVATE&state=PRIVATE`, { redirect: "manual" })).status).toBe(400);
   expect((await fetch(`${server.url}/student/oauth/callback`, { method: "POST" })).status).toBe(405);
-  const health = await (await fetch(`${server.url}/health`)).json();
-  expect(health).toEqual({ status: "ok", callbacksReceived: 13 });
-  expect(JSON.stringify(health)).not.toMatch(/PRIVATE|state|code|subject|token/);
+  expect(await (await fetch(`${server.url}/health`)).text()).toBe('{"status":"ok"}');
+  const diagnostic = await (await fetch(diagnosticUrl, { headers: diagnosticHeaders })).json();
+  expect(diagnostic).toEqual({ callbacksReceived: 13 });
+  expect(JSON.stringify(diagnostic)).not.toMatch(/PRIVATE|state|code|subject|token/);
+  expect((await fetch(`${server.url}/student/mcp`)).status).toBe(401);
   expect(providerCalls).toBe(0);
   const restarted = await startStudentServer(options); cleanup.push(() => restarted.close());
-  expect(await (await fetch(`${restarted.url}/health`)).json()).toEqual({ status: "ok", callbacksReceived: 0 });
+  expect(await (await fetch(`${restarted.url}/health`)).text()).toBe('{"status":"ok"}');
+  expect(await (await fetch(`${restarted.url}/student/diagnostics/callback-count`, { headers: diagnosticHeaders })).json()).toEqual({ callbacksReceived: 0 });
 });
 it("serves only the restricted MCP catalog over the real SDK and rejects subject/token overrides", async () => {
   const dir = await mkdtemp(join(tmpdir(), "student-http-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));

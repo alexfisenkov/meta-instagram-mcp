@@ -44,10 +44,7 @@ export function authorizationUrl(c: ProductConfig, state: string): string {
   const url = new URL(c.provider === "threads" ? "https://threads.com/oauth/authorize" : c.provider === "instagram_login" ? "https://www.instagram.com/oauth/authorize" : "https://www.facebook.com/dialog/oauth");
   url.searchParams.set("client_id", c.appId); url.searchParams.set("redirect_uri", c.callbackUrl); url.searchParams.set("response_type", "code"); url.searchParams.set("state", state);
   if (c.provider === "threads") url.searchParams.set("scope", "threads_basic,threads_read_replies,threads_manage_insights");
-  else if (c.provider === "instagram_login") {
-    url.searchParams.set("scope", "instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish,instagram_business_manage_insights");
-    url.searchParams.set("force_reauth", "true");
-  }
+  else if (c.provider === "instagram_login") url.searchParams.set("scope", "instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish,instagram_business_manage_insights");
   else { url.searchParams.set("config_id", c.configId!); if (c.provider === "instagram_unified") { url.searchParams.set("display", "popup"); url.searchParams.set("prompt", "login"); url.searchParams.set("override_default_response_type", "true"); } }
   return url.toString();
 }

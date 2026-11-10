@@ -31,7 +31,15 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
       if (!options.legal) return json(response, 503, { error: "not_configured" });
       response.statusCode = 200; response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(renderLegal(options.legal, parsed.pathname === "/data-deletion")); return;
     }
-    if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok", callbacksReceived });
+    // Точный контракт используется неизменяемыми release build/install probes.
+    if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok" });
+    if (parsed.pathname === "/student/diagnostics/callback-count") {
+      if (request.socket.remoteAddress !== "127.0.0.1") return json(response, 403, { error: "loopback_required" });
+      if (!safeEqual(request.headers.authorization ?? "", `Bearer ${options.auth.serviceToken}`)) throw new BrokerError("unauthorized");
+      if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (parsed.search) throw new BrokerError("query_not_allowed");
+      return json(response, 200, { callbacksReceived });
+    }
     if (parsed.pathname === "/student/oauth/callback") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       callbacksReceived = Math.min(Number.MAX_SAFE_INTEGER, callbacksReceived + 1);
