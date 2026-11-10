@@ -66,7 +66,7 @@ it("carries only numeric provider diagnostics into callback audit", async () => 
 });
 it("audits fixed Instagram verification checkpoints without provider payloads", async () => {
   const { vault } = await fixture(); const events: any[] = [];
-  for (const reason of ["instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"]) {
+  for (const reason of ["instagram_short_identity_missing", "instagram_short_identity_invalid", "instagram_profile_response_invalid", "instagram_profile_identity_missing", "instagram_profile_identity_invalid", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"]) {
     const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
     const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
     const login = await broker.begin(a, "instagram");
@@ -74,6 +74,15 @@ it("audits fixed Instagram verification checkpoints without provider payloads", 
     expect(events.at(-1)?.reason).toBe(reason);
   }
   expect(JSON.stringify(events)).not.toMatch(/PRIVATE-code|student-a|authorizationUrl|access_token|credential/);
+});
+it.each(["token_short_exchange", "token_long_exchange", "app_token_exchange", "token_refresh"] as const)("preserves the fixed %s audit checkpoint and only numeric Meta diagnostics", async (stage) => {
+  const { vault } = await fixture(); const events: unknown[] = [];
+  const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError("provider_unavailable", { stage, status: 400, metaCode: 452, metaSubcode: 4279019 }); }, read: async () => { throw new Error("unused"); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" });
+  expect(events).toEqual([{ event: "student_oauth_callback", stage, product: "instagram", outcome: "error", reason: "provider_unavailable", hasCode: true, hasProviderError: false, status: 400, metaCode: 452, metaSubcode: 4279019 }]);
+  expect(JSON.stringify(events)).not.toMatch(/PRIVATE|https:|student-a|access_token/);
 });
 it("keeps callback redirect safe when broker error accessors throw", async () => {
   const marker = "PRIVATE-throwing-error-getter-marker"; const { vault } = await fixture(); const events: unknown[] = [];

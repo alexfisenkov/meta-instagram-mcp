@@ -5,6 +5,93 @@ import { BrokerError, type Connection, type ProductConfig } from "../src/student
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
 const instagramLoginConfig: ProductConfig = { ...config, provider: "instagram_login", configId: undefined };
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
+it("forces reauthentication only for direct Instagram Login using Meta's current parameter", () => {
+  const direct = new URL(authorizationUrl(instagramLoginConfig, "state"));
+  expect(direct.searchParams.get("force_reauth")).toBe("true");
+  expect(direct.searchParams.has("force_authentication")).toBe(false);
+  expect(direct.searchParams.has("enable_fb_login")).toBe(false);
+  for (const other of [config, { ...config, product: "facebook" as const, provider: "facebook_business" as const }, { ...config, product: "threads" as const, provider: "threads" as const }]) {
+    expect(new URL(authorizationUrl(other, "state")).searchParams.has("force_reauth")).toBe(false);
+  }
+});
+it("preserves an unquoted Instagram identity beyond JS integer precision through the HTTP exchange", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response('{"access_token":"short-token","user_id":17841400000000001,"permissions":"instagram_business_basic"}'))
+    .mockResolvedValueOnce(new Response('{"access_token":"long-token","token_type":"bearer","expires_in":5184000}'))
+    .mockResolvedValueOnce(new Response('{"user_id":"17841400000000001","username":"owner"}'));
+  try {
+    const grant = await new MetaStudentProvider().exchange(instagramLoginConfig, "synthetic-code");
+    expect(grant.providerUserId).toBe("17841400000000001");
+    expect(grant.assets[0].providerId).toBe("17841400000000001");
+  } finally { fetchMock.mockRestore(); }
+});
+it("binds a single wrapped Instagram profile to its verified app identity and projects only resource fields", async () => {
+  const provider = new MetaStudentProvider(async (url) => {
+    if (url.hostname === "api.instagram.com") return { data: [{ access_token: "short-token", user_id: "app-user", permissions: "instagram_business_basic" }] };
+    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    expect(url.searchParams.get("fields")).toBe("id,user_id,username");
+    return { data: [{ id: "app-user", user_id: "100", username: "owner", access_token: "PRIVATE-profile-token", nested: { secret: "PRIVATE-payload" } }] };
+  });
+  const grant = await provider.exchange(instagramLoginConfig, "code");
+  expect(grant.providerUserId).toBe("app-user");
+  expect(grant.assets).toEqual([{ product: "instagram", providerId: "100", label: "owner", capabilities: ["account", "posts"] }]);
+  expect(grant.scopes).toEqual(["instagram_business_basic"]);
+  const reader = new MetaStudentProvider(async () => ({ data: [{ user_id: "100", username: "owner", access_token: "PRIVATE-profile-token", nested: { secret: "PRIVATE-payload" } }] }));
+  const result = await reader.read(instagramLoginConfig, connection, { accessToken: grant.accessToken, assetTokens: {} }, { connectionId: connection.id, operation: "account" });
+  expect(result.data).toEqual({ user_id: "100", username: "owner" });
+  expect(JSON.stringify(result)).not.toContain("PRIVATE");
+});
+it("accepts bounded actual Instagram permission arrays without inventing requested capabilities", async () => {
+  const provider = new MetaStudentProvider(async (url) => {
+    if (url.hostname === "api.instagram.com") return { data: [{ access_token: "short-token", user_id: "100", permissions: ["instagram_business_basic", "instagram_business_manage_comments", "instagram_business_basic"] }] };
+    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    return { user_id: "100", username: "owner" };
+  });
+  const grant = await provider.exchange(instagramLoginConfig, "code");
+  expect(grant.scopes).toEqual(["instagram_business_basic", "instagram_business_manage_comments"]);
+  expect(grant.assets[0].capabilities).toEqual(["account", "posts", "comments"]);
+});
+it.each([
+  { name: "missing", profile: { username: "owner" }, reason: "instagram_profile_identity_missing" },
+  { name: "unsafe number", profile: { user_id: 17_841_400_000_000_001 }, reason: "instagram_profile_identity_invalid" },
+  { name: "null", profile: { user_id: null }, reason: "instagram_profile_identity_invalid" },
+  { name: "empty wrapper", profile: { data: [] }, reason: "instagram_profile_response_invalid" },
+  { name: "multiple", profile: { data: [{ user_id: "100" }, { user_id: "100" }] }, reason: "instagram_profile_response_invalid" },
+  { name: "mixed", profile: { user_id: "100", data: [{ user_id: "100" }] }, reason: "instagram_profile_response_invalid" },
+  { name: "mismatch", profile: { id: "different-app", user_id: "different-resource" }, reason: "grant_verification_failed" },
+])("rejects $name Instagram profile proof with a fixed identity stage in exchange and read", async ({ profile, reason }) => {
+  const provider = new MetaStudentProvider(async (url) => {
+    if (url.hostname === "api.instagram.com") return { access_token: "short-token", user_id: "100", permissions: "instagram_business_basic" };
+    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    return profile;
+  });
+  await expect(provider.exchange(instagramLoginConfig, "code")).rejects.toMatchObject({ code: reason, diagnostic: { stage: "account_identity" } });
+  await expect(provider.read(instagramLoginConfig, connection, { accessToken: "token", assetTokens: {} }, { connectionId: connection.id, operation: "account" })).rejects.toMatchObject({ code: reason, diagnostic: { stage: "account_identity" } });
+});
+it.each([
+  { grant: { permissions: "instagram_business_basic" }, reason: "instagram_short_identity_missing" },
+  { grant: { user_id: null, permissions: "instagram_business_basic" }, reason: "instagram_short_identity_invalid" },
+  { grant: { user_id: 17_841_400_000_000_001, permissions: "instagram_business_basic" }, reason: "instagram_short_identity_invalid" },
+  { grant: { user_id: "100", permissions: [] }, reason: "instagram_permissions_invalid" },
+  { grant: { user_id: "100", permissions: ["instagram_business_basic", 12] }, reason: "instagram_permissions_invalid" },
+  { grant: { user_id: "100", permissions: Array(33).fill("instagram_business_basic") }, reason: "instagram_permissions_invalid" },
+  { grant: { user_id: "100", permissions: ["instagram_business_basic", "unknown_scope"] }, reason: "instagram_permissions_unexpected" },
+  { grant: { user_id: "100", permissions: ["instagram_business_manage_comments"] }, reason: "permission_unavailable" },
+])("rejects malformed short Instagram identity or permissions without another request: $reason", async ({ grant, reason }) => {
+  let calls = 0;
+  const provider = new MetaStudentProvider(async () => { calls++; return { access_token: "PRIVATE-short-token", ...grant }; });
+  await expect(provider.exchange(instagramLoginConfig, "PRIVATE-code")).rejects.toMatchObject({ code: reason, diagnostic: { stage: "token_exchange" } });
+  expect(calls).toBe(1);
+});
+it("fails closed on unsafe numeric Instagram IDs when a JSON runtime supplies no source context", async () => {
+  const nativeParse = JSON.parse;
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('{"access_token":"short-token","user_id":17841400000000001,"permissions":"instagram_business_basic"}'));
+  const parseMock = vi.spyOn(JSON, "parse").mockImplementation((input: string, reviver?: (key: string, value: any) => any) => nativeParse(input, reviver ? function (key, value) { return reviver.call(this, key, value); } : undefined));
+  try {
+    await expect(new MetaStudentProvider().exchange(instagramLoginConfig, "code")).rejects.toMatchObject({ code: "instagram_short_identity_invalid", diagnostic: { stage: "token_exchange" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  } finally { parseMock.mockRestore(); fetchMock.mockRestore(); }
+});
 it.each(["wrapped", "flat"])("exchanges an Instagram Login grant using explicit permissions and identity (%s)", async (shape) => {
   const calls: Array<{ url: URL; init?: RequestInit }> = [];
   const provider = new MetaStudentProvider(async (url, init) => {
@@ -30,7 +117,7 @@ it.each(["wrapped", "flat"])("exchanges an Instagram Login grant using explicit 
   expect(calls[1].url.searchParams.get("grant_type")).toBe("ig_exchange_token");
   expect(calls[1].url.searchParams.get("access_token")).toBe("short-token");
   expect(calls[2].url.origin + calls[2].url.pathname).toBe("https://graph.instagram.com/v27.0/me");
-  expect(calls[2].url.searchParams.get("fields")).toBe("user_id,username");
+  expect(calls[2].url.searchParams.get("fields")).toBe("id,user_id,username");
 });
 it("registers direct Instagram Login only for Instagram and creates the Instagram-hosted auth URL", () => {
   expect(new StudentRegistry([instagramLoginConfig]).get("instagram")?.provider).toBe("instagram_login");
@@ -190,13 +277,48 @@ it("Threads exchanges a dedicated code, upgrades to long-lived and validates act
   const provider = new MetaStudentProvider(async (url, init) => {
     expect(url.hostname).toBe("graph.threads.com");
     if (url.pathname === "/oauth/access_token" && init?.method === "POST") return { access_token: "short", user_id: "threads-user" };
-    if (url.pathname === "/access_token") return { access_token: "long", expires_in: 5_184_000 };
+    if (url.pathname === "/access_token") { expect(url.searchParams.get("access_token")).toBe("short"); expect(init?.headers).toBeUndefined(); return { access_token: "long", expires_in: 5_184_000 }; }
     if (url.pathname === "/oauth/access_token") { expect(url.searchParams.get("grant_type")).toBe("client_credentials"); expect(url.searchParams.get("client_id")).toBe("123"); expect(url.searchParams.get("client_secret")).toBe("app-secret"); return { access_token: "TH|123|example-app-secret" }; }
     if (url.pathname === "/v1.0/debug_token") { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("long"); return { data: { app_id: "123", is_valid: true, user_id: "threads-user", scopes: ["threads_basic", "threads_read_replies"] } }; }
     if (url.pathname === "/v1.0/me") return { id: "threads-user", username: "me" };
     throw new Error("unexpected " + url.pathname);
   });
   const result = await provider.exchange({ ...config, product: "threads", provider: "threads", apiVersion: "v1.0" }, "code"); expect(result.accessToken).toBe("long"); expect(result.assets[0].capabilities).toEqual(["account", "posts", "comments"]); expect(result.expiresAt).toBeGreaterThan(Date.now() / 1000);
+});
+it.each([
+  { failAt: 0, stage: "token_short_exchange" },
+  { failAt: 1, stage: "token_long_exchange" },
+  { failAt: 2, stage: "app_token_exchange" },
+])("distinguishes the fixed Threads $stage checkpoint without exposing exchange URLs", async ({ failAt, stage }) => {
+  let call = 0;
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    expect((url as URL).origin).toBe("https://graph.threads.com");
+    if (call++ === failAt) return new Response(JSON.stringify({ error: { code: 452, error_subcode: 4279019, message: "PRIVATE-token-url-payload" } }), { status: 400 });
+    return new Response(JSON.stringify({ access_token: "PRIVATE-token", expires_in: 5_184_000 }));
+  });
+  try {
+    await expect(new MetaStudentProvider().exchange({ ...config, product: "threads", provider: "threads", apiVersion: "v1.0" }, "PRIVATE-code")).rejects.toMatchObject({ code: "provider_unavailable", diagnostic: { stage, status: 400, metaCode: 452, metaSubcode: 4279019 } });
+    expect(call).toBe(failAt + 1);
+  } finally { fetchMock.mockRestore(); }
+});
+it("keeps Threads refresh failures at a fixed stage and never follows provider redirects or caller URLs", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect((url as URL).origin).toBe("https://graph.threads.com");
+    expect((url as URL).pathname).toBe("/refresh_access_token");
+    expect((url as URL).searchParams.get("access_token")).toBe("https://caller.invalid/PRIVATE-token");
+    expect(init?.redirect).toBe("error");
+    return new Response('{"error":{"code":452,"error_subcode":4279019,"message":"PRIVATE-provider-payload"}}', { status: 400, headers: { Location: "https://provider.invalid/PRIVATE" } });
+  });
+  try {
+    let failure: unknown;
+    try { await new MetaStudentProvider().refresh({ ...config, product: "threads", provider: "threads" }, { accessToken: "https://caller.invalid/PRIVATE-token", assetTokens: {} }, "threads-user"); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(BrokerError);
+    expect(failure).toMatchObject({ code: "provider_unavailable", diagnostic: { stage: "token_refresh", status: 400, metaCode: 452, metaSubcode: 4279019 } });
+    expect(JSON.stringify(failure)).not.toMatch(/PRIVATE|https:|access_token|message/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(requestMeta(new URL("https://caller.invalid/access_token"))).rejects.toThrow("provider_host_rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  } finally { fetchMock.mockRestore(); }
 });
 it("rejects malformed granular grant proof instead of broadening capability", async () => {
   const provider = new MetaStudentProvider(async (url) => url.pathname.endsWith("oauth/access_token") ? { access_token: "token" } : { data: { app_id: "123", is_valid: true, type: "SYSTEM_USER", scopes: ["instagram_basic"], granular_scopes: [{ scope: "instagram_basic", target_ids: "bad" }] } });
@@ -206,7 +328,7 @@ it("refreshes only Threads through the fixed official endpoint without disclosin
   const dataExpiry = Math.floor(Date.now() / 1000) + 100_000;
   const provider = new MetaStudentProvider(async (url, init) => {
     expect(url.hostname).toBe("graph.threads.com");
-    if (url.pathname === "/refresh_access_token") { expect(url.searchParams.get("grant_type")).toBe("th_refresh_token"); expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer old"); return { access_token: "refreshed", expires_in: 5_184_000, token_type: "bearer" }; }
+    if (url.pathname === "/refresh_access_token") { expect(url.searchParams.get("grant_type")).toBe("th_refresh_token"); expect(url.searchParams.get("access_token")).toBe("old"); expect(init?.headers).toBeUndefined(); return { access_token: "refreshed", expires_in: 5_184_000, token_type: "bearer" }; }
     if (url.pathname === "/oauth/access_token") { expect(url.searchParams.get("grant_type")).toBe("client_credentials"); return { access_token: "TH|123|example-app-secret" }; }
     if (url.pathname.endsWith("/debug_token")) { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("refreshed"); return { data: { app_id: "123", is_valid: true, user_id: "threads-user", scopes: ["threads_basic"], data_access_expires_at: dataExpiry } }; }
     return { id: "threads-user" };

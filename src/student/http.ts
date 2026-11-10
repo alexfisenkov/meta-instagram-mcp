@@ -16,6 +16,8 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(options.port, "127.0.0.1", resolve); });
   const address = server.address(); if (!address || typeof address === "string") throw new BrokerError("listener_failed");
   const url = `http://127.0.0.1:${address.port}`;
+  // Только счётчик текущего процесса: ни содержимого callback, ни строк журнала.
+  let callbacksReceived = 0;
   async function dispatch(request: IncomingMessage, response: ServerResponse) {
     response.setHeader("Cache-Control", "no-store"); response.setHeader("Referrer-Policy", "no-referrer");
     const counts = new Map<string, number>(); for (let i = 0; i < request.rawHeaders.length; i += 2) { const name = request.rawHeaders[i].toLowerCase(); counts.set(name, (counts.get(name) ?? 0) + 1); }
@@ -29,9 +31,10 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
       if (!options.legal) return json(response, 503, { error: "not_configured" });
       response.statusCode = 200; response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(renderLegal(options.legal, parsed.pathname === "/data-deletion")); return;
     }
-    if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok" });
+    if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok", callbacksReceived });
     if (parsed.pathname === "/student/oauth/callback") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      callbacksReceived = Math.min(Number.MAX_SAFE_INTEGER, callbacksReceived + 1);
       if (["state", "code", "error"].some((key) => parsed.searchParams.getAll(key).length > 1)) throw new BrokerError("invalid_callback");
       const target = await options.broker.callback({ state: parsed.searchParams.get("state") ?? undefined, code: parsed.searchParams.get("code") ?? undefined, error: parsed.searchParams.get("error") ?? undefined });
       response.statusCode = 303; response.setHeader("Location", target); response.end(); return;

@@ -12,7 +12,7 @@ export interface StoredEvent { connectionId: string; eventId: string; receivedAt
 export interface Database { version: 1; revision: number; grants: Grant[]; connections: Connection[]; states: OAuthState[]; events: StoredEvent[]; generations: Record<string, number> }
 export interface ProductConfig { product: Product; key: string; provider: Provider; appId: string; appSecret: string; configId?: string; apiVersion: string; callbackUrl: string; admission: "disabled" | "test" | "live"; testSubjects: string[]; webhookVerifyToken?: string }
 export interface ReadInput { connectionId: string; operation: Operation; limit?: number; cursor?: string; mediaId?: string }
-export type CallbackAuditStage = "state_validation" | "callback_validation" | "token_exchange" | "token_inspection" | "account_identity" | "asset_discovery" | "api_request" | "grant_validation" | "grant_persist";
+export type CallbackAuditStage = "state_validation" | "callback_validation" | "token_exchange" | "token_short_exchange" | "token_long_exchange" | "app_token_exchange" | "token_refresh" | "token_inspection" | "account_identity" | "asset_discovery" | "api_request" | "grant_validation" | "grant_persist";
 export interface ProviderDiagnostic { stage: CallbackAuditStage; status?: number; metaCode?: number; metaSubcode?: number }
 export interface CallbackAuditEvent { event: "student_oauth_callback"; stage: CallbackAuditStage; product: Product; outcome: "connected" | "cancelled" | "error"; reason: string; hasCode: boolean; hasProviderError: boolean; status?: number; metaCode?: number; metaSubcode?: number }
 export type CallbackAuditSink = (event: CallbackAuditEvent) => void;

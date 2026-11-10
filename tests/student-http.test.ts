@@ -11,6 +11,28 @@ import { StudentRegistry } from "../src/student/registry.js";
 import { StudentVault } from "../src/student/vault.js";
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+it("counts callback arrivals without states or payloads on loopback health, including rejected attempts", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "student-arrival-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const vault = await StudentVault.open(dir, randomBytes(32)); cleanup.push(() => vault.close());
+  const registry = new StudentRegistry([]);
+  let providerCalls = 0;
+  const broker = new StudentBroker(vault, registry, { exchange: async () => { providerCalls++; throw new Error(); }, read: async () => { throw new Error(); } }, "https://platform.example");
+  const options = { broker, vault, registry, auth: { serviceToken: "s".repeat(40), subjectKey: randomBytes(32) }, port: 0 };
+  const server = await startStudentServer(options); cleanup.push(() => server.close());
+  expect(await (await fetch(`${server.url}/health`)).json()).toEqual({ status: "ok", callbacksReceived: 0 });
+  for (let i = 0; i < 12; i++) {
+    const response = await fetch(`${server.url}/student/oauth/callback?state=${"x".repeat(43)}&code=PRIVATE-code`, { redirect: "manual" });
+    expect(response.status).toBe(303);
+  }
+  expect((await fetch(`${server.url}/student/oauth/callback?state=PRIVATE&state=PRIVATE`, { redirect: "manual" })).status).toBe(400);
+  expect((await fetch(`${server.url}/student/oauth/callback`, { method: "POST" })).status).toBe(405);
+  const health = await (await fetch(`${server.url}/health`)).json();
+  expect(health).toEqual({ status: "ok", callbacksReceived: 13 });
+  expect(JSON.stringify(health)).not.toMatch(/PRIVATE|state|code|subject|token/);
+  expect(providerCalls).toBe(0);
+  const restarted = await startStudentServer(options); cleanup.push(() => restarted.close());
+  expect(await (await fetch(`${restarted.url}/health`)).json()).toEqual({ status: "ok", callbacksReceived: 0 });
+});
 it("serves only the restricted MCP catalog over the real SDK and rejects subject/token overrides", async () => {
   const dir = await mkdtemp(join(tmpdir(), "student-http-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const vault = await StudentVault.open(dir, randomBytes(32)); cleanup.push(() => vault.close());
