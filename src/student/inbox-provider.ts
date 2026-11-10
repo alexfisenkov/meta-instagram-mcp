@@ -99,7 +99,7 @@ export class MetaInbox {
         let after: string | undefined;
         const seen = new Set<string>();
         for (let page = 0; page < 10; page++) {
-            const r = await call(`/${segment(c.providerId)}/conversations`, { fields: 'id,updated_time', limit: '100', ...(after ? { after } : {}) });
+            const r = await call(`/${segment(c.providerId)}/conversations`, { fields: 'id,updated_time', platform: c.product, limit: '100', ...(after ? { after } : {}) });
             if (rows(r).some(v => providerId(v.id) === id))
                 return;
             after = cursor(r);
@@ -178,7 +178,7 @@ export class MetaInbox {
         this.validate({ conversationId: 'list', ...input });
         const s = this.session(config, c, credential);
         const own = await s.own();
-        const result = await s.call(`/${segment(c.providerId)}/conversations`, { fields: 'id,updated_time', limit: String(input.limit ?? 20), ...(input.cursor ? { after: input.cursor } : {}) });
+        const result = await s.call(`/${segment(c.providerId)}/conversations`, { fields: 'id,updated_time', platform: c.product, limit: String(input.limit ?? 20), ...(input.cursor ? { after: input.cursor } : {}) });
         const data = rows(result);
         if (data.length > (input.limit ?? 20))
             throw new BrokerError('provider_response_invalid');

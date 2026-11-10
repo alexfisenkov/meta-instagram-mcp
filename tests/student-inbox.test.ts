@@ -18,6 +18,7 @@ function fixture(options: {
     const provider = new MetaInbox(async (url, init) => {
         calls.push({ url, init });
         const path = url.pathname.replace('/v24.0', '');
+        if(path.endsWith('/conversations'))expect(url.searchParams.get('platform')).toBe('messenger');
         expect(url.origin).toBe('https://graph.facebook.com');
         expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer synthetic-page');
         if (init?.method === 'POST') {
