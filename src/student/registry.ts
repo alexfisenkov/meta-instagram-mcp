@@ -38,7 +38,7 @@ export class StudentRegistry {
 }
 export function configFingerprint(c: ProductConfig): string {
   // Admission and webhook verification are operational policy, not the OAuth grant identity.
-  return createHash("sha256").update(JSON.stringify(["oauth-grant-v1", c.product, c.key, c.provider, c.appId, c.appSecret, c.configId ?? null, c.apiVersion, c.callbackUrl])).digest("hex");
+  return createHash("sha256").update(JSON.stringify([c.product === "messenger" ? "messenger-page-auth-v1" : "oauth-grant-v1", c.product, c.key, c.provider, c.appId, c.appSecret, c.configId ?? null, c.apiVersion, c.callbackUrl])).digest("hex");
 }
 export function authorizationUrl(c: ProductConfig, state: string): string {
   const url = new URL(c.provider === "threads" ? "https://threads.com/oauth/authorize" : c.provider === "instagram_login" ? "https://www.instagram.com/oauth/authorize" : "https://www.facebook.com/dialog/oauth");
