@@ -64,15 +64,15 @@ it("carries only numeric provider diagnostics into callback audit", async () => 
   ]);
   expect(JSON.stringify(events)).not.toContain(marker);
 });
-it("audits fixed provider verification checkpoints without provider payloads", async () => {
-  const { vault } = await fixture(); const events: any[] = [];
-  for (const reason of ["threads_app_binding_missing", "threads_app_token_invalid", "threads_inspection_response_invalid", "threads_inspection_not_valid", "threads_inspection_type_invalid", "threads_inspection_app_mismatch", "threads_inspection_scopes_invalid", "threads_inspection_identity_invalid", "threads_inspection_expiry_invalid", "threads_inspection_expired", "threads_account_identity_invalid", "threads_identity_mismatch", "threads_expected_identity_missing", "instagram_short_identity_missing", "instagram_short_identity_invalid", "instagram_profile_response_invalid", "instagram_profile_identity_missing", "instagram_profile_identity_invalid", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"]) {
-    const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
-    const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
-    const login = await broker.begin(a, "instagram");
-    expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" })).toContain("meta=error");
-    expect(events.at(-1)?.reason).toBe(reason);
-  }
+it.each(["threads_app_binding_missing", "threads_app_token_invalid", "threads_inspection_response_invalid", "threads_inspection_not_valid", "threads_inspection_type_invalid", "threads_inspection_app_mismatch", "threads_inspection_scopes_invalid", "threads_inspection_identity_invalid", "threads_inspection_expiry_invalid", "threads_inspection_expired", "threads_account_identity_invalid", "threads_identity_mismatch", "threads_expected_identity_missing", "instagram_short_identity_missing", "instagram_short_identity_invalid", "instagram_profile_response_invalid", "instagram_profile_identity_missing", "instagram_profile_identity_invalid", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"] as const)("audits fixed provider verification checkpoints without provider payloads: %s", async (reason) => {
+  const { vault } = await fixture(); const events: unknown[] = []; let exchanges = 0;
+  const provider: ProviderAdapter = { exchange: async () => { exchanges++; throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" })).toContain("meta=error");
+  expect(exchanges).toBe(1);
+  expect(events).toEqual([{ event: "student_oauth_callback", stage: "token_exchange", product: "instagram", outcome: "error", reason, hasCode: true, hasProviderError: false }]);
+  const db = await vault.snapshot(); expect(db.states).toEqual([]); expect(db.grants).toEqual([]);
   expect(JSON.stringify(events)).not.toMatch(/PRIVATE-code|student-a|authorizationUrl|access_token|credential/);
 });
 it.each(["token_short_exchange", "token_long_exchange", "app_token_exchange", "token_refresh"] as const)("preserves the fixed %s audit checkpoint and only numeric Meta diagnostics", async (stage) => {

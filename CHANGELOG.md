@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- Provider checkpoint audit regressions use independent real-vault cases, keeping one begin/error/consumed-state lifecycle per case instead of accumulating 24 protected filesystem cycles inside a single Windows timeout. Runtime policy and test timeouts are unchanged.
+
 - Threads accepts the documented inspection shape without `app_id` only after a fresh dedicated app-token binding, with strict USER/scopes/identity/expiry checks; an explicit foreign app ID and all non-Threads missing app IDs are rejected. Fixed reasons expose the failing verification checkpoint without payloads.
 - Read failures emit only fixed metadata and numeric provider codes. Operation permission denials remove only the selected capability; identity checks and invalid-token handling remain fail closed without discarding unrelated working assets. Conversations use minimal documented metadata fields; live Inbox acceptance remains separate.
 
