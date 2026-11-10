@@ -59,7 +59,7 @@ State содержит hash случайного 256-bit значения и п�
 
 | Продукт | Семейство и discovery | Доступное чтение |
 |---|---|---|
-| Instagram | `instagram_unified`, Facebook authorization с config_id; direct BISU exchange; `/me?fields=id,client_business_id`, `/me/assigned_instagram_accounts`. Один grant может содержать несколько IG assets. | Профиль/публикации; reach, комментарии и inbox metadata при соответствующих фактически выданных permissions. |
+| Instagram | `instagram_unified`, Facebook authorization с config_id, `display=popup`, `prompt=login` и `override_default_response_type=true`; direct BISU exchange; `/me?fields=id,client_business_id`, `/me/assigned_instagram_accounts`. Один grant может содержать несколько IG assets. | Профиль/публикации; reach, комментарии и inbox metadata при соответствующих фактически выданных permissions. |
 | Facebook Pages | `facebook_business`; USER `/me/accounts` с Page tokens или SYSTEM_USER `/me/assigned_pages`. Каждая Page проверяется своим credential. | Профиль/публикации; комментарии при дополнительном grant. |
 | Messenger | `facebook_business`, те же Page identities с отдельным product config. | Профиль и metadata списка conversations при фактических messaging/metadata/engagement grants. |
 | Threads | Собственная authorization и code exchange; long-lived upgrade и отдельный app-token inspection. | Профиль/посты; replies и фиксированный набор insights при фактических grants. |

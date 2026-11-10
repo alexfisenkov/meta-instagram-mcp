@@ -18,6 +18,14 @@ it("Unified URL pins config_id and exchanges once directly for BISU, discovers a
   const result = await provider.exchange(config, "code"); expect(result.assets.map((a) => a.providerId)).toEqual(["100", "101"]); expect(result.clientBusinessId).toBe("business");
   expect(seen.some((url) => url.includes("fb_exchange_token") || url.includes("/accounts?"))).toBe(false);
 });
+it("adds Meta's unified-login response-type override only to instagram_unified", () => {
+  const unified = new URL(authorizationUrl(config, "state"));
+  expect(unified.searchParams.get("override_default_response_type")).toBe("true");
+  const facebook = new URL(authorizationUrl({ ...config, product: "facebook", provider: "facebook_business" }, "state"));
+  expect(facebook.searchParams.has("override_default_response_type")).toBe(false);
+  const threads = new URL(authorizationUrl({ ...config, product: "threads", provider: "threads", apiVersion: "v1.0" }, "state"));
+  expect(threads.searchParams.has("override_default_response_type")).toBe(false);
+});
 it("declined optional grants do not become capabilities", async () => {
   const provider = new MetaStudentProvider(async (url) => {
     if (url.pathname.endsWith("oauth/access_token")) return { access_token: "token" };
