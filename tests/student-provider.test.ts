@@ -340,9 +340,12 @@ it.each(["facebook", "messenger"] as const)("discovers %s Pages with their own t
   const provider = new MetaStudentProvider(async (url, init) => {
     if (url.pathname.endsWith("oauth/access_token")) return { access_token: "user-token" };
     if (url.pathname.endsWith("debug_token")) return { data: { app_id: "123", is_valid: true, type: "USER", user_id: "user", scopes: ["pages_read_engagement", "pages_messaging", "pages_manage_metadata"] } };
-    if (url.pathname === "/v27.0/me") return { id: "user" };
+    if (url.pathname === "/v27.0/me") return { id: (init?.headers as Record<string, string>)?.Authorization === "Bearer page-token" ? "page" : "user" };
     if (url.pathname.endsWith("/me/accounts")) return { data: [{ id: "page", name: "Page", access_token: "page-token", tasks: ["MESSAGING"] }] };
-    if (url.pathname === "/v27.0/page") { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer page-token"); return { id: "page", name: "Page" }; }
+    if (url.pathname === "/v27.0/page") {
+      if (url.searchParams.get("fields") === "id,name,access_token") { expect(product).toBe("messenger"); expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer user-token"); return { id: "page", name: "Page", access_token: "page-token" }; }
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer page-token"); return { id: "page", name: "Page" };
+    }
     throw new Error("unexpected " + url.pathname);
   });
   const result = await provider.exchange(c, "code"); expect(result.assetTokens.page).toBe("page-token"); expect(result.assets[0].capabilities).toEqual(product === "facebook" ? ["account", "posts"] : ["account", "inbox"]);
@@ -486,6 +489,7 @@ it("rejects a media ID absent from the selected own asset before reading its com
 });
 it.each(["instagram", "messenger"] as const)("requests only documented conversation metadata for %s with the selected resource credential", async (product) => {
   const provider = new MetaStudentProvider(async (url, init) => {
+    if (product === "messenger" && url.pathname === "/v27.0/me") { expect(url.searchParams.get("fields")).toBe("id,name"); return { id: "100", name: "Synthetic Page" }; }
     expect(url.searchParams.get("fields")).toBe("id,updated_time");
     expect(url.searchParams.get("platform")).toBe(product);
     expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer synthetic-selected-asset-token");

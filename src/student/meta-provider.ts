@@ -134,6 +134,29 @@ export class MetaStudentProvider implements ProviderAdapter {
     if (typeof app.access_token !== "string" || !app.access_token || app.access_token.length > 8192 || (app.token_type !== undefined && (typeof app.token_type !== "string" || app.token_type.toLowerCase() !== "bearer"))) throw new BrokerError("threads_app_token_invalid", { stage: "app_token_exchange" });
     return app.access_token;
   }
+  private async messengerPage(config: ProductConfig, page: Json, bearer: string, has: (scope: string, target?: string) => boolean): Promise<{ asset: DiscoveredAsset; pageToken?: string }> {
+    const pageId = id(page.id);
+    let selected: Json;
+    try { selected = await this.get(config, bearer, `/${pageId}`, { fields: "id,name,access_token" }); }
+    catch (error) {
+      if (!(error instanceof BrokerError) || error.code !== "permission_unavailable") throw error;
+      // Другая, минимальная операция подтверждает только профиль. Не retry Inbox.
+      selected = await this.get(config, bearer, `/${pageId}`, { fields: "id,name" });
+    }
+    if (id(selected.id) !== pageId) throw new BrokerError("grant_verification_failed");
+    const capabilities: Operation[] = ["account"];
+    const asset: DiscoveredAsset = { product: "messenger", providerId: pageId, label: text(selected.name, pageId), capabilities };
+    const pageToken = selected.access_token;
+    if (pageToken === undefined || pageToken === null || pageToken === "") return { asset };
+    if (typeof pageToken !== "string" || pageToken.length > 8192) throw new BrokerError("grant_verification_failed");
+    const me = await this.get(config, pageToken, "/me", { fields: "id,name" });
+    if (id(me.id) !== pageId) throw new BrokerError("grant_verification_failed");
+    asset.label = text(me.name, asset.label);
+    const tasks = page.tasks;
+    const messagingTask = Array.isArray(tasks) && tasks.length <= 32 && tasks.every((task: unknown) => typeof task === "string" && /^[A-Z_]{1,64}$/.test(task)) && tasks.some((task: string) => task === "MESSAGING" || task === "MODERATE");
+    if (messagingTask && has("pages_messaging", pageId) && has("pages_manage_metadata", pageId)) capabilities.push("inbox");
+    return { asset, pageToken };
+  }
   async exchange(config: ProductConfig, code: string, codeVerifier?: string): Promise<ExchangedGrant> {
     let stage: CallbackAuditStage = "token_exchange";
     try { return await new MetaStudentProvider(bounded(this.request, (url) => { stage = endpointStage(url); })).exchangeOnce(config, code, codeVerifier); }
@@ -215,11 +238,16 @@ export class MetaStudentProvider implements ProviderAdapter {
       const systemUser = p.type === "SYSTEM_USER";
       const pages = await this.all(config, bearer, systemUser ? "/me/assigned_pages" : "/me/accounts", { fields: systemUser ? "id,name,tasks" : "id,name,access_token,tasks" });
       for (const page of pages) {
+        if (config.product === "messenger") {
+          if (!has("pages_read_engagement", id(page.id))) continue;
+          const verified = await this.messengerPage(config, page, bearer, has);
+          if (verified.pageToken) assetTokens[verified.asset.providerId] = verified.pageToken;
+          assets.push(verified.asset); continue;
+        }
         const pageId = id(page.id), pageToken = systemUser ? bearer : page.access_token;
         if (typeof pageToken !== "string" || !pageToken || !has("pages_read_engagement", pageId)) continue;
         const capabilities: Operation[] = ["account"];
         if (config.product === "facebook") { capabilities.push("posts"); if (has("pages_read_user_content", pageId)) capabilities.push("comments"); }
-        else if (has("pages_messaging", pageId) && has("pages_manage_metadata", pageId)) capabilities.push("inbox");
         const verified = await this.get(config, pageToken, `/${pageId}`, { fields: "id,name" });
         if (id(verified.id) !== pageId) throw new BrokerError("grant_verification_failed");
         assetTokens[pageId] = pageToken; assets.push({ product: config.product, providerId: pageId, label: text(verified.name, pageId), capabilities });
@@ -313,6 +341,12 @@ export class MetaStudentProvider implements ProviderAdapter {
     const root = `/${id(connection.providerId)}`, limit = String(input.limit ?? 20);
     const query = { limit, ...(input.cursor ? { after: input.cursor } : {}) };
     if (input.operation === "account") {
+      if (connection.product === "messenger") {
+        const fields = "id,name";
+        const result = await this.get(config, bearer, credential.assetTokens[connection.providerId] ? "/me" : root, { fields });
+        if (id(result.id) !== connection.providerId) throw new BrokerError("grant_verification_failed", { stage: "account_identity" });
+        return { data: scalarProjection(result, fields.split(",")), coverage: "partial", limitations: ["selected_profile_fields_only"] };
+      }
       if (config.provider === "instagram_login" && connection.product === "instagram") {
         const fields = "user_id,username";
         const result = instagramProfile(await this.get(config, bearer, "/me", { fields }));
@@ -351,6 +385,12 @@ export class MetaStudentProvider implements ProviderAdapter {
       return { data: { items, ...(cursor(body) ? { nextCursor: cursor(body) } : {}) }, coverage: "partial", limitations: ["fixed_metric_set_and_provider_default_period", "api_metrics_may_differ_from_native_app"] };
     }
     if (input.operation === "inbox" && ["instagram", "messenger"].includes(connection.product)) {
+      if (connection.product === "messenger") {
+        const pageToken = credential.assetTokens[connection.providerId];
+        if (!pageToken || pageToken === credential.accessToken || pageToken.length > 8192) throw new BrokerError("permission_unavailable", { stage: "account_identity" });
+        const page = await this.get(config, pageToken, "/me", { fields: "id,name" });
+        if (id(page.id) !== connection.providerId) throw new BrokerError("grant_verification_failed", { stage: "account_identity" });
+      }
       const body = await this.get(config, bearer, `${root}/conversations`, { ...query, fields: "id,updated_time", platform: connection.product === "instagram" ? "instagram" : "messenger" });
       return this.page(body, ["id", "updated_time"], "conversation_metadata_only_no_message_history");
     }
