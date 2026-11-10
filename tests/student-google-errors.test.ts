@@ -1,0 +1,28 @@
+import { expect, it, vi } from 'vitest';
+import { requestMeta, MetaStudentProvider } from '../src/student/meta-provider.js';
+import { BrokerError, type ProductConfig, type CallbackAuditEvent } from '../src/student/types.js';
+import { StudentRegistry } from '../src/student/registry.js';
+import { StudentVault } from '../src/student/vault.js';
+import { StudentBroker } from '../src/student/broker.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const marker='PRIVATE-provider-description-and-contact';
+const body=(reason:unknown)=>({error:{code:401,message:marker,errors:[{reason,message:marker,domain:'youtube.header',location:marker}]}});
+it.each([
+ ['https://www.googleapis.com/youtube/v3/channels?mine=true','youtubeSignupRequired','youtube_no_channel'],
+ ['https://www.googleapis.com/youtube/v3/channels?mine=true','authorizationRequired','reauth_required'],
+ ['https://www.googleapis.com/youtube/v3/channels?mine=true',undefined,'reauth_required'],
+ ['https://www.googleapis.com/youtube/v3/channels?mine=true','unrecognizedReason','reauth_required'],
+ ['https://oauth2.googleapis.com/token','youtubeSignupRequired','reauth_required'],
+ ['https://openidconnect.googleapis.com/v1/userinfo','youtubeSignupRequired','reauth_required'],
+ ['https://graph.facebook.com/v24.0/me','youtubeSignupRequired','reauth_required'],
+] as const)('maps only exact allowlisted YouTube API reason: %s %s',async(url,reason,code)=>{const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify(body(reason)),{status:401}));try{let thrown:unknown;try{await requestMeta(new URL(url));}catch(e){thrown=e};expect(thrown).toBeInstanceOf(BrokerError);expect(thrown).toMatchObject({code,diagnostic:{status:401}});expect(JSON.stringify(thrown)).not.toContain(marker);expect(JSON.stringify(thrown)).not.toContain('youtubeSignupRequired');expect(fetch).toHaveBeenCalledOnce();}finally{fetch.mockRestore();}});
+it('does not infer no-channel from ambiguous mixed, oversized or wrong-status errors',async()=>{for(const payload of [ {error:{code:401,errors:[{reason:'youtubeSignupRequired'},{reason:'authorizationRequired'}]}}, {error:{code:401,errors:Array.from({length:65},()=>({reason:'youtubeSignupRequired'}))}}, {error:{code:401,message:'youtubeSignupRequired'}} ]){const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify(payload),{status:401}));try{await expect(requestMeta(new URL('https://www.googleapis.com/youtube/v3/channels?mine=true'))).rejects.toMatchObject({code:'reauth_required'});}finally{fetch.mockRestore();}}const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify(body('youtubeSignupRequired')),{status:403}));try{await expect(requestMeta(new URL('https://www.googleapis.com/youtube/v3/channels?mine=true'))).rejects.not.toMatchObject({code:'youtube_no_channel'});}finally{fetch.mockRestore();}});
+it('returns the existing recognized no_channel callback and fixed audit while preserving the first real-vault channel grant',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'google-no-channel-'));const vault=await StudentVault.open(directory,randomBytes(32));let noChannel=false;const audit:CallbackAuditEvent[]=[];
+ const config:ProductConfig={product:'youtube',key:'youtube',provider:'youtube',appId:'123.apps.googleusercontent.com',appSecret:'synthetic-only',apiVersion:'v3',callbackUrl:'https://example.test/youtube/oauth/callback',admission:'live',testSubjects:[]};
+ const fetch=vi.spyOn(globalThis,'fetch').mockImplementation(async input=>{const url=new URL(String(input));if(url.origin==='https://oauth2.googleapis.com')return new Response(JSON.stringify({access_token:'synthetic-access',refresh_token:'synthetic-refresh',token_type:'Bearer',expires_in:3600,scope:'openid profile https://www.googleapis.com/auth/youtube.readonly'}));if(url.origin==='https://openidconnect.googleapis.com')return new Response(JSON.stringify({sub:'same-owner'}));if(url.origin==='https://www.googleapis.com'&&url.pathname==='/youtube/v3/channels')return new Response(JSON.stringify(noChannel?body('youtubeSignupRequired'):{items:[{id:'UC-first',snippet:{title:'First synthetic channel'}}]}),{status:noChannel?401:200});throw Error('unexpected synthetic Google endpoint');});
+ try{const broker=new StudentBroker(vault,new StudentRegistry([config]),new MetaStudentProvider(requestMeta),'https://platform.example',Date.now,e=>audit.push(e));const subject={tenantId:'masterskaya',sub:'same-owner'};const complete=async()=>{const start=await broker.begin(subject,'youtube');return broker.callback({state:new URL(start.authorizationUrl).searchParams.get('state')!,code:'synthetic-code',issuer:'https://accounts.google.com',callbackPath:'/youtube/oauth/callback'});};expect(await complete()).toBe('https://platform.example/social?youtube=connected');const before=(await vault.snapshot()).grants;noChannel=true;expect(await complete()).toBe('https://platform.example/social?youtube=no_channel');expect((await broker.youtubeList(subject)).connections).toMatchObject([{status:'connected',account:{id:'UC-first'}}]);expect((await vault.snapshot()).grants).toEqual(before);expect(audit.at(-1)).toMatchObject({product:'youtube',stage:'asset_discovery',reason:'youtube_no_channel',status:401,outcome:'error'});expect(JSON.stringify(audit)).not.toContain(marker);expect(JSON.stringify(audit)).not.toMatch(/synthetic-access|synthetic-refresh/);}finally{fetch.mockRestore();await vault.close();await rm(directory,{recursive:true,force:true});}
+});

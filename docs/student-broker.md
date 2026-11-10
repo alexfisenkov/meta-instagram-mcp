@@ -150,3 +150,9 @@ Webhook сначала проверяет подпись исходного body
 ## Verified Inbox increment
 
 The private broker additionally supports bounded owned conversations/history and explicit reply intentions for direct Instagram Login and Messenger Page tokens. Bodies/contact labels are transient; reply receipt metadata is encrypted, retained30days and included in exact-subject purge. See [authorization, delivery states, privacy and acceptance boundaries](student-inbox.md). A local synthetic send test is not production/App Review acceptance.
+
+## Google channel discovery errors
+
+Only an actual `youtubeSignupRequired` reason in a bounded, unambiguous Google error array from the fixed `https://www.googleapis.com/youtube/v3/channels` endpoint, with matching HTTP/body401, maps to fixed audit code `youtube_no_channel` and the existing `youtube=no_channel` callback. The existing UI asks the owner to choose an account with a YouTube channel; previously connected channels are preserved. `authorizationRequired`, absent/unknown/mixed reasons, token/userinfo endpoints and non-Google responses retain their existing authorization/error handling. HTTP401 alone does not establish that a channel is absent, and provider messages/contacts/payloads are never logged or returned.
+
+Source: [YouTube Data API request-context errors](https://developers.google.com/youtube/data/reference/rest/v3/errors#request-context-errors). This classification does not establish the cause of an earlier live401 for which the provider reason was not captured; operator retry remains necessary.

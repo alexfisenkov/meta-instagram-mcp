@@ -54,6 +54,10 @@ export const requestMeta: MetaRequest = async (url, init = {}) => {
     if (!response.ok || body.error) {
       const google = ["oauth2.googleapis.com", "openidconnect.googleapis.com", "www.googleapis.com"].includes(url.hostname);
       const errorCode = typeof body.error === "string" ? body.error : body.error?.code;
+      // The Google status alone cannot distinguish an unlinked account from authorization failure.
+      // Only the fixed YouTube Data API endpoint and a bounded, unambiguous documented reason qualify.
+      const youtubeNoChannel = url.hostname === "www.googleapis.com" && url.pathname === "/youtube/v3/channels" && status === 401 && record(body.error) && body.error.code === 401 && Array.isArray(body.error.errors) && body.error.errors.length > 0 && body.error.errors.length <= 64 && body.error.errors.every((item: unknown) => record(item) && item.reason === "youtubeSignupRequired");
+      if (youtubeNoChannel) throw new BrokerError("youtube_no_channel", providerDiagnostic(stage, status));
       const permissionDenied = google && record(body.error) && (body.error.status === "PERMISSION_DENIED" || Array.isArray(body.error.errors) && body.error.errors.some((item: Json) => record(item) && ["insufficientPermissions", "forbidden"].includes(item.reason)));
       const reason = errorCode === 190 || google && ["invalid_grant", "invalid_token"].includes(errorCode) || status === 401 ? "reauth_required" : permissionDenied || !google && [10, 200].includes(errorCode) ? "permission_unavailable" : "provider_unavailable";
       throw new BrokerError(reason, providerDiagnostic(stage, status, google ? undefined : record(body.error) ? body.error : undefined));
