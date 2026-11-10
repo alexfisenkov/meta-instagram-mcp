@@ -172,20 +172,24 @@ export class MetaStudentProvider implements ProviderAdapter {
     const form = new FormData();
     form.set("client_id", config.appId); form.set("client_secret", config.appSecret); form.set("grant_type", "authorization_code"); form.set("redirect_uri", config.callbackUrl); form.set("code", code);
     const short = await this.request(new URL("https://api.instagram.com/oauth/access_token"), { method: "POST", body: form });
-    const shortGrant = Array.isArray(short.data) && short.data.length === 1 && record(short.data[0]) ? short.data[0] : undefined;
-    if (!shortGrant || typeof shortGrant.access_token !== "string" || !shortGrant.access_token || shortGrant.access_token.length > 8192) throw new BrokerError("grant_verification_failed");
+    const flatGrant = ["access_token", "user_id", "permissions"].some((field) => Object.hasOwn(short, field));
+    const shortGrant = flatGrant ? (Object.hasOwn(short, "data") ? undefined : short) : Array.isArray(short.data) && short.data.length === 1 && record(short.data[0]) ? short.data[0] : undefined;
+    if (!shortGrant || typeof shortGrant.access_token !== "string" || !shortGrant.access_token || shortGrant.access_token.length > 8192) throw new BrokerError("instagram_short_response_invalid");
     const providerUserId = id(shortGrant.user_id);
-    if (typeof shortGrant.permissions !== "string") throw new BrokerError("grant_verification_failed");
+    if (typeof shortGrant.permissions !== "string") throw new BrokerError("instagram_permissions_invalid");
     const allowedScopes = new Set(["instagram_business_basic", "instagram_business_manage_insights", "instagram_business_manage_comments", "instagram_business_manage_messages", "instagram_business_content_publish"]);
     const scopes = [...new Set(shortGrant.permissions.split(",").map((scope: string) => scope.trim()))];
-    if (scopes.some((scope) => !allowedScopes.has(scope))) throw new BrokerError("grant_verification_failed");
+    if (scopes.some((scope) => !allowedScopes.has(scope))) throw new BrokerError("instagram_permissions_unexpected");
     if (!scopes.includes("instagram_business_basic")) throw new BrokerError("permission_unavailable");
 
     const longUrl = new URL("https://graph.instagram.com/access_token");
     longUrl.searchParams.set("grant_type", "ig_exchange_token"); longUrl.searchParams.set("client_secret", config.appSecret); longUrl.searchParams.set("access_token", shortGrant.access_token);
     const long = await this.request(longUrl);
-    if (typeof long.access_token !== "string" || !long.access_token || long.access_token.length > 8192 || long.token_type !== "bearer" || !Number.isSafeInteger(long.expires_in) || long.expires_in <= 0) throw new BrokerError("grant_verification_failed");
+    if (typeof long.access_token !== "string" || !long.access_token || long.access_token.length > 8192) throw new BrokerError("instagram_long_response_invalid");
+    if (typeof long.token_type !== "string" || long.token_type.toLowerCase() !== "bearer") throw new BrokerError("instagram_token_type_invalid");
+    if (!Number.isSafeInteger(long.expires_in) || long.expires_in <= 0) throw new BrokerError("instagram_token_expiry_invalid");
     const expiresAt = Math.floor(Date.now() / 1000) + long.expires_in;
+    if (!Number.isSafeInteger(expiresAt)) throw new BrokerError("instagram_token_expiry_invalid");
     if (expiresAt <= Date.now() / 1000) throw new BrokerError("reauth_required");
 
     const me = await this.get(config, long.access_token, "/me", { fields: "user_id,username" });

@@ -64,6 +64,17 @@ it("carries only numeric provider diagnostics into callback audit", async () => 
   ]);
   expect(JSON.stringify(events)).not.toContain(marker);
 });
+it("audits fixed Instagram verification checkpoints without provider payloads", async () => {
+  const { vault } = await fixture(); const events: any[] = [];
+  for (const reason of ["instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"]) {
+    const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
+    const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+    const login = await broker.begin(a, "instagram");
+    expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" })).toContain("meta=error");
+    expect(events.at(-1)?.reason).toBe(reason);
+  }
+  expect(JSON.stringify(events)).not.toMatch(/PRIVATE-code|student-a|authorizationUrl|access_token|credential/);
+});
 it("keeps callback redirect safe when broker error accessors throw", async () => {
   const marker = "PRIVATE-throwing-error-getter-marker"; const { vault } = await fixture(); const events: unknown[] = [];
   const hostile = new Proxy(new BrokerError("provider_unavailable"), { get(target, key, receiver) { if (key === "code" || key === "diagnostic") throw new Error(marker); return Reflect.get(target, key, receiver); } });

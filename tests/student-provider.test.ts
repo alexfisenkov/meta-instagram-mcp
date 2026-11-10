@@ -5,12 +5,15 @@ import { BrokerError, type Connection, type ProductConfig } from "../src/student
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
 const instagramLoginConfig: ProductConfig = { ...config, provider: "instagram_login", configId: undefined };
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
-it("exchanges an Instagram Login grant using its documented response permissions and identity", async () => {
+it.each(["wrapped", "flat"])("exchanges an Instagram Login grant using explicit permissions and identity (%s)", async (shape) => {
   const calls: Array<{ url: URL; init?: RequestInit }> = [];
   const provider = new MetaStudentProvider(async (url, init) => {
     calls.push({ url, init });
-    if (url.hostname === "api.instagram.com") return { data: [{ access_token: "short-token", user_id: "ig-user", permissions: "instagram_business_basic,instagram_business_manage_insights,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish" }] };
-    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    if (url.hostname === "api.instagram.com") {
+      const grant = { access_token: "short-token", user_id: "ig-user", permissions: "instagram_business_basic,instagram_business_manage_insights,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish" };
+      return shape === "wrapped" ? { data: [grant] } : grant;
+    }
+    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "Bearer", expires_in: 5_184_000 };
     if (url.pathname === "/v27.0/me") return { user_id: "ig-user", username: "owner" };
     throw new Error("unexpected direct Instagram request");
   });
@@ -35,6 +38,34 @@ it("registers direct Instagram Login only for Instagram and creates the Instagra
   const auth = new URL(authorizationUrl(instagramLoginConfig, "state"));
   expect(auth.origin + auth.pathname).toBe("https://www.instagram.com/oauth/authorize");
   expect(auth.searchParams.get("scope")).toBe("instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish,instagram_business_manage_insights");
+});
+it.each([
+  ["ambiguous", "instagram_short_response_invalid"],
+  ["permissions_missing", "instagram_permissions_invalid"],
+  ["permissions_unknown", "instagram_permissions_unexpected"],
+  ["long_token_missing", "instagram_long_response_invalid"],
+  ["long_type_wrong", "instagram_token_type_invalid"],
+  ["long_expiry_wrong", "instagram_token_expiry_invalid"],
+] as const)("rejects incomplete Instagram grants with a fixed safe diagnostic (%s)", async (scenario, reason) => {
+  let identityCalls = 0;
+  const provider = new MetaStudentProvider(async (url) => {
+    if (url.hostname === "api.instagram.com") {
+      const grant = { access_token: "PRIVATE-short-token", user_id: "ig-user", permissions: "instagram_business_basic" };
+      if (scenario === "ambiguous") return { ...grant, data: [{ ...grant, access_token: "PRIVATE-other-token" }] };
+      if (scenario === "permissions_missing") return { data: [{ access_token: grant.access_token, user_id: grant.user_id }] };
+      if (scenario === "permissions_unknown") return { data: [{ ...grant, permissions: "instagram_business_basic,unknown_scope" }] };
+      return { data: [grant] };
+    }
+    if (url.pathname === "/access_token") return {
+      access_token: scenario === "long_token_missing" ? "" : "PRIVATE-long-token",
+      token_type: scenario === "long_type_wrong" ? "mac" : "bearer",
+      expires_in: scenario === "long_expiry_wrong" ? 0 : 5_184_000,
+    };
+    identityCalls++;
+    throw new Error("identity request must not happen for an invalid grant");
+  });
+  await expect(provider.exchange(instagramLoginConfig, "PRIVATE-code")).rejects.toMatchObject({ code: reason, diagnostic: { stage: "token_exchange" } });
+  expect(identityCalls).toBe(0);
 });
 it("rejects an Instagram Login identity mismatch and ungranted base scope", async () => {
   const make = (userId: string, permissions: string) => new MetaStudentProvider(async (url) => {
