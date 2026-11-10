@@ -6,9 +6,9 @@ const config: ProductConfig = { product: "instagram", key: "ig", provider: "inst
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
 it("Unified URL pins config_id and exchanges once directly for BISU, discovers all assigned IGs", async () => {
   const auth = new URL(authorizationUrl(config, "state")); expect(auth.origin + auth.pathname).toBe("https://www.facebook.com/dialog/oauth"); expect(auth.searchParams.get("config_id")).toBe("456"); expect(auth.searchParams.has("scope")).toBe(false);
-  const seen: string[] = [];
+  const seen: URL[] = [];
   const provider = new MetaStudentProvider(async (url) => {
-    seen.push(url.toString());
+    seen.push(url);
     if (url.pathname === "/v27.0/oauth/access_token") return { access_token: "bisu-token", token_type: "bearer" };
     if (url.pathname === "/v27.0/debug_token") return { data: { app_id: "123", is_valid: true, user_id: "bisu-user", type: "SYSTEM_USER", scopes: ["instagram_basic"], expires_at: 0, data_access_expires_at: 0 } };
     if (url.pathname === "/v27.0/me") return { id: "bisu-user", client_business_id: "business" };
@@ -16,7 +16,10 @@ it("Unified URL pins config_id and exchanges once directly for BISU, discovers a
     throw new Error("unexpected request " + url.pathname);
   });
   const result = await provider.exchange(config, "code"); expect(result.assets.map((a) => a.providerId)).toEqual(["100", "101"]); expect(result.clientBusinessId).toBe("business");
-  expect(seen.some((url) => url.includes("fb_exchange_token") || url.includes("/accounts?"))).toBe(false);
+  const tokenExchange = seen.find((url) => url.pathname === "/v27.0/oauth/access_token");
+  expect(tokenExchange?.searchParams.get("redirect_uri")).toBe(config.callbackUrl);
+  expect(tokenExchange?.searchParams.get("redirect_uri")).toBe(auth.searchParams.get("redirect_uri"));
+  expect(seen.some((url) => url.toString().includes("fb_exchange_token") || url.pathname.endsWith("/accounts"))).toBe(false);
 });
 it("adds Meta's unified-login response-type override only to instagram_unified", () => {
   const unified = new URL(authorizationUrl(config, "state"));

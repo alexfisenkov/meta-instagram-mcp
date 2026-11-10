@@ -88,7 +88,7 @@ export class MetaStudentProvider implements ProviderAdapter {
       const url = new URL("https://graph.threads.com/oauth/access_token");
       tokenResponse = await this.request(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: config.appId, client_secret: appKey, grant_type: "authorization_code", redirect_uri: config.callbackUrl, code }) });
     } else {
-      const query = { client_id: config.appId, client_secret: appKey, code, ...(config.provider === "facebook_business" ? { redirect_uri: config.callbackUrl } : {}) };
+      const query = { client_id: config.appId, client_secret: appKey, code, redirect_uri: config.callbackUrl };
       tokenResponse = await this.request(this.url(config, "/oauth/access_token", query));
     }
     if (typeof tokenResponse.access_token !== "string" || !tokenResponse.access_token || tokenResponse.access_token.length > 8192) throw new BrokerError("grant_verification_failed");

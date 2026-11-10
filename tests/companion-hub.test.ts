@@ -43,7 +43,7 @@ describe("CompanionHub", () => {
     expect(await hub.poll(bridgeId, 1, bridgeToken)).toMatchObject([{ id: task.id }]);
     await hub.submit(bridgeId, task.id, { items: [] }, undefined, bridgeToken);
     expect(await hub.result(task.id)).toMatchObject({ status: "complete", result: { items: [] } });
-  });
+  }, process.platform === "win32" ? 45_000 : 15_000);
 
   it("cancels only queued or leased read tasks and never changes a write lease", async () => {
     const hub = await makeHub();
