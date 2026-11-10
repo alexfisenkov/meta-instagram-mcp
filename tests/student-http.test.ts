@@ -130,3 +130,5 @@ it("exposes a stable non-secret runtime capability marker for Google provisionin
   expect(body.capabilities).toContain("youtube_oauth_readonly_v1");
   expect(JSON.stringify(body)).not.toMatch(/token|secret|client_id|subject/i);
 });
+
+it("discloses Inbox transient bodies and retained receipt metadata without removing YouTube privacy", async()=>{const {renderLegal}=await import("../src/student/legal.js");const config={operatorName:"Synthetic operator",privacyContact:"privacy@example.test"};const privacy=renderLegal(config,false),deletion=renderLegal(config,true);expect(privacy).toContain("Тела сообщений и имена участников не сохраняются");expect(privacy).toContain("30 дней");expect(privacy).toContain("YouTube");expect(deletion).toContain("офлайн-удаление точного субъекта");expect(deletion).toContain("Отметки прочтения и реестр намерений в платформе учитываются отдельно");});
