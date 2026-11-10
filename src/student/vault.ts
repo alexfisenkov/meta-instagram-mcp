@@ -43,6 +43,7 @@ export class StudentVault {
         store.hash = digest(raw);
         const parsed = decrypt(store.key, vaultAAD, JSON.parse(raw)) as Database;
         if (parsed.version !== 1 || !Number.isSafeInteger(parsed.revision) || ![parsed.grants, parsed.connections, parsed.states, parsed.events].every(Array.isArray)) throw new BrokerError("vault_integrity_failed");
+        if (parsed.replyAttempts !== undefined && (!Array.isArray(parsed.replyAttempts) || parsed.replyAttempts.length > 10000)) throw new BrokerError("vault_integrity_failed");
         store.data = parsed;
       }
       return store;

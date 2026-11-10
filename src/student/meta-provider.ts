@@ -1,5 +1,6 @@
 import { BrokerError, type CallbackAuditStage, type Connection, type Credential, type Operation, type ProductConfig, type ProviderDiagnostic, type ReadInput } from "./types.js";
 import type { DiscoveredAsset, ExchangedGrant, ProviderAdapter, ProviderRead } from "./provider.js";
+import { MetaInbox } from "./inbox-provider.js";
 import { YouTubeStudentProvider } from "./youtube-provider.js";
 
 type Json = Record<string, any>;
@@ -117,7 +118,8 @@ function bounded(request: MetaRequest, beforeRequest?: (url: URL) => void): Meta
 }
 
 export class MetaStudentProvider implements ProviderAdapter {
-  constructor(private readonly request: MetaRequest = requestMeta) {}
+  readonly inbox: MetaInbox;
+  constructor(private readonly request: MetaRequest = requestMeta) { this.inbox = new MetaInbox(request); }
   private url(config: ProductConfig, path: string, query: Record<string, string> = {}): URL {
     if (!/^\/[A-Za-z0-9_/-]+$/.test(path) || path.includes("..")) throw new BrokerError("provider_path_rejected");
     const host = config.provider === "threads" ? "graph.threads.com" : config.provider === "instagram_login" ? "graph.instagram.com" : "graph.facebook.com";

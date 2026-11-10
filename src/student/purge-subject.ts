@@ -21,6 +21,7 @@ export async function purgeStudentSubject(directory: string, key: Buffer, subjec
       const ownedConnectionIds = new Set(db.connections.filter((connection) => sameSubject(connection, subject)).map((connection) => connection.id));
       const counts = { connections: ownedConnectionIds.size, grants: db.grants.filter((grant) => sameSubject(grant, subject)).length, events: db.events.filter((event) => ownedConnectionIds.has(event.connectionId)).length, states: db.states.filter((state) => sameSubject(state, subject)).length, generations: 0 };
       db.connections = db.connections.filter((connection) => !sameSubject(connection, subject));
+      if (db.replyAttempts) db.replyAttempts = db.replyAttempts.filter((attempt) => !sameSubject(attempt, subject));
       db.grants = db.grants.filter((grant) => !sameSubject(grant, subject));
       db.events = db.events.filter((event) => !ownedConnectionIds.has(event.connectionId));
       db.states = db.states.filter((state) => !sameSubject(state, subject));

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { authorizationUrl, configFingerprint, LABELS, StudentRegistry } from "./registry.js";
 import type { ProviderAdapter } from "./provider.js";
+import { StudentInboxBroker, type InboxAction, type BrokerInboxInput } from "./inbox-broker.js";
 import { StudentVault } from "./vault.js";
 import { invalidateGrant } from "./grant-lifecycle.js";
 import { eventWithinRetention } from "./retention.js";
@@ -41,6 +42,7 @@ export class StudentBroker {
     if (origin.protocol !== "https:" || origin.origin !== platformOrigin || origin.username || origin.password) throw new BrokerError("invalid_platform_origin");
     this.returnTarget = `${origin.origin}/social`;
   }
+  inbox(subject: Subject, action: InboxAction, input: BrokerInboxInput) { return new StudentInboxBroker(this.vault, this.registry, this.provider, this.now).run(subject, action, input); }
   catalog(subject: Subject) { return { products: META_PRODUCTS.map((product) => { const status = this.registry.status(product, subject); return { product, label: LABELS[product], status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }; }) }; }
   youtubeCatalog(subject: Subject) { const status = this.registry.status("youtube", subject); return { products: [{ product: "youtube" as const, label: LABELS.youtube, status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }] }; }
   async list(subject: Subject) {

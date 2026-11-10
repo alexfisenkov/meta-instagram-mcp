@@ -17,6 +17,7 @@ async function fixture() {
     db.grants.push({ ...binding, providerUserId: `provider-${sub}`, configKey: "threads", fingerprint: "fingerprint", scopes: ["threads_basic"], status: "active", createdAt: "now", credential: vault.seal(binding, { accessToken: `private-token-${sub}`, assetTokens: {} }) });
     db.connections.push({ tenantId: "masterskaya", sub, id: `connection-${sub}`, grantId: binding.id, product: "threads", providerId: `provider-${sub}`, label: `private-label-${sub}`, capabilities: ["account"], status: "connected", updatedAt: "now" });
     db.states.push({ tenantId: "masterskaya", sub, hash: `state-${sub}`, product: "threads", provider: "threads", configKey: "threads", fingerprint: "fingerprint", expiresAt: Date.now() + 60_000, returnTarget: "https://platform.example/social", generation: 1 });
+    (db.replyAttempts ??= []).push({ tenantId:"masterskaya", sub, intentId:`intent-${sub}`, connectionId:`connection-${sub}`, grantId:binding.id, conversationId:"conversation", textHash:"a".repeat(64), recipientHash:"b".repeat(64), status:"unknown", createdAt:"now", updatedAt:"now" });
     db.generations[JSON.stringify(["masterskaya", sub, "threads"])] = 1;
     db.events.push({ connectionId: `connection-${sub}`, eventId: `message-${sub}`, receivedAt: new Date().toISOString(), data: { text: `private-content-${sub}` } });
   } });
