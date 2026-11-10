@@ -5,11 +5,13 @@ import { StudentBroker } from "./student/broker.js";
 import { MetaStudentProvider } from "./student/meta-provider.js";
 import { startStudentServer } from "./student/http.js";
 import { GrantLifecycle } from "./student/grant-lifecycle.js";
+import type { CallbackAuditEvent, ReadAuditEvent } from "./student/types.js";
 
 try {
   const config = await loadStudentConfig(process.env); const vault = await StudentVault.open(config.directory, config.vaultKey); config.vaultKey.fill(0);
   try {
-    const provider = new MetaStudentProvider(); const broker = new StudentBroker(vault, config.registry, provider, config.platformOrigin, Date.now, (event) => process.stderr.write(JSON.stringify(event) + "\n"));
+    const audit = (event: CallbackAuditEvent | ReadAuditEvent) => { process.stderr.write(JSON.stringify(event) + "\n"); };
+    const provider = new MetaStudentProvider(); const broker = new StudentBroker(vault, config.registry, provider, config.platformOrigin, Date.now, audit, audit);
     const lifecycle = new GrantLifecycle(vault, config.registry, provider); await lifecycle.tick();
     const server = await startStudentServer({ ...config, broker, vault }); lifecycle.start(config.refreshIntervalMs);
     let closing: Promise<void> | undefined;

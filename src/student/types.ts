@@ -16,6 +16,8 @@ export type CallbackAuditStage = "state_validation" | "callback_validation" | "t
 export interface ProviderDiagnostic { stage: CallbackAuditStage; status?: number; metaCode?: number; metaSubcode?: number }
 export interface CallbackAuditEvent { event: "student_oauth_callback"; stage: CallbackAuditStage; product: Product; outcome: "connected" | "cancelled" | "error"; reason: string; hasCode: boolean; hasProviderError: boolean; status?: number; metaCode?: number; metaSubcode?: number }
 export type CallbackAuditSink = (event: CallbackAuditEvent) => void;
+export interface ReadAuditEvent { event: "student_connection_read_error"; product: Product; operation: Operation; reason: string; status?: number; metaCode?: number; metaSubcode?: number }
+export type ReadAuditSink = (event: ReadAuditEvent) => void;
 export class BrokerError extends Error {
   constructor(public readonly code: string, public readonly diagnostic?: ProviderDiagnostic) { super(code); this.name = "BrokerError"; }
 }

@@ -280,7 +280,7 @@ it("Threads exchanges a dedicated code, upgrades to long-lived and validates act
     if (url.pathname === "/oauth/access_token" && init?.method === "POST") return { access_token: "short", user_id: "threads-user" };
     if (url.pathname === "/access_token") { expect(url.searchParams.get("access_token")).toBe("short"); expect(init?.headers).toBeUndefined(); return { access_token: "long", expires_in: 5_184_000 }; }
     if (url.pathname === "/oauth/access_token") { expect(url.searchParams.get("grant_type")).toBe("client_credentials"); expect(url.searchParams.get("client_id")).toBe("123"); expect(url.searchParams.get("client_secret")).toBe("app-secret"); return { access_token: "TH|123|example-app-secret" }; }
-    if (url.pathname === "/v1.0/debug_token") { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("long"); return { data: { app_id: "123", is_valid: true, user_id: "threads-user", scopes: ["threads_basic", "threads_read_replies"] } }; }
+    if (url.pathname === "/v1.0/debug_token") { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("long"); return { data: { app_id: "123", type: "USER", expires_at: 0, is_valid: true, user_id: "threads-user", scopes: ["threads_basic", "threads_read_replies"] } }; }
     if (url.pathname === "/v1.0/me") return { id: "threads-user", username: "me" };
     throw new Error("unexpected " + url.pathname);
   });
@@ -331,7 +331,7 @@ it("refreshes only Threads through the fixed official endpoint without disclosin
     expect(url.hostname).toBe("graph.threads.com");
     if (url.pathname === "/refresh_access_token") { expect(url.searchParams.get("grant_type")).toBe("th_refresh_token"); expect(url.searchParams.get("access_token")).toBe("old"); expect(init?.headers).toBeUndefined(); return { access_token: "refreshed", expires_in: 5_184_000, token_type: "bearer" }; }
     if (url.pathname === "/oauth/access_token") { expect(url.searchParams.get("grant_type")).toBe("client_credentials"); return { access_token: "TH|123|example-app-secret" }; }
-    if (url.pathname.endsWith("/debug_token")) { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("refreshed"); return { data: { app_id: "123", is_valid: true, user_id: "threads-user", scopes: ["threads_basic"], data_access_expires_at: dataExpiry } }; }
+    if (url.pathname.endsWith("/debug_token")) { expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TH|123|example-app-secret"); expect(url.searchParams.get("input_token")).toBe("refreshed"); return { data: { app_id: "123", type: "USER", expires_at: 0, is_valid: true, user_id: "threads-user", scopes: ["threads_basic"], data_access_expires_at: dataExpiry } }; }
     return { id: "threads-user" };
   });
   const refreshed = await provider.refresh({ ...config, product: "threads", provider: "threads" }, { accessToken: "old", assetTokens: {} }, "threads-user"); expect(refreshed.accessToken).toBe("refreshed"); expect(refreshed.expiresAt).toBe(dataExpiry);
@@ -391,6 +391,17 @@ it("projects posts and opaque cursor without provider paging URLs or credentials
 it("rejects a media ID absent from the selected own asset before reading its comments", async () => {
   const provider = new MetaStudentProvider(async (url) => { if (url.pathname === "/v27.0/100/media") return { data: [{ id: "owned" }] }; throw new Error("foreign request sent"); });
   await expect(provider.read(config, connection, { accessToken: "token", assetTokens: {} }, { connectionId: "connection", operation: "comments", mediaId: "foreign" })).rejects.toThrow("media_not_owned_or_outside_window");
+});
+it.each(["instagram", "messenger"] as const)("requests only documented conversation metadata for %s with the selected resource credential", async (product) => {
+  const provider = new MetaStudentProvider(async (url, init) => {
+    expect(url.searchParams.get("fields")).toBe("id,updated_time");
+    expect(url.searchParams.get("platform")).toBe(product);
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer synthetic-selected-asset-token");
+    return { data: [{ id: "conversation", updated_time: "2026-11-09T10:00:00Z", message_count: 777, text: "PRIVATE-message", access_token: "PRIVATE-token" }] };
+  });
+  const result = await provider.read({ ...config, product }, { ...connection, product }, { accessToken: "synthetic-user-token", assetTokens: { "100": "synthetic-selected-asset-token" } }, { connectionId: connection.id, operation: "inbox" });
+  expect(result.data).toEqual({ items: [{ id: "conversation", updated_time: "2026-11-09T10:00:00Z" }] });
+  expect(JSON.stringify(result)).not.toMatch(/PRIVATE|777|message_count/);
 });
 it("keeps Threads OAuth separate and fails wrong-app grants before discovery", async () => {
   const threads = { ...config, product: "threads" as const, provider: "threads" as const };

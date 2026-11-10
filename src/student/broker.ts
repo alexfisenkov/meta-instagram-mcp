@@ -4,7 +4,7 @@ import type { ProviderAdapter } from "./provider.js";
 import { StudentVault } from "./vault.js";
 import { invalidateGrant } from "./grant-lifecycle.js";
 import { eventWithinRetention } from "./retention.js";
-import { BrokerError, PRODUCTS, sameSubject, type CallbackAuditEvent, type CallbackAuditSink, type CallbackAuditStage, type Connection, type Grant, type Product, type ProviderDiagnostic, type ReadInput, type Subject } from "./types.js";
+import { BrokerError, PRODUCTS, sameSubject, type CallbackAuditEvent, type CallbackAuditSink, type CallbackAuditStage, type Connection, type Grant, type Product, type ProviderDiagnostic, type ReadAuditSink, type ReadInput, type Subject } from "./types.js";
 function hash(state: string): string { return createHash("sha256").update(state).digest("hex"); }
 function generationKey(subject: Subject, product: Product): string { return JSON.stringify([subject.tenantId, subject.sub, product]); }
 function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
@@ -14,6 +14,7 @@ function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
 function safeConnection(c: Connection) { return { id: c.id, product: c.product, status: c.status, account: { id: c.providerId, label: c.label }, capabilities: c.status === "connected" ? c.capabilities : [], updatedAt: c.updatedAt, ...(c.reason ? { reason: c.reason } : {}) }; }
 const AUDIT_STAGES = new Set<CallbackAuditStage>(["state_validation", "callback_validation", "token_exchange", "token_short_exchange", "token_long_exchange", "app_token_exchange", "token_refresh", "token_inspection", "account_identity", "asset_discovery", "api_request", "grant_validation", "grant_persist"]);
 const AUDIT_REASONS = new Set(["state_rejected", "callback_rejected", "provider_unavailable", "provider_response_too_large", "provider_response_invalid", "provider_budget_exceeded", "provider_paging_cycle", "provider_host_rejected", "provider_path_rejected", "discovery_exceeds_limit", "reauth_required", "permission_unavailable", "grant_verification_failed", "instagram_short_identity_missing", "instagram_short_identity_invalid", "instagram_profile_response_invalid", "instagram_profile_identity_missing", "instagram_profile_identity_invalid", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid", "no_authorized_assets", "oauth_cancelled", "vault_capacity_exceeded", "vault_changed", "vault_closed", "vault_commit_uncertain", "vault_integrity_failed", "vault_too_large", "writer_locked", "review_required", "not_configured", "provider_cancelled", "connected", "callback_failed"]);
+for (const reason of ["threads_app_binding_missing", "threads_app_token_invalid", "threads_inspection_response_invalid", "threads_inspection_not_valid", "threads_inspection_type_invalid", "threads_inspection_app_mismatch", "threads_inspection_scopes_invalid", "threads_inspection_identity_invalid", "threads_inspection_expiry_invalid", "threads_inspection_expired", "threads_account_identity_invalid", "threads_identity_mismatch", "threads_expected_identity_missing"]) AUDIT_REASONS.add(reason);
 function safeDiagnostic(value: unknown): ProviderDiagnostic | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
@@ -35,7 +36,7 @@ function safeAuditFailure(error: unknown): { reason: string; diagnostic?: Provid
 }
 export class StudentBroker {
   private readonly returnTarget: string;
-  constructor(private readonly vault: StudentVault, private readonly registry: StudentRegistry, private readonly provider: ProviderAdapter, platformOrigin: string, private readonly now = Date.now, private readonly audit?: CallbackAuditSink) {
+  constructor(private readonly vault: StudentVault, private readonly registry: StudentRegistry, private readonly provider: ProviderAdapter, platformOrigin: string, private readonly now = Date.now, private readonly audit?: CallbackAuditSink, private readonly readAudit?: ReadAuditSink) {
     const origin = new URL(platformOrigin);
     if (origin.protocol !== "https:" || origin.origin !== platformOrigin || origin.username || origin.password) throw new BrokerError("invalid_platform_origin");
     this.returnTarget = `${origin.origin}/social`;
@@ -130,7 +131,24 @@ export class StudentBroker {
     try { result = c.product === "whatsapp" && input.operation === "inbox"
       ? { data: { items: db.events.filter((e) => e.connectionId === c.id && eventWithinRetention(e, this.now())).slice(-(input.limit ?? 20)).map((e) => ({ ...e.data, receivedAt: e.receivedAt })) }, coverage: "partial", limitations: ["webhook_events_since_connection_only", "no_whatsapp_history_api"] }
       : await this.provider.read(config, c, this.vault.credential(grant), input);
-    } catch (error) { if (error instanceof BrokerError && ["reauth_required", "permission_unavailable", "grant_verification_failed"].includes(error.code)) await invalidateGrant(this.vault, grant, "provider_authorization_revoked"); throw error; }
+    } catch (error) {
+      if (this.readAudit && PRODUCTS.includes(c.product) && ["account", "posts", "metrics", "comments", "inbox"].includes(input.operation)) {
+        const failure = safeAuditFailure(error), details = failure.diagnostic;
+        try { this.readAudit({ event: "student_connection_read_error", product: c.product, operation: input.operation, reason: failure.reason === "callback_failed" ? "read_failed" : failure.reason, ...(details?.status !== undefined ? { status: details.status } : {}), ...(details?.metaCode !== undefined ? { metaCode: details.metaCode } : {}), ...(details?.metaSubcode !== undefined ? { metaSubcode: details.metaSubcode } : {}) }); } catch { /* Диагностика не меняет результат чтения. */ }
+      }
+      if (error instanceof BrokerError && error.code === "permission_unavailable") {
+        // 10/200 — отказ конкретной операции, не доказательство отзыва всего grant.
+        await this.vault.transaction((db) => {
+          const currentGrant = db.grants.find((g) => g.id === grant.id);
+          const selected = db.connections.find((candidate) => candidate.id === c.id && sameSubject(candidate, subject));
+          if (!selected || selected.status !== "connected" || selected.grantId !== grant.id || !currentGrant || currentGrant.status !== "active" || JSON.stringify(currentGrant.credential) !== JSON.stringify(grant.credential)) return;
+          if (input.operation === "account") { selected.status = "reauth_required"; selected.capabilities = []; selected.reason = "identity_verification_unavailable"; }
+          else { selected.capabilities = selected.capabilities.filter((capability) => capability !== input.operation); selected.reason = "operation_permission_unavailable"; }
+          selected.updatedAt = new Date(this.now()).toISOString();
+        });
+      } else if (error instanceof BrokerError && ["reauth_required", "grant_verification_failed"].includes(error.code)) await invalidateGrant(this.vault, grant, "provider_authorization_revoked");
+      throw error;
+    }
     // A concurrent disconnect invalidates an already-running read before disclosure.
     const current = (await this.vault.snapshot()).connections.find((candidate) => candidate.id === c.id);
     if (!current || current.status !== "connected" || current.grantId !== c.grantId) throw new BrokerError("connection_unavailable");
