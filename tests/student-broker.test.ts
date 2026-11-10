@@ -1,15 +1,17 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { StudentBroker } from "../src/student/broker.js";
 import { StudentRegistry } from "../src/student/registry.js";
 import { StudentVault } from "../src/student/vault.js";
+import { GrantLifecycle } from "../src/student/grant-lifecycle.js";
 import { BrokerError, type ProductConfig, type Subject } from "../src/student/types.js";
 import type { ProviderAdapter } from "../src/student/provider.js";
 const a: Subject = { tenantId: "masterskaya", sub: "student-a" }, b: Subject = { tenantId: "masterskaya", sub: "student-b" };
 const configs: ProductConfig[] = [{ product: "instagram", key: "instagram-v1", provider: "instagram_unified", appId: "123", appSecret: "secret", configId: "456", apiVersion: "v25.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "test", testSubjects: ["student-a"] }];
+const youtubeConfig: ProductConfig = { product: "youtube", key: "youtube-v1", provider: "youtube", appId: "123-client.apps.googleusercontent.com", appSecret: "google-client-secret-fixture", apiVersion: "v3", callbackUrl: "https://broker.example/youtube/oauth/callback", admission: "live", testSubjects: [] };
 const resources: Array<{ dir: string; vault: StudentVault }> = [];
 afterEach(async () => { for (const r of resources.splice(0)) { await r.vault.close(); await rm(r.dir, { recursive: true, force: true }); } });
 async function fixture(adapter?: ProviderAdapter) {
@@ -19,6 +21,113 @@ async function fixture(adapter?: ProviderAdapter) {
   return { vault, provider, broker: new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", () => clock), advance: () => { clock += 600_001; } };
 }
 async function connect(broker: StudentBroker) { const login = await broker.begin(a, "instagram"); const state = new URL(login.authorizationUrl).searchParams.get("state")!; expect(await broker.callback({ state, code: "code-a" })).toBe("https://platform.example/social?meta=connected"); return state; }
+it("keeps Google PKCE state one-use and binds the YouTube channel to the initiating subject", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-broker-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  let verifier = "";
+  const provider: ProviderAdapter = { exchange: async (_config, _code, codeVerifier) => { verifier = codeVerifier ?? ""; return { accessToken: "google-access-fixture", refreshToken: "google-refresh-fixture", assetTokens: {}, providerUserId: "google-subject-fixture", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], expiresAt: Math.floor(Date.now() / 1000) + 3600, assets: [{ product: "youtube", providerId: "UC-owned-fixture", label: "Owned channel", capabilities: ["account"] }] }; }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, new StudentRegistry([youtubeConfig]), provider, "https://platform.example");
+  const login = await broker.begin(a, "youtube"), url = new URL(login.authorizationUrl), state = url.searchParams.get("state")!;
+  expect(url.origin + url.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+  expect(url.searchParams.get("scope")).toBe("openid profile https://www.googleapis.com/auth/youtube.readonly");
+  expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(await broker.callback({ state, code: "authorization-code-fixture", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=connected");
+  expect(verifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(url.searchParams.get("code_challenge")).toBe(createHash("sha256").update(verifier).digest("base64url"));
+  await expect(broker.callback({ state, code: "authorization-code-fixture", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).resolves.toBe("https://platform.example/social?youtube=error");
+  const channels = (await broker.youtubeList(a)).connections;
+  expect(channels).toMatchObject([{ product: "youtube", account: { id: "UC-owned-fixture", label: "Owned channel" }, status: "connected" }]);
+  expect((await broker.list(b)).connections).toEqual([]);
+  await expect(broker.read(a, { connectionId: channels[0].id, operation: "account" })).rejects.toThrow("connection_not_found");
+  await expect(broker.disconnect(a, channels[0].id)).rejects.toThrow("connection_not_found");
+  await expect(broker.read(a, { connectionId: channels[0].id, operation: "account" }, ["youtube"])).resolves.toMatchObject({ source: "google_youtube_data_api" });
+});
+it("does not consume YouTube state on a wrong callback route or issuer and uses a fixed YouTube error for unknown state", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-callback-binding-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  let exchanges = 0;
+  const provider: ProviderAdapter = { exchange: async () => { exchanges++; return { accessToken: "google-access-fixture", refreshToken: "google-refresh-fixture", assetTokens: {}, providerUserId: "google-subject-fixture", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], assets: [{ product: "youtube", providerId: "UC-owned-fixture", label: "Owned channel", capabilities: ["account"] }] }; }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, new StudentRegistry([youtubeConfig]), provider, "https://platform.example");
+  const start = await broker.begin(a, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!;
+  expect(await broker.callback({ state, code: "code", issuer: "https://accounts.google.com", callbackPath: "/student/oauth/callback" })).toBe("https://platform.example/social?youtube=error");
+  expect(await broker.callback({ state, code: "code", issuer: "https://accounts.google.com.evil.example", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=error");
+  expect(exchanges).toBe(0);
+  expect(await broker.callback({ state, code: "code", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=connected");
+  expect(exchanges).toBe(1);
+  expect(await broker.callback({ state: randomBytes(32).toString("base64url"), code: "ignored", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=error");
+});
+it("keeps persisted YouTube grants outside the legacy Meta vault so a Meta-only rollback still reads and sweeps safely", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-vault-rollback-")); const key = randomBytes(32); const metaVault = await StudentVault.open(dir, key); const youtubeVault = await StudentVault.open(join(dir, "youtube"), key);
+  resources.push({ dir, vault: { close: async () => { await youtubeVault.close(); await metaVault.close(); } } as StudentVault });
+  const registry = new StudentRegistry([...configs, youtubeConfig]);
+  const provider: ProviderAdapter = { exchange: async () => ({ accessToken: "youtube-access-fixture", refreshToken: "youtube-refresh-fixture", assetTokens: {}, providerUserId: "google-subject-fixture", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], expiresAt: 1_900_000_000, assets: [{ product: "youtube", providerId: "UC-rollback-fixture", label: "Rollback channel", capabilities: ["account"] }] }), read: async () => ({ data: {}, coverage: "partial", limitations: [] }), refresh: async () => { throw new Error("unexpected refresh"); } };
+  const legacyMetaBroker = new StudentBroker(metaVault, registry, provider, "https://platform.example");
+  const youtubeBroker = new StudentBroker(youtubeVault, registry, provider, "https://platform.example");
+  const start = await youtubeBroker.begin(a, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!;
+  await youtubeBroker.callback({ state, code: "code", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" });
+  expect((await youtubeVault.snapshot()).connections).toHaveLength(1);
+  expect((await legacyMetaBroker.list(a)).connections).toEqual([]);
+  await new GrantLifecycle(metaVault, registry, provider, () => 1_800_000_000_000).tick();
+  expect((await metaVault.snapshot()).grants).toEqual([]);
+  expect((await youtubeVault.snapshot()).connections[0].status).toBe("connected");
+  expect((await youtubeVault.snapshot()).grants).toHaveLength(1);
+});
+it("keeps channels from a second Google identity when the same LMS owner connects another account", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-multi-account-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  const registry = new StudentRegistry([youtubeConfig]);
+  const provider: ProviderAdapter = { exchange: async (_config, code) => { const suffix = code === "account-one" ? "one" : "two"; return { accessToken: `google-access-${suffix}`, refreshToken: `google-refresh-${suffix}`, assetTokens: {}, providerUserId: `google-subject-${suffix}`, scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], expiresAt: Math.floor(Date.now() / 1000) + 3600, assets: [{ product: "youtube", providerId: `UC-${suffix}`, label: `Channel ${suffix}`, capabilities: ["account"] }] }; }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, registry, provider, "https://platform.example");
+  for (const code of ["account-one", "account-two"]) {
+    const start = await broker.begin(a, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!;
+    expect(await broker.callback({ state, code, issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toContain("youtube=connected");
+  }
+  const connections = (await broker.youtubeList(a)).connections;
+  expect(connections.map((item) => item.account.id).sort()).toEqual(["UC-one", "UC-two"]);
+  expect(connections.every((item) => item.status === "connected")).toBe(true);
+});
+it("returns a fixed YouTube no-channel notice without creating a grant", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-empty-discovery-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError("no_authorized_assets"); }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, new StudentRegistry([youtubeConfig]), provider, "https://platform.example");
+  const start = await broker.begin(a, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!;
+  expect(await broker.callback({ state, code: "no-channel", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=no_channel");
+  expect((await broker.youtubeList(a)).connections).toEqual([]);
+  expect((await vault.snapshot()).grants).toEqual([]);
+});
+it("preserves the existing YouTube credential if Google returns no refresh token on re-consent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-refresh-preserve-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  let next = false;
+  const provider: ProviderAdapter = { exchange: async () => { if (next) throw new BrokerError("youtube_refresh_token_missing"); return { accessToken: "old-access-fixture", refreshToken: "old-refresh-fixture", assetTokens: {}, providerUserId: "google-subject-fixture", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], expiresAt: Math.floor(Date.now() / 1000) + 3600, assets: [{ product: "youtube", providerId: "UC-owned-fixture", label: "Owned channel", capabilities: ["account"] }] }; }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, new StudentRegistry([youtubeConfig]), provider, "https://platform.example");
+  const first = await broker.begin(a, "youtube"), firstState = new URL(first.authorizationUrl).searchParams.get("state")!;
+  await broker.callback({ state: firstState, code: "first", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" });
+  const before = (await broker.youtubeList(a)).connections[0]; next = true;
+  const second = await broker.begin(a, "youtube"), secondState = new URL(second.authorizationUrl).searchParams.get("state")!;
+  expect(await broker.callback({ state: secondState, code: "missing-refresh", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).toBe("https://platform.example/social?youtube=refresh_required");
+  const after = (await broker.youtubeList(a)).connections[0], grant = (await vault.snapshot()).grants[0];
+  expect(after.id).toBe(before.id);
+  expect(after.status).toBe("connected");
+  expect(vault.credential(grant)).toMatchObject({ accessToken: "old-access-fixture", refreshToken: "old-refresh-fixture" });
+});
+it("preserves a YouTube Brand channel across one-to-two-to-one consent, blocks replay and disconnects only the selected channel", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-channel-switch-")); const vault = await StudentVault.open(dir, randomBytes(32)); resources.push({ dir, vault });
+  const registry = new StudentRegistry([youtubeConfig]);
+  const provider: ProviderAdapter = { exchange: async (_config, code) => { const channel = code === "channel-two" ? "UC-two" : "UC-one"; return { accessToken: `google-access-${channel}`, refreshToken: `google-refresh-${channel}`, assetTokens: {}, providerUserId: "google-subject-same", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], expiresAt: Math.floor(Date.now() / 1000) + 3600, assets: [{ product: "youtube", providerId: channel, label: channel, capabilities: ["account"] }] }; }, read: async () => ({ data: {}, coverage: "partial", limitations: [] }) };
+  const broker = new StudentBroker(vault, registry, provider, "https://platform.example");
+  const connect = async (code: string) => { const start = await broker.begin(a, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!; await broker.callback({ state, code, issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" }); return state; };
+  const firstState = await connect("channel-one");
+  const first = (await broker.youtubeList(a)).connections.find((item) => item.account.id === "UC-one")!;
+  await connect("channel-two");
+  expect((await broker.youtubeList(a)).connections.filter((item) => item.status === "connected").map((item) => item.account.id).sort()).toEqual(["UC-one", "UC-two"]);
+  await connect("channel-one-again");
+  const current = (await broker.youtubeList(a)).connections;
+  expect(current.filter((item) => item.status === "connected").map((item) => item.account.id).sort()).toEqual(["UC-one", "UC-two"]);
+  expect(current.find((item) => item.account.id === "UC-one")?.id).toBe(first.id);
+  await expect(broker.callback({ state: firstState, code: "channel-one", issuer: "https://accounts.google.com", callbackPath: "/youtube/oauth/callback" })).resolves.toBe("https://platform.example/social?youtube=error");
+  const second = current.find((item) => item.account.id === "UC-two")!;
+  await broker.disconnect(a, second.id, ["youtube"]);
+  const afterDisconnect = (await broker.youtubeList(a)).connections;
+  expect(afterDisconnect.find((item) => item.account.id === "UC-one")?.status).toBe("connected");
+  expect(afterDisconnect.find((item) => item.account.id === "UC-two")?.status).toBe("disconnected");
+});
 it("catalog fails closed per product and limits test admission to pinned subjects", async () => {
   const { broker } = await fixture();
   expect(broker.catalog(a).products.find((p) => p.product === "instagram")?.status).toBe("ready");

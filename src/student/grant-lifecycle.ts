@@ -12,7 +12,7 @@ export async function invalidateGrant(vault: StudentVault, grant: Grant, reason:
     for (const c of db.connections) if (c.grantId === current.id && c.status === "connected") { c.status = "reauth_required"; c.reason = reason; c.updatedAt = new Date().toISOString(); }
   });
 }
-/** Threads refresh only. Never manufacture an expiry or refresh a BISU/SUAT grant. */
+/** Only provider-documented refresh flows run here; unsupported grants expire closed. */
 export class GrantLifecycle {
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<void>;
@@ -31,20 +31,30 @@ export class GrantLifecycle {
     for (const grant of (await this.vault.snapshot()).grants.filter((g) => g.status === "active")) {
       const config = this.registry.byKey(grant.configKey);
       if (!config || configFingerprint(config) !== grant.fingerprint) { await invalidateGrant(this.vault, grant, "configuration_changed"); continue; }
+      if (grant.provider === "youtube") {
+        if (!this.provider.refresh || grant.expiresAt === undefined || grant.expiresAt > this.now() / 1000 + 5 * 60) continue;
+        await this.refreshGrant(config, grant);
+        continue;
+      }
       if (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000) { await invalidateGrant(this.vault, grant, "token_expired"); continue; }
       if (grant.provider !== "threads" || !this.provider.refresh || grant.expiresAt === undefined || grant.expiresAt > this.now() / 1000 + 7 * 86_400 || this.now() - (grant.refreshedAt ?? Date.parse(grant.createdAt)) < 86_400_000) continue;
-      try {
-        const refreshed = await this.provider.refresh(config, this.vault.credential(grant), grant.providerUserId);
-        if (!refreshed.accessToken || !Number.isSafeInteger(refreshed.expiresAt) || refreshed.expiresAt <= this.now() / 1000) throw new BrokerError("reauth_required");
-        if (refreshed.scopes && grant.scopes.some((scope) => !refreshed.scopes!.includes(scope))) throw new BrokerError("reauth_required");
-        const bearer = refreshed.accessToken;
-        await this.vault.transaction((db) => {
-          const current = db.grants.find((g) => g.id === grant.id);
-          if (!current || current.status !== "active" || JSON.stringify(current.credential) !== JSON.stringify(grant.credential) || !db.connections.some((c) => c.grantId === grant.id && c.status === "connected")) return;
-          current.credential = this.vault.seal(current, { accessToken: bearer, assetTokens: refreshed.assetTokens }); current.expiresAt = refreshed.expiresAt; current.refreshedAt = this.now();
-          if (refreshed.scopes) current.scopes = refreshed.scopes;
-        });
-      } catch (error) { await invalidateGrant(this.vault, grant, error instanceof BrokerError && ["reauth_required", "permission_unavailable", "grant_verification_failed"].includes(error.code) ? "provider_authorization_revoked" : "refresh_outcome_unknown"); }
+      await this.refreshGrant(config, grant);
     }
+  }
+  private async refreshGrant(config: NonNullable<ReturnType<StudentRegistry["byKey"]>>, grant: Grant): Promise<void> {
+    try {
+      if (!this.provider.refresh) throw new BrokerError("refresh_unsupported");
+      const credential = this.vault.credential(grant);
+      const refreshed = await this.provider.refresh(config, credential, grant.providerUserId, grant.scopes);
+      if (!refreshed.accessToken || !Number.isSafeInteger(refreshed.expiresAt) || refreshed.expiresAt <= this.now() / 1000) throw new BrokerError("reauth_required");
+      if (refreshed.scopes && grant.scopes.some((scope) => !refreshed.scopes!.includes(scope))) throw new BrokerError("reauth_required");
+      const bearer = refreshed.accessToken, refreshToken = refreshed.refreshToken ?? credential.refreshToken;
+      await this.vault.transaction((db) => {
+        const current = db.grants.find((g) => g.id === grant.id);
+        if (!current || current.status !== "active" || JSON.stringify(current.credential) !== JSON.stringify(grant.credential) || !db.connections.some((c) => c.grantId === grant.id && c.status === "connected")) return;
+        current.credential = this.vault.seal(current, { accessToken: bearer, assetTokens: refreshed.assetTokens, ...(refreshToken ? { refreshToken } : {}) }); current.expiresAt = refreshed.expiresAt; current.refreshedAt = this.now();
+        if (refreshed.scopes) current.scopes = refreshed.scopes;
+      });
+    } catch (error) { await invalidateGrant(this.vault, grant, error instanceof BrokerError && ["reauth_required", "permission_unavailable", "grant_verification_failed", "provider_unavailable"].includes(error.code) ? "provider_authorization_revoked" : "refresh_outcome_unknown"); }
   }
 }

@@ -4,7 +4,7 @@ import type { ProviderAdapter } from "./provider.js";
 import { StudentVault } from "./vault.js";
 import { invalidateGrant } from "./grant-lifecycle.js";
 import { eventWithinRetention } from "./retention.js";
-import { BrokerError, PRODUCTS, sameSubject, type CallbackAuditEvent, type CallbackAuditSink, type CallbackAuditStage, type Connection, type Grant, type Product, type ProviderDiagnostic, type ReadInput, type Subject } from "./types.js";
+import { BrokerError, META_PRODUCTS, PRODUCTS, sameSubject, type CallbackAuditEvent, type CallbackAuditSink, type CallbackAuditStage, type Connection, type Grant, type Product, type ProviderDiagnostic, type ReadInput, type Subject } from "./types.js";
 function hash(state: string): string { return createHash("sha256").update(state).digest("hex"); }
 function generationKey(subject: Subject, product: Product): string { return JSON.stringify([subject.tenantId, subject.sub, product]); }
 function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
@@ -13,7 +13,7 @@ function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
 }
 function safeConnection(c: Connection) { return { id: c.id, product: c.product, status: c.status, account: { id: c.providerId, label: c.label }, capabilities: c.status === "connected" ? c.capabilities : [], updatedAt: c.updatedAt, ...(c.reason ? { reason: c.reason } : {}) }; }
 const AUDIT_STAGES = new Set<CallbackAuditStage>(["state_validation", "callback_validation", "token_exchange", "token_inspection", "account_identity", "asset_discovery", "api_request", "grant_validation", "grant_persist"]);
-const AUDIT_REASONS = new Set(["state_rejected", "callback_rejected", "provider_unavailable", "provider_response_too_large", "provider_response_invalid", "provider_budget_exceeded", "provider_paging_cycle", "provider_host_rejected", "provider_path_rejected", "discovery_exceeds_limit", "reauth_required", "permission_unavailable", "grant_verification_failed", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid", "no_authorized_assets", "oauth_cancelled", "vault_capacity_exceeded", "vault_changed", "vault_closed", "vault_commit_uncertain", "vault_integrity_failed", "vault_too_large", "writer_locked", "review_required", "not_configured", "provider_cancelled", "connected", "callback_failed"]);
+const AUDIT_REASONS = new Set(["state_rejected", "callback_rejected", "provider_unavailable", "provider_response_too_large", "provider_response_invalid", "provider_budget_exceeded", "provider_paging_cycle", "provider_host_rejected", "provider_path_rejected", "discovery_exceeds_limit", "reauth_required", "permission_unavailable", "grant_verification_failed", "youtube_refresh_token_missing", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid", "no_authorized_assets", "oauth_cancelled", "vault_capacity_exceeded", "vault_changed", "vault_closed", "vault_commit_uncertain", "vault_integrity_failed", "vault_too_large", "writer_locked", "review_required", "not_configured", "provider_cancelled", "connected", "callback_failed"]);
 function safeDiagnostic(value: unknown): ProviderDiagnostic | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
@@ -40,31 +40,50 @@ export class StudentBroker {
     if (origin.protocol !== "https:" || origin.origin !== platformOrigin || origin.username || origin.password) throw new BrokerError("invalid_platform_origin");
     this.returnTarget = `${origin.origin}/social`;
   }
-  catalog(subject: Subject) { return { products: PRODUCTS.map((product) => { const status = this.registry.status(product, subject); return { product, label: LABELS[product], status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }; }) }; }
+  catalog(subject: Subject) { return { products: META_PRODUCTS.map((product) => { const status = this.registry.status(product, subject); return { product, label: LABELS[product], status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }; }) }; }
+  youtubeCatalog(subject: Subject) { const status = this.registry.status("youtube", subject); return { products: [{ product: "youtube" as const, label: LABELS.youtube, status, capabilities: [], ...(status !== "ready" ? { reason: status } : {}) }] }; }
   async list(subject: Subject) {
     const db = await this.vault.snapshot();
-    return { connections: db.connections.filter((c) => sameSubject(c, subject)).map((c) => {
+    return { connections: db.connections.filter((c) => sameSubject(c, subject) && META_PRODUCTS.includes(c.product as typeof META_PRODUCTS[number])).map((c) => {
       const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject)); const config = this.registry.get(c.product);
       if (c.status === "connected" && (!grant || grant.status !== "active" || !config || grant.fingerprint !== configFingerprint(config) || (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000))) return safeConnection({ ...c, status: "reauth_required", reason: "grant_unavailable" });
       return safeConnection(c);
     }) };
   }
+  async youtubeList(subject: Subject) { const db = await this.vault.snapshot(); return { connections: db.connections.filter((c) => sameSubject(c, subject) && c.product === "youtube").map((c) => {
+    const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject)); const config = this.registry.get(c.product);
+    if (c.status === "connected" && (!grant || grant.status !== "active" || !config || configFingerprint(config) !== grant.fingerprint || (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000))) return safeConnection({ ...c, status: "reauth_required", reason: "grant_unavailable" });
+    return safeConnection(c);
+  }) }; }
   async begin(subject: Subject, product: Product) {
     const status = this.registry.status(product, subject); if (status !== "ready") throw new BrokerError(status);
     const config = this.registry.get(product)!; const state = randomBytes(32).toString("base64url"); const expiresAt = this.now() + 600_000;
+    const codeVerifier = config.provider === "youtube" ? randomBytes(32).toString("base64url") : undefined;
+    const codeChallenge = codeVerifier ? createHash("sha256").update(codeVerifier).digest("base64url") : undefined;
     await this.vault.transaction((db) => {
       db.states = db.states.filter((s) => s.expiresAt > this.now() && (!sameSubject(s, subject) || s.product !== product));
       if (db.states.filter((s) => sameSubject(s, subject)).length >= 10) throw new BrokerError("too_many_oauth_flows");
       const key = generationKey(subject, product); db.generations[key] = (db.generations[key] ?? 0) + 1;
-      db.states.push({ ...subject, hash: hash(state), product, provider: config.provider, configKey: config.key, fingerprint: configFingerprint(config), expiresAt, returnTarget: this.returnTarget, generation: db.generations[key] });
+      db.states.push({ ...subject, hash: hash(state), product, provider: config.provider, configKey: config.key, fingerprint: configFingerprint(config), expiresAt, returnTarget: this.returnTarget, generation: db.generations[key], ...(codeVerifier ? { codeVerifier } : {}) });
     });
-    return { authorizationUrl: authorizationUrl(config, state), expiresAt: new Date(expiresAt).toISOString() };
+    return { authorizationUrl: authorizationUrl(config, state, codeChallenge), expiresAt: new Date(expiresAt).toISOString() };
   }
-  async callback(input: { state?: string; code?: string; error?: string }): Promise<string> {
+  async callback(input: { state?: string; code?: string; error?: string; issuer?: string; callbackPath?: string }): Promise<string> {
     let outcome: CallbackAuditEvent["outcome"] = "error", recognized: { product: Product } | undefined, stage: CallbackAuditStage = "state_validation", reason = "callback_failed", diagnostic: ProviderDiagnostic | undefined;
     try {
       if (!input.state || !/^[A-Za-z0-9_-]{43}$/.test(input.state)) throw new BrokerError("state_rejected");
-      const state = await this.vault.transaction((db) => { const index = db.states.findIndex((s) => s.hash === hash(input.state!)); if (index < 0) throw new BrokerError("state_rejected"); return db.states.splice(index, 1)[0]; });
+      const state = await this.vault.transaction((db) => {
+        const index = db.states.findIndex((s) => s.hash === hash(input.state!));
+        if (index < 0) throw new BrokerError("state_rejected");
+        const candidate = db.states[index];
+        recognized = candidate;
+        // Bind the callback route and Google issuer before consuming state. A request
+        // arriving on another provider path must not burn a still-valid attempt.
+        const candidateConfig = this.registry.get(candidate.product);
+        if (candidate.provider === "youtube" && (!candidateConfig || input.callbackPath !== new URL(candidateConfig.callbackUrl).pathname)) throw new BrokerError("callback_rejected");
+        if (candidate.provider === "youtube" && input.code && input.issuer !== "https://accounts.google.com") throw new BrokerError("callback_rejected");
+        return db.states.splice(index, 1)[0];
+      });
       recognized = state;
       stage = "callback_validation";
       const config = this.registry.get(state.product);
@@ -73,19 +92,23 @@ export class StudentBroker {
       else {
         if (!input.code || input.error || input.code.length > 4096) throw new BrokerError("callback_rejected");
         stage = "token_exchange";
-        const result = await this.provider.exchange(config, input.code);
+        const result = state.codeVerifier ? await this.provider.exchange(config, input.code, state.codeVerifier) : await this.provider.exchange(config, input.code);
         stage = "grant_validation";
         if (!result.accessToken || !result.providerUserId || !result.assets.length || result.assets.some((asset) => asset.product !== state.product || !asset.providerId || !asset.capabilities.includes("account"))) throw new BrokerError("no_authorized_assets");
         const id = randomUUID(), updatedAt = new Date(this.now()).toISOString();
         const binding = { tenantId: state.tenantId, sub: state.sub, id, provider: config.provider };
-        const grant: Grant = { ...binding, configKey: config.key, fingerprint: state.fingerprint, providerUserId: result.providerUserId, clientBusinessId: result.clientBusinessId, scopes: result.scopes, expiresAt: result.expiresAt, status: "active", credential: this.vault.seal(binding, { accessToken: result.accessToken, assetTokens: result.assetTokens }), createdAt: updatedAt };
+        const grant: Grant = { ...binding, configKey: config.key, fingerprint: state.fingerprint, providerUserId: result.providerUserId, clientBusinessId: result.clientBusinessId, scopes: result.scopes, expiresAt: result.expiresAt, status: "active", credential: this.vault.seal(binding, { accessToken: result.accessToken, assetTokens: result.assetTokens, ...(result.refreshToken ? { refreshToken: result.refreshToken } : {}) }), createdAt: updatedAt };
         stage = "grant_persist";
         await this.vault.transaction((db) => {
           if ((db.generations[generationKey(state, state.product)] ?? 0) !== state.generation) throw new BrokerError("oauth_cancelled");
           db.grants.push(grant);
           const confirmed = new Set(result.assets.map((asset) => asset.providerId)); const retiredIds = new Set<string>();
-          // Direct Instagram Login grants one account at a time; a separate login must retain the user's other accounts.
-          for (const previous of db.connections.filter((c) => config.provider !== "instagram_login" && sameSubject(c, state) && c.product === state.product && !confirmed.has(c.providerId))) {
+          // Direct Instagram Login is single-account. Google `mine=true` may be the selected Brand channel rather than a full roster; neither flow may retire sibling resources on reconnect.
+          for (const previous of db.connections.filter((c) => {
+            if (!sameSubject(c, state) || c.product !== state.product || confirmed.has(c.providerId)) return false;
+            if (config.provider === "instagram_login" || config.provider === "youtube") return false;
+            return true;
+          })) {
             previous.status = "disconnected"; previous.capabilities = []; previous.reason = "consent_asset_removed"; previous.updatedAt = updatedAt; retiredIds.add(previous.id);
           }
           db.events = db.events.filter((event) => !retiredIds.has(event.connectionId));
@@ -108,11 +131,13 @@ export class StudentBroker {
         if (PRODUCTS.includes(product)) this.audit({ event: "student_oauth_callback", stage: details?.stage ?? stage, product, outcome, reason: AUDIT_REASONS.has(reason) ? reason : "callback_failed", hasCode: typeof input.code === "string" && input.code.length > 0, hasProviderError: typeof input.error === "string" && input.error.length > 0, ...(details?.status !== undefined ? { status: details.status } : {}), ...(details?.metaCode !== undefined ? { metaCode: details.metaCode } : {}), ...(details?.metaSubcode !== undefined ? { metaSubcode: details.metaSubcode } : {}) });
       } catch { /* Audit output must not affect callback behavior. */ }
     }
-    return `${this.returnTarget}?meta=${outcome}`;
+    const youtubeFlow = recognized?.product === "youtube" || input.callbackPath === "/youtube/oauth/callback";
+    const youtubeResult = outcome === "connected" ? "connected" : outcome === "cancelled" ? "cancelled" : reason === "no_authorized_assets" ? "no_channel" : reason === "youtube_refresh_token_missing" ? "refresh_required" : reason === "permission_unavailable" ? "permission" : reason === "grant_verification_failed" ? "identity_error" : "error";
+    return `${this.returnTarget}?${youtubeFlow ? "youtube" : "meta"}=${youtubeFlow ? youtubeResult : outcome}`;
   }
-  async disconnect(subject: Subject, connectionId: string) {
+  async disconnect(subject: Subject, connectionId: string, allowedProducts: readonly Product[] = META_PRODUCTS) {
     return this.vault.transaction((db) => {
-      const c = db.connections.find((candidate) => candidate.id === connectionId && sameSubject(candidate, subject)); if (!c) throw new BrokerError("connection_not_found");
+      const c = db.connections.find((candidate) => candidate.id === connectionId && sameSubject(candidate, subject) && allowedProducts.includes(candidate.product)); if (!c) throw new BrokerError("connection_not_found");
       c.status = "disconnected"; c.capabilities = []; c.updatedAt = new Date(this.now()).toISOString(); c.reason = "user_disconnected"; db.events = db.events.filter((e) => e.connectionId !== c.id);
       const key = generationKey(subject, c.product); db.generations[key] = (db.generations[key] ?? 0) + 1;
       db.states = db.states.filter((s) => !sameSubject(s, subject) || s.product !== c.product);
@@ -121,8 +146,8 @@ export class StudentBroker {
       return { connection: safeConnection(c) };
     }, { allowUncertain: true });
   }
-  async read(subject: Subject, input: ReadInput) {
-    const db = await this.vault.snapshot(); const c = db.connections.find((candidate) => candidate.id === input.connectionId && sameSubject(candidate, subject)); if (!c) throw new BrokerError("connection_not_found");
+  async read(subject: Subject, input: ReadInput, allowedProducts: readonly Product[] = META_PRODUCTS) {
+    const db = await this.vault.snapshot(); const c = db.connections.find((candidate) => candidate.id === input.connectionId && sameSubject(candidate, subject) && allowedProducts.includes(candidate.product)); if (!c) throw new BrokerError("connection_not_found");
     const grant = db.grants.find((g) => g.id === c.grantId && sameSubject(g, subject)); const config = this.registry.get(c.product);
     if (c.status !== "connected" || !grant || grant.status !== "active" || !config || this.registry.status(c.product, subject) !== "ready" || configFingerprint(config) !== grant.fingerprint || (grant.expiresAt !== undefined && grant.expiresAt <= this.now() / 1000)) throw new BrokerError("connection_unavailable");
     if (!c.capabilities.includes(input.operation)) throw new BrokerError("operation_unavailable");
@@ -134,6 +159,6 @@ export class StudentBroker {
     // A concurrent disconnect invalidates an already-running read before disclosure.
     const current = (await this.vault.snapshot()).connections.find((candidate) => candidate.id === c.id);
     if (!current || current.status !== "connected" || current.grantId !== c.grantId) throw new BrokerError("connection_unavailable");
-    return { ...result, source: c.product === "whatsapp" && input.operation === "inbox" ? "meta_webhook" : "meta_graph_api", updatedAt: new Date(this.now()).toISOString() };
+    return { ...result, source: c.product === "whatsapp" && input.operation === "inbox" ? "meta_webhook" : c.product === "youtube" ? "google_youtube_data_api" : "meta_graph_api", updatedAt: new Date(this.now()).toISOString() };
   }
 }

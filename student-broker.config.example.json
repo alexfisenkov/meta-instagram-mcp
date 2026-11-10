@@ -6,6 +6,7 @@
     { "product": "messenger", "key": "messenger", "provider": "facebook_business", "appIdEnv": "BROKER_META_APP_ID", "appSecretEnv": "BROKER_META_APP_SECRET", "configId": "0", "apiVersion": "v27.0", "admission": "disabled", "testSubjects": [], "webhookVerifyTokenEnv": "BROKER_MESSENGER_WEBHOOK_VERIFY_TOKEN" },
     { "product": "threads", "key": "threads", "provider": "threads", "appIdEnv": "BROKER_THREADS_APP_ID", "appSecretEnv": "BROKER_THREADS_APP_SECRET", "apiVersion": "v1.0", "admission": "disabled", "testSubjects": [] },
     { "product": "ads", "key": "ads", "provider": "facebook_business", "appIdEnv": "BROKER_META_APP_ID", "appSecretEnv": "BROKER_META_APP_SECRET", "configId": "0", "apiVersion": "v27.0", "admission": "disabled", "testSubjects": [] },
-    { "product": "whatsapp", "key": "whatsapp", "provider": "facebook_business", "appIdEnv": "BROKER_META_APP_ID", "appSecretEnv": "BROKER_META_APP_SECRET", "configId": "0", "apiVersion": "v27.0", "admission": "disabled", "testSubjects": [], "webhookVerifyTokenEnv": "BROKER_WHATSAPP_WEBHOOK_VERIFY_TOKEN" }
+    { "product": "whatsapp", "key": "whatsapp", "provider": "facebook_business", "appIdEnv": "BROKER_META_APP_ID", "appSecretEnv": "BROKER_META_APP_SECRET", "configId": "0", "apiVersion": "v27.0", "admission": "disabled", "testSubjects": [], "webhookVerifyTokenEnv": "BROKER_WHATSAPP_WEBHOOK_VERIFY_TOKEN" },
+    { "product": "youtube", "key": "youtube", "provider": "youtube", "googleClientIdEnv": "YOUTUBE_OAUTH_CLIENT_ID", "googleClientSecretEnv": "YOUTUBE_OAUTH_CLIENT_SECRET", "callbackUrlEnv": "YOUTUBE_OAUTH_REDIRECT_URL", "apiVersion": "v3", "admission": "disabled", "testSubjects": [] }
   ]
 }

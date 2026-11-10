@@ -5,10 +5,10 @@ import { StudentBroker } from "./broker.js";
 import { createStudentMcp } from "./mcp.js";
 import { StudentRegistry } from "./registry.js";
 import { StudentVault } from "./vault.js";
-import { BrokerError } from "./types.js";
+import { BrokerError, STUDENT_BROKER_CAPABILITIES } from "./types.js";
 import { receiveStudentWebhook } from "./webhooks.js";
 import { renderLegal, validateLegal, type LegalConfig } from "./legal.js";
-interface Options { broker: StudentBroker; registry: StudentRegistry; vault: StudentVault; auth: SubjectAuthConfig; port: number; allowedHosts?: string[]; legal?: LegalConfig }
+interface Options { broker: StudentBroker; youtubeBroker?: StudentBroker; registry: StudentRegistry; vault: StudentVault; auth: SubjectAuthConfig; port: number; allowedHosts?: string[]; legal?: LegalConfig }
 export async function startStudentServer(options: Options): Promise<{ url: string; close(): Promise<void> }> {
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535 || options.auth.serviceToken.length < 32 || options.auth.subjectKey.length < 32) throw new BrokerError("invalid_server_config");
   if (options.legal) validateLegal(options.legal);
@@ -30,10 +30,12 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
       response.statusCode = 200; response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(renderLegal(options.legal, parsed.pathname === "/data-deletion")); return;
     }
     if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok" });
-    if (parsed.pathname === "/student/oauth/callback") {
+    if (parsed.pathname === "/capabilities") return json(response, request.method === "GET" ? 200 : 405, request.method === "GET" ? { capabilities: STUDENT_BROKER_CAPABILITIES } : { error: "method_not_allowed" });
+    if (parsed.pathname === "/student/oauth/callback" || parsed.pathname === "/youtube/oauth/callback") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
-      if (["state", "code", "error"].some((key) => parsed.searchParams.getAll(key).length > 1)) throw new BrokerError("invalid_callback");
-      const target = await options.broker.callback({ state: parsed.searchParams.get("state") ?? undefined, code: parsed.searchParams.get("code") ?? undefined, error: parsed.searchParams.get("error") ?? undefined });
+      if (["state", "code", "error", "iss"].some((key) => parsed.searchParams.getAll(key).length > 1)) throw new BrokerError("invalid_callback");
+      const callbackBroker = parsed.pathname === "/youtube/oauth/callback" ? options.youtubeBroker ?? options.broker : options.broker;
+      const target = await callbackBroker.callback({ state: parsed.searchParams.get("state") ?? undefined, code: parsed.searchParams.get("code") ?? undefined, error: parsed.searchParams.get("error") ?? undefined, issuer: parsed.searchParams.get("iss") ?? undefined, callbackPath: parsed.pathname });
       response.statusCode = 303; response.setHeader("Location", target); response.end(); return;
     }
     if (parsed.pathname.startsWith("/student/webhooks/")) {
@@ -53,7 +55,7 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
     if (request.method !== "POST") return json(response, 405, { error: "method_not_allowed" });
     if (parsed.search) throw new BrokerError("query_not_allowed");
     const data = JSON.parse((await body(request, 65_536)).toString("utf8"));
-    const mcp = createStudentMcp(options.broker, subject), transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    const mcp = createStudentMcp(options.broker, subject, options.youtubeBroker ?? options.broker), transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     try { await mcp.connect(transport); await transport.handleRequest(request, response, data); }
     finally { await mcp.close().catch(() => undefined); await transport.close().catch(() => undefined); }
   }

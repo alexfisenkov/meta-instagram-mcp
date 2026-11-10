@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { join, resolve } from "node:path";
+import { lstat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { assertPrivateFile } from "../private-fs.js";
 import { loadStudentVaultConfig } from "./config.js";
@@ -10,9 +11,13 @@ import { StudentVault } from "./vault.js";
 export async function purgeStudentSubject(directory: string, key: Buffer, subject: Subject) {
   if (subject.tenantId !== "masterskaya" || !/^[A-Za-z0-9_-]{1,128}$/.test(subject.sub)) throw new BrokerError("invalid_purge_subject");
   await assertPrivateFile(join(directory, "vault.json")); // A wrong path must not create a pretend successful empty vault.
-  const vault = await StudentVault.open(directory, key);
-  try {
-    return await vault.transaction((db) => {
+  let youtubeDirectory: string | undefined;
+  try { const info = await lstat(join(directory, "youtube")); if (!info.isDirectory() || info.isSymbolicLink()) throw new BrokerError("vault_integrity_failed"); youtubeDirectory = join(directory, "youtube"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (youtubeDirectory) await assertPrivateFile(join(youtubeDirectory, "vault.json"));
+  const purgeVault = async (vaultDirectory: string) => {
+    const vault = await StudentVault.open(vaultDirectory, key);
+    try { return await vault.transaction((db) => {
       const ownedConnectionIds = new Set(db.connections.filter((connection) => sameSubject(connection, subject)).map((connection) => connection.id));
       const counts = { connections: ownedConnectionIds.size, grants: db.grants.filter((grant) => sameSubject(grant, subject)).length, events: db.events.filter((event) => ownedConnectionIds.has(event.connectionId)).length, states: db.states.filter((state) => sameSubject(state, subject)).length, generations: 0 };
       db.connections = db.connections.filter((connection) => !sameSubject(connection, subject));
@@ -25,7 +30,14 @@ export async function purgeStudentSubject(directory: string, key: Buffer, subjec
       }));
       return counts;
     }, { allowUncertain: true });
-  } finally { await vault.close(); }
+    } finally { await vault.close(); }
+  };
+  const totals = await purgeVault(directory);
+  if (youtubeDirectory) {
+    const youtube = await purgeVault(youtubeDirectory);
+    for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += youtube[key];
+  }
+  return totals;
 }
 
 async function run(): Promise<void> {

@@ -4,7 +4,74 @@ import { authorizationUrl, StudentRegistry } from "../src/student/registry.js";
 import { BrokerError, type Connection, type ProductConfig } from "../src/student/types.js";
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
 const instagramLoginConfig: ProductConfig = { ...config, provider: "instagram_login", configId: undefined };
+const youtubeConfig = { ...config, product: "youtube", key: "youtube", provider: "youtube", appId: "123-client.apps.googleusercontent.com", appSecret: "google-app-secret", apiVersion: "v3", callbackUrl: "https://broker.example/youtube/oauth/callback", configId: undefined } as any;
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
+it("registers YouTube with separate Google OAuth credentials and builds read-only Google authorization", () => {
+  expect(new StudentRegistry([youtubeConfig]).get("youtube")?.provider).toBe("youtube");
+  const auth = new URL(authorizationUrl(youtubeConfig, "google-state", "A".repeat(43)));
+  expect(auth.origin + auth.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+  expect(auth.searchParams.get("response_type")).toBe("code");
+  expect(auth.searchParams.get("redirect_uri")).toBe(youtubeConfig.callbackUrl);
+  expect(auth.searchParams.get("state")).toBe("google-state");
+  expect(auth.searchParams.get("access_type")).toBe("offline");
+  expect(auth.searchParams.get("scope")?.split(" ").sort()).toEqual(["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"].sort());
+  expect(auth.searchParams.get("scope")).not.toContain("youtube.upload");
+  expect(auth.searchParams.has("client_secret")).toBe(false);
+});
+it("exchanges a state-bound Google code, verifies the OIDC subject and discovers only owned YouTube channels", async () => {
+  const calls: Array<{ url: URL; init?: RequestInit }> = [];
+  const provider = new MetaStudentProvider(async (url, init) => {
+    calls.push({ url, init });
+    if (url.origin === "https://oauth2.googleapis.com") return { access_token: "google-access", refresh_token: "google-refresh", token_type: "Bearer", expires_in: 3600, scope: "openid profile https://www.googleapis.com/auth/youtube.readonly" };
+    if (url.origin === "https://openidconnect.googleapis.com") return { sub: "google-subject" };
+    if (url.origin === "https://www.googleapis.com" && url.pathname === "/youtube/v3/channels") return { items: [{ id: "UC-own", snippet: { title: "My channel", customUrl: "@my-channel" } }] };
+    throw new Error("unexpected Google request");
+  });
+  const grant = await provider.exchange(youtubeConfig, "google-code", "V".repeat(43));
+  expect(grant).toMatchObject({ accessToken: "google-access", refreshToken: "google-refresh", providerUserId: "google-subject", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], assets: [{ product: "youtube", providerId: "UC-own", label: "My channel", capabilities: ["account"] }] });
+  expect(calls[0].url.href).toBe("https://oauth2.googleapis.com/token");
+  const exchangeBody = calls[0].init?.body as URLSearchParams;
+  expect(exchangeBody.get("grant_type")).toBe("authorization_code");
+  expect(exchangeBody.get("code_verifier")).toBe("V".repeat(43));
+  expect(exchangeBody.get("redirect_uri")).toBe(youtubeConfig.callbackUrl);
+  expect(calls[1].url.origin + calls[1].url.pathname).toBe("https://openidconnect.googleapis.com/v1/userinfo");
+  expect(calls[2].url.searchParams.get("mine")).toBe("true");
+});
+it("refuses YouTube consent without the exact read-only YouTube scope", async () => {
+  const calls: URL[] = [];
+  const provider = new MetaStudentProvider(async (url) => { calls.push(url); return { access_token: "google-access", refresh_token: "google-refresh", token_type: "Bearer", expires_in: 3600, scope: "openid profile" }; });
+  await expect(provider.exchange(youtubeConfig, "google-code", "V".repeat(43))).rejects.toThrow("permission_unavailable");
+  expect(calls).toHaveLength(1);
+});
+it("distinguishes a missing Google refresh token so the previous grant is not replaced", async () => {
+  const provider = new MetaStudentProvider(async () => ({ access_token: "google-access-fixture", token_type: "Bearer", expires_in: 3600, scope: "openid profile https://www.googleapis.com/auth/youtube.readonly" }));
+  await expect(provider.exchange(youtubeConfig, "google-code", "V".repeat(43))).rejects.toMatchObject({ code: "youtube_refresh_token_missing" });
+});
+it("reads only the selected owned YouTube channel account", async () => {
+  const calls: URL[] = [];
+  const provider = new MetaStudentProvider(async (url) => { calls.push(url); return { items: [{ id: "UC-own", snippet: { title: "My channel", customUrl: "@my-channel" }, statistics: { viewCount: "500", subscriberCount: "0", hiddenSubscriberCount: false, videoCount: "12" } }] }; });
+  const result = await provider.read(youtubeConfig, { ...connection, product: "youtube", providerId: "UC-own", capabilities: ["account"] }, { accessToken: "google-access", refreshToken: "google-refresh", assetTokens: {} }, { connectionId: "connection", operation: "account" });
+  expect(calls).toHaveLength(1);
+  expect(calls[0].origin + calls[0].pathname).toBe("https://www.googleapis.com/youtube/v3/channels");
+  expect(calls[0].searchParams.get("mine")).toBe("true");
+  expect(calls[0].searchParams.has("id")).toBe(false);
+  expect(result.data).toEqual({ id: "UC-own", title: "My channel", customUrl: "@my-channel", viewCount: "500", subscriberCount: "0", subscriberCountHidden: false, videoCount: "12" });
+});
+it("refreshes a YouTube grant only with its own Google refresh token and verifies the same subject and scope", async () => {
+  const calls: Array<{ url: URL; init?: RequestInit }> = [];
+  const provider = new MetaStudentProvider(async (url, init) => {
+    calls.push({ url, init });
+    if (url.origin === "https://oauth2.googleapis.com") return { access_token: "new-access", token_type: "Bearer", expires_in: 3600 };
+    if (url.origin === "https://openidconnect.googleapis.com") return { sub: "google-subject" };
+    return { items: [{ id: "UC-own", snippet: { title: "My channel" } }] };
+  });
+  const refreshed = await provider.refresh!(youtubeConfig, { accessToken: "old-access", refreshToken: "google-refresh", assetTokens: {} }, "google-subject", ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"]);
+  expect(refreshed).toMatchObject({ accessToken: "new-access", refreshToken: "google-refresh", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"] });
+  expect((calls[0].init?.body as URLSearchParams).get("grant_type")).toBe("refresh_token");
+  expect((calls[0].init?.body as URLSearchParams).get("refresh_token")).toBe("google-refresh");
+  expect(calls[1].url.pathname).toBe("/v1/userinfo");
+  expect(calls[2].url.searchParams.get("mine")).toBe("true");
+});
 it.each(["wrapped", "flat"])("exchanges an Instagram Login grant using explicit permissions and identity (%s)", async (shape) => {
   const calls: Array<{ url: URL; init?: RequestInit }> = [];
   const provider = new MetaStudentProvider(async (url, init) => {
@@ -92,6 +159,31 @@ it("allows only the fixed official Instagram Login token and Graph API hosts", a
     await expect(requestMeta(new URL("https://graph.instagram.com/v27.0/me"))).resolves.toEqual({ ok: true });
     await expect(requestMeta(new URL("https://instagram.com/oauth/authorize"))).rejects.toThrow("provider_host_rejected");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally { fetchMock.mockRestore(); }
+});
+it("allows only fixed Google token, userinfo, and YouTube API hosts; authorization stays browser-only", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  try {
+    await expect(requestMeta(new URL("https://oauth2.googleapis.com/token"), { method: "POST" })).resolves.toEqual({ ok: true });
+    await expect(requestMeta(new URL("https://openidconnect.googleapis.com/v1/userinfo"))).resolves.toEqual({ ok: true });
+    await expect(requestMeta(new URL("https://www.googleapis.com/youtube/v3/channels?mine=true"))).resolves.toEqual({ ok: true });
+    await expect(requestMeta(new URL("https://accounts.google.com/o/oauth2/v2/auth"))).rejects.toThrow("provider_host_rejected");
+    await expect(requestMeta(new URL("https://youtube.googleapis.com/youtube/v3/channels"))).rejects.toThrow("provider_host_rejected");
+    await expect(requestMeta(new URL("https://www.googleapis.com/drive/v3/files"))).rejects.toThrow("provider_host_rejected");
+    await expect(requestMeta(new URL("https://oauth2.googleapis.com/tokeninfo"))).rejects.toThrow("provider_host_rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  } finally { fetchMock.mockRestore(); }
+});
+it("maps Google invalid_grant to reauth_required without retaining the response description", async () => {
+  const marker = "PRIVATE-GOOGLE-ERROR-DESCRIPTION";
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: "invalid_grant", error_description: marker }), { status: 400 }));
+  try {
+    let thrown: unknown;
+    try { await requestMeta(new URL("https://oauth2.googleapis.com/token"), { method: "POST", body: new URLSearchParams({ code: "private-code" }) }); } catch (error) { thrown = error; }
+    expect(thrown).toBeInstanceOf(BrokerError);
+    expect(thrown).toMatchObject({ code: "reauth_required", diagnostic: { stage: "token_exchange", status: 400 } });
+    expect(JSON.stringify(thrown)).not.toContain(marker);
+    expect(fetchMock).toHaveBeenCalledOnce();
   } finally { fetchMock.mockRestore(); }
 });
 it("Unified URL pins config_id and exchanges once directly for BISU, discovers all assigned IGs", async () => {

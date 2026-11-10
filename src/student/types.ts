@@ -1,13 +1,15 @@
-export const PRODUCTS = ["instagram", "facebook", "messenger", "threads", "ads", "whatsapp"] as const;
+export const META_PRODUCTS = ["instagram", "facebook", "messenger", "threads", "ads", "whatsapp"] as const;
+export const PRODUCTS = [...META_PRODUCTS, "youtube"] as const;
+export const STUDENT_BROKER_CAPABILITIES = ["youtube_oauth_readonly_v1"] as const;
 export type Product = typeof PRODUCTS[number];
-export type Provider = "instagram_unified" | "instagram_login" | "facebook_business" | "threads";
+export type Provider = "instagram_unified" | "instagram_login" | "facebook_business" | "threads" | "youtube";
 export type Operation = "account" | "posts" | "metrics" | "comments" | "inbox";
 export interface Subject { tenantId: string; sub: string }
 export interface Sealed { iv: string; tag: string; ciphertext: string }
 export interface Grant extends Subject { id: string; provider: Provider; configKey: string; fingerprint: string; clientBusinessId?: string; providerUserId: string; scopes: string[]; expiresAt?: number; refreshedAt?: number; status: "active" | "revoked" | "reauth_required"; credential: Sealed; createdAt: string }
-export interface Credential { accessToken: string; assetTokens: Record<string, string> }
+export interface Credential { accessToken: string; assetTokens: Record<string, string>; refreshToken?: string }
 export interface Connection extends Subject { id: string; grantId: string; product: Product; providerId: string; label: string; capabilities: Operation[]; status: "connected" | "reauth_required" | "disconnected" | "error"; updatedAt: string; reason?: string; parentId?: string }
-export interface OAuthState extends Subject { hash: string; product: Product; provider: Provider; configKey: string; fingerprint: string; expiresAt: number; returnTarget: string; generation: number }
+export interface OAuthState extends Subject { hash: string; product: Product; provider: Provider; configKey: string; fingerprint: string; expiresAt: number; returnTarget: string; generation: number; codeVerifier?: string }
 export interface StoredEvent { connectionId: string; eventId: string; receivedAt: string; data: Record<string, unknown> }
 export interface Database { version: 1; revision: number; grants: Grant[]; connections: Connection[]; states: OAuthState[]; events: StoredEvent[]; generations: Record<string, number> }
 export interface ProductConfig { product: Product; key: string; provider: Provider; appId: string; appSecret: string; configId?: string; apiVersion: string; callbackUrl: string; admission: "disabled" | "test" | "live"; testSubjects: string[]; webhookVerifyToken?: string }

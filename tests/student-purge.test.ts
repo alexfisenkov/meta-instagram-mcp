@@ -28,6 +28,19 @@ it("offline purge refuses the live writer and deletes only the exact subject's e
   expect(await purgeStudentSubject(dir, key, subject)).toEqual({ connections: 1, grants: 1, events: 1, states: 1, generations: 1 });
   const remaining = await StudentVault.open(dir, key); try { const db = await remaining.snapshot(); expect(db.connections.map((c) => c.sub)).toEqual(["student-b"]); expect(db.grants.map((g) => g.sub)).toEqual(["student-b"]); expect(db.events.map((e) => e.connectionId)).toEqual(["connection-student-b"]); expect(db.states.map((s) => s.sub)).toEqual(["student-b"]); expect(Object.keys(db.generations)).toEqual(['["masterskaya","student-b","threads"]']); expect(JSON.stringify(db)).not.toContain("student-a"); } finally { await remaining.close(); }
 });
+it("offline purge also removes the subject from the rollback-isolated YouTube vault", async () => {
+  const { dir, key, vault } = await fixture(), youtubeVault = await StudentVault.open(join(dir, "youtube"), key); cleanup.push(() => youtubeVault.close());
+  await youtubeVault.transaction((db) => {
+    const binding = { tenantId: "masterskaya", sub: "student-a", id: "youtube-grant-a", provider: "youtube" as const };
+    db.grants.push({ ...binding, providerUserId: "oidc-sub-fixture", configKey: "youtube", fingerprint: "youtube-fingerprint", scopes: ["youtube.readonly"], status: "active", createdAt: "now", credential: youtubeVault.seal(binding, { accessToken: "private-youtube-access", refreshToken: "private-youtube-refresh", assetTokens: {} }) });
+    db.connections.push({ tenantId: "masterskaya", sub: "student-a", id: "youtube-connection-a", grantId: binding.id, product: "youtube", providerId: "UC-private-fixture", label: "Private YouTube channel", capabilities: ["account"], status: "connected", updatedAt: "now" });
+    db.generations[JSON.stringify(["masterskaya", "student-a", "youtube"])] = 1;
+  });
+  await vault.close(); await youtubeVault.close();
+  expect(await purgeStudentSubject(dir, key, { tenantId: "masterskaya", sub: "student-a" })).toEqual({ connections: 2, grants: 2, events: 1, states: 1, generations: 2 });
+  const remainingYouTube = await StudentVault.open(join(dir, "youtube"), key);
+  try { expect(await remainingYouTube.snapshot()).toMatchObject({ connections: [], grants: [], generations: {} }); } finally { await remainingYouTube.close(); }
+});
 it("the owner CLI requires explicit confirmation, honors the live lock and emits only counts", async () => {
   const { dir, key, vault } = await fixture(), command = fileURLToPath(new URL("../src/student/purge-subject.ts", import.meta.url));
   const options = { env: { ...process.env, META_BROKER_STATE_DIR: dir, META_BROKER_VAULT_KEY: key.toString("base64") }, timeout: 5000 };

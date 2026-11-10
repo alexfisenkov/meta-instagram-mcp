@@ -9,6 +9,7 @@ import { startStudentServer } from "../src/student/http.js";
 import { StudentBroker } from "../src/student/broker.js";
 import { StudentRegistry } from "../src/student/registry.js";
 import { StudentVault } from "../src/student/vault.js";
+import type { ProductConfig } from "../src/student/types.js";
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 it("serves only the restricted MCP catalog over the real SDK and rejects subject/token overrides", async () => {
@@ -24,12 +25,39 @@ it("serves only the restricted MCP catalog over the real SDK and rejects subject
   expect(direct.status).toBe(200); const directBody = await direct.json() as { result: { content: Array<{ text: string }> } }; expect(directBody.result.content[0].text).toBe('{"connections":[]}');
   const client = new Client({ name: "test", version: "1" }); cleanup.push(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(`${server.url}/student/mcp`), { requestInit: { headers: { Authorization: `Bearer ${serviceToken}`, "X-Meta-Subject": token } } }));
-  expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["meta_connections_begin", "meta_connections_catalog", "meta_connections_disconnect", "meta_connections_list", "meta_connections_read"]);
+  expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["meta_connections_begin", "meta_connections_catalog", "meta_connections_disconnect", "meta_connections_list", "meta_connections_read", "youtube_connections_begin", "youtube_connections_catalog", "youtube_connections_disconnect", "youtube_connections_list", "youtube_connections_read"]);
   const catalog = await client.callTool({ name: "meta_connections_catalog", arguments: {} }); expect(JSON.stringify(catalog)).toContain("not_configured");
+  const metaCatalog = JSON.parse((catalog.content as Array<{ text: string }>)[0].text) as { products: Array<{ product: string }> };
+  expect(metaCatalog.products).toHaveLength(6); expect(metaCatalog.products.some((product) => product.product === "youtube")).toBe(false);
+  const youtubeCatalog = await client.callTool({ name: "youtube_connections_catalog", arguments: {} }); expect(JSON.stringify(youtubeCatalog)).toContain("not_configured");
+  expect(JSON.parse((youtubeCatalog.content as Array<{ text: string }>)[0].text)).toMatchObject({ products: [{ product: "youtube" }] });
+  expect((await client.callTool({ name: "meta_connections_begin", arguments: { product: "youtube" } })).isError).toBe(true);
   const forged = await client.callTool({ name: "meta_connections_catalog", arguments: { subject: "other", accessToken: "owner-token" } }); expect(forged.isError).toBe(true);
   expect((await fetch(`${server.url}/student/mcp`, { method: "POST", headers: { Authorization: `Bearer ${serviceToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).status).toBe(401);
   expect((await fetch(`${server.url}/mcp`, { method: "POST" })).status).toBe(404);
   expect((await fetch(`${server.url}/privacy`)).status).toBe(503);
+});
+it("routes the exact Google redirect path and rejects Meta-path callback replay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-http-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const key = randomBytes(32), vault = await StudentVault.open(dir, key), youtubeVault = await StudentVault.open(join(dir, "youtube"), key); cleanup.push(() => vault.close()); cleanup.push(() => youtubeVault.close());
+  const config: ProductConfig = { product: "youtube", key: "youtube", provider: "youtube", appId: "123-client.apps.googleusercontent.com", appSecret: "google-client-secret-fixture", apiVersion: "v3", callbackUrl: "https://mcp.example/youtube/oauth/callback", admission: "live", testSubjects: [] };
+  let exchanges = 0;
+  const registry = new StudentRegistry([config]);
+  const provider = { exchange: async () => { exchanges++; return { accessToken: "google-access-fixture", refreshToken: "google-refresh-fixture", assetTokens: {}, providerUserId: "google-subject-fixture", scopes: ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"], assets: [{ product: "youtube" as const, providerId: "UC-owned-fixture", label: "Owned channel", capabilities: ["account" as const] }] }; }, read: async () => ({ data: {}, coverage: "partial" as const, limitations: [] }) };
+  const broker = new StudentBroker(vault, registry, provider, "https://platform.example"), youtubeBroker = new StudentBroker(youtubeVault, registry, provider, "https://platform.example");
+  const server = await startStudentServer({ broker, youtubeBroker, vault, registry, auth: { serviceToken: "s".repeat(40), subjectKey: randomBytes(32) }, port: 0 }); cleanup.push(() => server.close());
+  const start = await youtubeBroker.begin({ tenantId: "masterskaya", sub: "owner" }, "youtube"), state = new URL(start.authorizationUrl).searchParams.get("state")!;
+  const wrongRoute = await fetch(`${server.url}/student/oauth/callback?state=${state}&code=code&iss=https%3A%2F%2Faccounts.google.com`, { redirect: "manual" });
+  expect(wrongRoute.status).toBe(303);
+  expect(wrongRoute.headers.get("location")).toBe("https://platform.example/social?meta=error");
+  expect(exchanges).toBe(0);
+  const next = await youtubeBroker.begin({ tenantId: "masterskaya", sub: "owner" }, "youtube"), nextState = new URL(next.authorizationUrl).searchParams.get("state")!;
+  const correctRoute = await fetch(`${server.url}/youtube/oauth/callback?state=${nextState}&code=code&iss=https%3A%2F%2Faccounts.google.com`, { redirect: "manual" });
+  expect(correctRoute.status).toBe(303);
+  expect(correctRoute.headers.get("location")).toBe("https://platform.example/social?youtube=connected");
+  expect(exchanges).toBe(1);
+  expect((await vault.snapshot()).grants).toEqual([]);
+  expect((await youtubeVault.snapshot()).grants).toHaveLength(1);
 });
 it("serves escaped Russian legal pages with secure headers only when operator/contact are configured", async () => {
   const dir = await mkdtemp(join(tmpdir(), "student-legal-")); cleanup.push(() => rm(dir, { recursive: true, force: true })); const vault = await StudentVault.open(dir, randomBytes(32)); cleanup.push(() => vault.close());
@@ -39,4 +67,14 @@ it("serves escaped Russian legal pages with secure headers only when operator/co
     const response = await fetch(`${server.url}${route}`), html = await response.text(); expect(response.status).toBe(200); expect(response.headers.get("content-security-policy")).toContain("default-src 'none'"); expect(response.headers.get("x-content-type-options")).toBe("nosniff"); expect(html).toContain("&lt;script&gt;"); expect(html).not.toContain("<script>"); expect(html).toContain('href="mailto:privacy@example.com"'); expect(html).not.toContain("<form");
   }
   expect((await fetch(`${server.url}/data-deletion`, { method: "POST", body: "private" })).status).toBe(405);
+});
+it("exposes a stable non-secret runtime capability marker for Google provisioning", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "youtube-capabilities-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const vault = await StudentVault.open(dir, randomBytes(32)); cleanup.push(() => vault.close());
+  const registry = new StudentRegistry([]), broker = new StudentBroker(vault, registry, { exchange: async () => { throw new Error(); }, read: async () => { throw new Error(); } }, "https://platform.example");
+  const server = await startStudentServer({ broker, vault, registry, auth: { serviceToken: "s".repeat(40), subjectKey: randomBytes(32) }, port: 0 }); cleanup.push(() => server.close());
+  const response = await fetch(`${server.url}/capabilities`), body = await response.json() as { capabilities: string[] };
+  expect(response.status).toBe(200);
+  expect(body.capabilities).toContain("youtube_oauth_readonly_v1");
+  expect(JSON.stringify(body)).not.toMatch(/token|secret|client_id|subject/i);
 });

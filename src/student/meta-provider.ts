@@ -1,13 +1,14 @@
 import { BrokerError, type CallbackAuditStage, type Connection, type Credential, type Operation, type ProductConfig, type ProviderDiagnostic, type ReadInput } from "./types.js";
 import type { DiscoveredAsset, ExchangedGrant, ProviderAdapter, ProviderRead } from "./provider.js";
+import { YouTubeStudentProvider } from "./youtube-provider.js";
 
 type Json = Record<string, any>;
 export type MetaRequest = (url: URL, init?: RequestInit) => Promise<Json>;
 function endpointStage(path: string): CallbackAuditStage {
-  if (/\/(?:oauth\/)?access_token$/.test(path)) return "token_exchange";
+  if (/\/(?:oauth\/)?access_token$/.test(path) || path === "/token") return "token_exchange";
   if (path.endsWith("/debug_token")) return "token_inspection";
-  if (/\/me$/.test(path) || /^\/v[0-9.]+\/[A-Za-z0-9_-]+$/.test(path)) return "account_identity";
-  if (/\/assigned_[A-Za-z0-9_]+$/.test(path) || /\/(?:accounts|adaccounts|phone_numbers)$/.test(path)) return "asset_discovery";
+  if (/\/me$/.test(path) || path.endsWith("/userinfo") || /^\/v[0-9.]+\/[A-Za-z0-9_-]+$/.test(path)) return "account_identity";
+  if (/\/assigned_[A-Za-z0-9_]+$/.test(path) || /\/(?:accounts|adaccounts|phone_numbers)$/.test(path) || path.endsWith("/youtube/v3/channels")) return "asset_discovery";
   return "api_request";
 }
 function numeric(value: unknown): number | undefined { return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647 ? value : undefined; }
@@ -20,7 +21,8 @@ function providerDiagnostic(stage: CallbackAuditStage, status?: unknown, error?:
 }
 /** No redirects, caller URLs, retry, provider payload errors or environment token fallback. */
 export const requestMeta: MetaRequest = async (url, init = {}) => {
-  if (url.protocol !== "https:" || !["graph.facebook.com", "graph.threads.com", "graph.instagram.com", "api.instagram.com"].includes(url.hostname) || url.port || url.username || url.password) throw new BrokerError("provider_host_rejected");
+  if (url.protocol !== "https:" || !["graph.facebook.com", "graph.threads.com", "graph.instagram.com", "api.instagram.com", "oauth2.googleapis.com", "openidconnect.googleapis.com", "www.googleapis.com"].includes(url.hostname) || url.port || url.username || url.password) throw new BrokerError("provider_host_rejected");
+  if (url.hostname === "oauth2.googleapis.com" && url.pathname !== "/token" || url.hostname === "openidconnect.googleapis.com" && url.pathname !== "/v1/userinfo" || url.hostname === "www.googleapis.com" && url.pathname !== "/youtube/v3/channels") throw new BrokerError("provider_host_rejected");
   const stage = endpointStage(url.pathname);
   let status: number | undefined;
   try {
@@ -32,7 +34,13 @@ export const requestMeta: MetaRequest = async (url, init = {}) => {
     let body: Json;
     try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
     catch { throw new BrokerError("provider_unavailable", providerDiagnostic(stage, status)); }
-    if (!response.ok || body.error) throw new BrokerError(body.error?.code === 190 ? "reauth_required" : [10, 200].includes(body.error?.code) ? "permission_unavailable" : "provider_unavailable", providerDiagnostic(stage, status, record(body.error) ? body.error : undefined));
+    if (!response.ok || body.error) {
+      const google = ["oauth2.googleapis.com", "openidconnect.googleapis.com", "www.googleapis.com"].includes(url.hostname);
+      const errorCode = typeof body.error === "string" ? body.error : body.error?.code;
+      const permissionDenied = google && record(body.error) && (body.error.status === "PERMISSION_DENIED" || Array.isArray(body.error.errors) && body.error.errors.some((item: Json) => record(item) && ["insufficientPermissions", "forbidden"].includes(item.reason)));
+      const reason = errorCode === 190 || google && ["invalid_grant", "invalid_token"].includes(errorCode) || status === 401 ? "reauth_required" : permissionDenied || !google && [10, 200].includes(errorCode) ? "permission_unavailable" : "provider_unavailable";
+      throw new BrokerError(reason, providerDiagnostic(stage, status, google ? undefined : record(body.error) ? body.error : undefined));
+    }
     if (!record(body)) throw new BrokerError("provider_response_invalid", providerDiagnostic(stage, status)); return body;
   } catch (error) { if (error instanceof BrokerError) { if (!error.diagnostic) throw new BrokerError(error.code, providerDiagnostic(stage, status)); throw error; } throw new BrokerError("provider_unavailable", providerDiagnostic(stage, status)); }
 };
@@ -66,9 +74,9 @@ export class MetaStudentProvider implements ProviderAdapter {
   private get(config: ProductConfig, token: string, path: string, query: Record<string, string> = {}): Promise<Json> {
     return this.request(this.url(config, path, query), { headers: { Authorization: `Bearer ${token}` } });
   }
-  async exchange(config: ProductConfig, code: string): Promise<ExchangedGrant> {
+  async exchange(config: ProductConfig, code: string, codeVerifier?: string): Promise<ExchangedGrant> {
     let stage: CallbackAuditStage = "token_exchange";
-    try { return await new MetaStudentProvider(bounded(this.request, (url) => { stage = endpointStage(url.pathname); })).exchangeOnce(config, code); }
+    try { return await new MetaStudentProvider(bounded(this.request, (url) => { stage = endpointStage(url.pathname); })).exchangeOnce(config, code, codeVerifier); }
     catch (error) {
       let codeValue: string | undefined, hasValidDiagnostic = false;
       try {
@@ -82,7 +90,8 @@ export class MetaStudentProvider implements ProviderAdapter {
       throw error;
     }
   }
-  private async exchangeOnce(config: ProductConfig, code: string): Promise<ExchangedGrant> {
+  private async exchangeOnce(config: ProductConfig, code: string, codeVerifier?: string): Promise<ExchangedGrant> {
+    if (config.provider === "youtube") return new YouTubeStudentProvider(this.request).exchange(config, code, codeVerifier);
     const appKey = config.appSecret;
     if (config.provider === "instagram_login") return this.exchangeInstagramLogin(config, code);
     let bearer: string, tokenResponse: Json;
@@ -200,10 +209,11 @@ export class MetaStudentProvider implements ProviderAdapter {
     if (scopes.includes("instagram_business_manage_messages")) capabilities.push("inbox");
     return { accessToken: long.access_token, assetTokens: {}, providerUserId, scopes, expiresAt, assets: [{ product: "instagram", providerId: providerUserId, label: text(me.username, providerUserId), capabilities }] };
   }
-  async refresh(config: ProductConfig, credential: Credential, expectedUserId?: string): Promise<Credential & { expiresAt: number; scopes: string[] }> {
-    return new MetaStudentProvider(bounded(this.request)).refreshOnce(config, credential, expectedUserId);
+  async refresh(config: ProductConfig, credential: Credential, expectedUserId?: string, expectedScopes?: string[]): Promise<Credential & { expiresAt: number; scopes: string[] }> {
+    return new MetaStudentProvider(bounded(this.request)).refreshOnce(config, credential, expectedUserId, expectedScopes);
   }
-  private async refreshOnce(config: ProductConfig, credential: Credential, expectedUserId?: string): Promise<Credential & { expiresAt: number; scopes: string[] }> {
+  private async refreshOnce(config: ProductConfig, credential: Credential, expectedUserId?: string, expectedScopes?: string[]): Promise<Credential & { expiresAt: number; scopes: string[] }> {
+    if (config.provider === "youtube") return new YouTubeStudentProvider(this.request).refresh(config, credential, expectedUserId, expectedScopes);
     if (config.provider !== "threads" || !credential.accessToken) throw new BrokerError("refresh_unsupported");
     if (!expectedUserId) throw new BrokerError("grant_verification_failed");
     const url = new URL("https://graph.threads.com/refresh_access_token"); url.searchParams.set("grant_type", "th_refresh_token");
@@ -226,6 +236,7 @@ export class MetaStudentProvider implements ProviderAdapter {
     return new MetaStudentProvider(bounded(this.request)).readOnce(config, connection, credential, input);
   }
   private async readOnce(config: ProductConfig, connection: Connection, credential: Credential, input: ReadInput): Promise<ProviderRead> {
+    if (config.provider === "youtube") return new YouTubeStudentProvider(this.request).read(config, connection, credential, input);
     const bearer = credential.assetTokens[connection.providerId] ?? credential.accessToken;
     if (!bearer) throw new BrokerError("reauth_required");
     const root = `/${id(connection.providerId)}`, limit = String(input.limit ?? 20);

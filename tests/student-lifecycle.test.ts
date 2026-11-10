@@ -21,6 +21,19 @@ it("refreshes an eligible Threads grant and persists the new encrypted credentia
   const lifecycle = new GrantLifecycle(vault, registry, { exchange: async () => { throw new Error(); }, read: async () => { throw new Error(); }, refresh: async (_c, credential) => { expect(credential.accessToken).toBe("old"); return { accessToken: "rotated", assetTokens: {}, expiresAt: now / 1000 + 5_184_000 }; } }, () => now);
   await lifecycle.tick(); const grant = (await vault.snapshot()).grants[0]; expect(vault.credential(grant).accessToken).toBe("rotated"); expect(grant.expiresAt).toBe(now / 1000 + 5_184_000); expect(grant.refreshedAt).toBe(now);
 });
+it("refreshes a Google grant before its short access token expires and preserves its refresh credential", async () => {
+  const youtube: ProductConfig = { product: "youtube", key: "youtube", provider: "youtube", appId: "123-client.apps.googleusercontent.com", appSecret: "google-client-secret-fixture", apiVersion: "v3", callbackUrl: "https://broker.example/youtube/oauth/callback", admission: "live", testSubjects: [] };
+  const dir = await mkdtemp(join(tmpdir(), "youtube-life-")); clean.push(() => rm(dir, { recursive: true, force: true })); const vault = await StudentVault.open(dir, randomBytes(32)); clean.push(() => vault.close());
+  const now = 1_800_000_000_000, binding = { tenantId: "masterskaya", sub: "owner", id: "youtube-grant", provider: "youtube" as const }, scopes = ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"];
+  await vault.transaction((db) => { db.grants.push({ ...binding, providerUserId: "google-subject-fixture", configKey: "youtube", fingerprint: configFingerprint(youtube), scopes, expiresAt: now / 1000 + 180, status: "active", createdAt: new Date(now - 10 * 60_000).toISOString(), credential: vault.seal(binding, { accessToken: "old-google-access", refreshToken: "google-refresh-fixture", assetTokens: {} }) }); db.connections.push({ id: "youtube-connection", tenantId: "masterskaya", sub: "owner", grantId: binding.id, product: "youtube", providerId: "UC-owned-fixture", label: "Owned channel", capabilities: ["account"], status: "connected", updatedAt: "now" }); });
+  let refreshed = 0;
+  const lifecycle = new GrantLifecycle(vault, new StudentRegistry([youtube]), { exchange: async () => { throw new Error(); }, read: async () => { throw new Error(); }, refresh: async (_config, credential, userId, expectedScopes) => { refreshed++; expect(credential.refreshToken).toBe("google-refresh-fixture"); expect(userId).toBe("google-subject-fixture"); expect(expectedScopes).toEqual(scopes); return { accessToken: "new-google-access", assetTokens: {}, expiresAt: now / 1000 + 3600, scopes }; } }, () => now);
+  await lifecycle.tick();
+  const grant = (await vault.snapshot()).grants[0];
+  expect(refreshed).toBe(1);
+  expect(vault.credential(grant)).toMatchObject({ accessToken: "new-google-access", refreshToken: "google-refresh-fixture" });
+  expect(grant.expiresAt).toBe(now / 1000 + 3600);
+});
 it("a refresh finishing after disconnect cannot resurrect credentials", async () => {
   const { vault, registry, now } = await setup(); let started!: () => void, release!: () => void;
   const entered = new Promise<void>((resolve) => { started = resolve; }), waiting = new Promise<void>((resolve) => { release = resolve; });

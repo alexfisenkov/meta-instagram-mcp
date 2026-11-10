@@ -22,7 +22,7 @@ MCP для работы с собственным Instagram-аккаунтом �
 
 ## Установка
 
-Для нескольких пользователей есть отдельный hosted broker: [контракт, приватная конфигурация и admission](docs/student-broker.md). Он предоставляет пять ограниченных student tools, хранит grants/assets раздельно и не использует credentials legacy single-account runtime. Готовность к внешнему student OAuth требует отдельного подтверждения Meta permissions/App Review.
+Для Meta есть отдельный hosted broker: [контракт, приватная конфигурация и admission](docs/student-broker.md). Он хранит grants/assets отдельно по tenant/subject и не использует credentials legacy single-account runtime. В этом же tenant-bound broker добавлен отдельный owner-only Google YouTube read-only контур с собственными MCP tools; Google Web client refs и callback задаются только в private broker environment/config, не в браузере. Без YouTube broker entry и OAuth настроек отдельный owner catalog возвращает `not_configured`. Эта реализация читает только профиль и текущие счётчики своих каналов через `youtube.readonly`; Google scope verification и live OAuth приёмка остаются отдельными.
 
 Единственная актуальная цель для установки — [последний опубликованный release](https://github.com/alexfisenkov/meta-instagram-mcp/releases/latest): используйте commit SHA его тега и provenance приложенных assets. Версия `package.json` относится к этому checkout и сама по себе не подтверждает публикацию. Инсталлятор собирает указанный SHA до переключения и оставляет отдельную резервную копию при обновлении. Сначала прочитайте [установку, обновление и rollback](docs/install.md), затем [матрицу готовности](docs/capabilities.md).
 
