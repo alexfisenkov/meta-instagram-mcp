@@ -354,7 +354,7 @@ it("discovers only ads accounts within verified granular scope targets", async (
   const provider = new MetaStudentProvider(async (url) => {
     if (url.pathname.endsWith("oauth/access_token")) return { access_token: "token" };
     if (url.pathname.endsWith("debug_token")) return { data: { app_id: "123", is_valid: true, type: "SYSTEM_USER", user_id: "user", scopes: ["ads_read"], granular_scopes: [{ scope: "ads_read", target_ids: ["100"] }] } };
-    if (url.pathname.endsWith("/adaccounts")) return { data: [{ id: "act_100", account_id: "100", name: "Own" }, { id: "act_200", account_id: "200", name: "Other" }] };
+    if (url.pathname.endsWith("/assigned_ad_accounts")) return { data: [{ id: "act_100", account_id: "100", name: "Own" }, { id: "act_200", account_id: "200", name: "Other" }] };
     return { id: "user" };
   });
   expect((await provider.exchange({ ...config, product: "ads", provider: "facebook_business" }, "code")).assets.map((a) => a.providerId)).toEqual(["act_100"]);

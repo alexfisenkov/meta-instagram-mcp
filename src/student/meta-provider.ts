@@ -68,6 +68,16 @@ export const requestMeta: MetaRequest = async (url, init = {}) => {
 };
 function record(x: unknown): x is Json { return x !== null && typeof x === "object" && !Array.isArray(x); }
 function id(value: unknown): string { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new BrokerError("provider_response_invalid"); return value; }
+function adAccountId(value: unknown, stage: CallbackAuditStage): string {
+  if (typeof value !== "string" || !/^act_[1-9][0-9]{0,123}$/.test(value)) throw new BrokerError("provider_response_invalid", { stage });
+  return value;
+}
+function verifiedAdAccount(account: Json, stage: CallbackAuditStage): string {
+  const graphId = adAccountId(account.id, stage);
+  if (typeof account.account_id !== "string" || !/^[1-9][0-9]{0,127}$/.test(account.account_id)) throw new BrokerError("provider_response_invalid", { stage });
+  if (graphId !== `act_${account.account_id}`) throw new BrokerError("grant_verification_failed", { stage });
+  return graphId;
+}
 function verifiedId(value: unknown, reason: string, stage: CallbackAuditStage): string {
   try { return id(value); } catch { throw new BrokerError(reason, { stage }); }
 }
@@ -260,8 +270,16 @@ export class MetaStudentProvider implements ProviderAdapter {
         assetTokens[pageId] = pageToken; assets.push({ product: config.product, providerId: pageId, label: text(verified.name, pageId), capabilities });
       }
     } else if (config.product === "ads") {
-      const accounts = await this.all(config, bearer, "/me/adaccounts", { fields: "id,name,account_id,account_status" });
-      assets = accounts.filter((a) => has("ads_read", String(a.account_id)) || has("ads_management", String(a.account_id))).map((a) => ({ product: "ads", providerId: id(a.id), label: text(a.name, id(a.id)), capabilities: ["account", "metrics"] }));
+      if (!has("ads_read") && !has("ads_management")) throw new BrokerError("permission_unavailable", { stage: "grant_validation" });
+      const accounts = await this.all(config, bearer, p.type === "SYSTEM_USER" ? "/me/assigned_ad_accounts" : "/me/adaccounts", { fields: "id,name,account_id,account_status" });
+      for (const account of accounts) {
+        const graphId = adAccountId(account.id, "asset_discovery"), numericId = graphId.slice(4);
+        // The documented act_<id> and numeric account_id identify exactly one account.
+        // Scope filtering precedes optional fields on ungranted assigned accounts.
+        if (!["ads_read", "ads_management"].some((scope) => has(scope, numericId) || has(scope, graphId))) continue;
+        verifiedAdAccount(account, "asset_discovery");
+        assets.push({ product: "ads", providerId: graphId, label: text(account.name, graphId), capabilities: ["account", "metrics"] });
+      }
     } else if (config.product === "whatsapp") {
       if (!has("whatsapp_business_management")) throw new BrokerError("permission_unavailable");
       const wabas = await this.all(config, bearer, "/me/assigned_whatsapp_business_accounts", { fields: "id,name" });
@@ -362,6 +380,7 @@ export class MetaStudentProvider implements ProviderAdapter {
       }
       const fields = connection.product === "instagram" ? "id,username,name,followers_count,media_count" : connection.product === "threads" ? "id,username,name" : connection.product === "ads" ? "id,name,account_id,account_status,currency" : connection.product === "whatsapp" ? "id,verified_name,display_phone_number,quality_rating" : "id,name,fan_count,followers_count";
       const result = await this.get(config, bearer, root, { fields });
+      if (connection.product === "ads" && verifiedAdAccount(result, "account_identity") !== connection.providerId) throw new BrokerError("grant_verification_failed", { stage: "account_identity" });
       if (id(result.id) !== connection.providerId) throw new BrokerError("grant_verification_failed");
       return { data: scalarProjection(result, fields.split(",")), coverage: "partial", limitations: ["selected_profile_fields_only"] };
     }
@@ -388,7 +407,9 @@ export class MetaStudentProvider implements ProviderAdapter {
       else if (connection.product === "ads") params = { fields: "account_id,account_name,impressions,clicks,reach,spend,account_currency,date_start,date_stop", date_preset: "last_30d", level: "account" };
       else throw new BrokerError("operation_unavailable");
       const body = await this.get(config, bearer, `${root}/${connection.product === "threads" ? "threads_insights" : "insights"}`, { ...query, ...params });
-      const items = rows(body).map((r) => ({ ...scalarProjection(r, ["name", "period", "title", "description", "account_id", "account_name", "impressions", "clicks", "reach", "spend", "account_currency", "date_start", "date_stop"]), ...(Array.isArray(r.values) ? { values: r.values.slice(0, 100).map((v: Json) => scalarProjection(v, ["value", "end_time"])) } : {}), ...(record(r.total_value) ? { totalValue: scalarProjection(r.total_value, ["value"]) } : {}) }));
+      const metricRows = rows(body);
+      if (connection.product === "ads" && metricRows.some((row) => typeof row.account_id !== "string" || `act_${row.account_id}` !== connection.providerId)) throw new BrokerError("grant_verification_failed", { stage: "api_request" });
+      const items = metricRows.map((r) => ({ ...scalarProjection(r, ["name", "period", "title", "description", "account_id", "account_name", "impressions", "clicks", "reach", "spend", "account_currency", "date_start", "date_stop"]), ...(Array.isArray(r.values) ? { values: r.values.slice(0, 100).map((v: Json) => scalarProjection(v, ["value", "end_time"])) } : {}), ...(record(r.total_value) ? { totalValue: scalarProjection(r.total_value, ["value"]) } : {}) }));
       return { data: { items, ...(cursor(body) ? { nextCursor: cursor(body) } : {}) }, coverage: "partial", limitations: ["fixed_metric_set_and_provider_default_period", "api_metrics_may_differ_from_native_app"] };
     }
     if (input.operation === "inbox" && ["instagram", "messenger"].includes(connection.product)) {
