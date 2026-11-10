@@ -102,6 +102,21 @@ it("serves escaped Russian legal pages with secure headers only when operator/co
   const server = await startStudentServer({ broker, vault, registry, auth: { serviceToken: "s".repeat(40), subjectKey: randomBytes(32) }, port: 0, legal: { operatorName: '<script>alert("x")</script>', privacyContact: "privacy@example.com" } }); cleanup.push(() => server.close());
   for (const route of ["/privacy", "/data-deletion"]) {
     const response = await fetch(`${server.url}${route}`), html = await response.text(); expect(response.status).toBe(200); expect(response.headers.get("content-security-policy")).toContain("default-src 'none'"); expect(response.headers.get("x-content-type-options")).toBe("nosniff"); expect(html).toContain("&lt;script&gt;"); expect(html).not.toContain("<script>"); expect(html).toContain('href="mailto:privacy@example.com"'); expect(html).not.toContain("<form");
+    if (route === "/privacy") {
+      expect(html).toContain("YouTube Data API v3");
+      expect(html).toContain("youtube.readonly");
+      expect(html).toContain('href="https://policies.google.com/privacy"');
+      expect(html).toContain('href="https://www.youtube.com/t/terms"');
+      expect(html).toContain('href="https://developers.google.com/youtube/terms/developer-policies"');
+      expect(html).toContain('href="https://developers.google.com/terms/api-services-user-data-policy"');
+      expect(html).toContain('href="https://security.google.com/settings/security/permissions"');
+      expect(html).toContain("зашифрованном хранилище YouTube");
+    } else {
+      expect(html).toContain("из обоих хранилищ Meta и YouTube");
+      expect(html).toContain("не отзывает разрешение у Google");
+      expect(html).toContain("другие клиенты того же приложения");
+      expect(html).toContain("автоматического удаления в этой процедуре нет");
+    }
   }
   expect((await fetch(`${server.url}/data-deletion`, { method: "POST", body: "private" })).status).toBe(405);
 });
