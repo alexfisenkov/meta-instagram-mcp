@@ -1,7 +1,7 @@
-import { expect, it } from "vitest";
-import { MetaStudentProvider } from "../src/student/meta-provider.js";
+import { expect, it, vi } from "vitest";
+import { MetaStudentProvider, requestMeta } from "../src/student/meta-provider.js";
 import { authorizationUrl } from "../src/student/registry.js";
-import type { Connection, ProductConfig } from "../src/student/types.js";
+import { BrokerError, type Connection, type ProductConfig } from "../src/student/types.js";
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
 it("Unified URL pins config_id and exchanges once directly for BISU, discovers all assigned IGs", async () => {
@@ -25,6 +25,19 @@ it("adds Meta's unified-login response-type override only to instagram_unified",
   expect(facebook.searchParams.has("override_default_response_type")).toBe(false);
   const threads = new URL(authorizationUrl({ ...config, product: "threads", provider: "threads", apiVersion: "v1.0" }, "state"));
   expect(threads.searchParams.has("override_default_response_type")).toBe(false);
+});
+it("preserves only numeric Meta error metadata and a fixed endpoint stage", async () => {
+  const marker = "RAW-META-BODY-MARKER-token-code-state-secret";
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { message: marker, code: 190, error_subcode: 463, fbtrace_id: marker, type: marker } }), { status: 400 }));
+  try {
+    let thrown: unknown;
+    try { await requestMeta(new URL("https://graph.facebook.com/v27.0/oauth/access_token?code=private-code")); } catch (error) { thrown = error; }
+    expect(thrown).toBeInstanceOf(BrokerError);
+    const error = thrown as BrokerError;
+    expect(error.diagnostic).toEqual({ stage: "token_exchange", status: 400, metaCode: 190, metaSubcode: 463 });
+    expect(JSON.stringify(error)).not.toContain(marker);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  } finally { fetchMock.mockRestore(); }
 });
 it("declined optional grants do not become capabilities", async () => {
   const provider = new MetaStudentProvider(async (url) => {

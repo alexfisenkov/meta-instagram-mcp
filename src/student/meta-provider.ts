@@ -1,20 +1,40 @@
-import { BrokerError, type Connection, type Credential, type Operation, type ProductConfig, type ReadInput } from "./types.js";
+import { BrokerError, type CallbackAuditStage, type Connection, type Credential, type Operation, type ProductConfig, type ProviderDiagnostic, type ReadInput } from "./types.js";
 import type { DiscoveredAsset, ExchangedGrant, ProviderAdapter, ProviderRead } from "./provider.js";
 
 type Json = Record<string, any>;
 export type MetaRequest = (url: URL, init?: RequestInit) => Promise<Json>;
+function endpointStage(path: string): CallbackAuditStage {
+  if (/\/(?:oauth\/)?access_token$/.test(path)) return "token_exchange";
+  if (path.endsWith("/debug_token")) return "token_inspection";
+  if (/\/me$/.test(path) || /^\/v[0-9.]+\/[A-Za-z0-9_-]+$/.test(path)) return "account_identity";
+  if (/\/assigned_[A-Za-z0-9_]+$/.test(path) || /\/(?:accounts|adaccounts|phone_numbers)$/.test(path)) return "asset_discovery";
+  return "api_request";
+}
+function numeric(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : undefined; }
+function providerDiagnostic(stage: CallbackAuditStage, status?: unknown, error?: Json): ProviderDiagnostic {
+  const result: ProviderDiagnostic = { stage };
+  const safeStatus = numeric(status); if (safeStatus !== undefined && safeStatus >= 100 && safeStatus <= 599) result.status = safeStatus;
+  const metaCode = numeric(error?.code); if (metaCode !== undefined) result.metaCode = metaCode;
+  const metaSubcode = numeric(error?.error_subcode); if (metaSubcode !== undefined) result.metaSubcode = metaSubcode;
+  return result;
+}
 /** No redirects, caller URLs, retry, provider payload errors or environment token fallback. */
 export const requestMeta: MetaRequest = async (url, init = {}) => {
   if (url.protocol !== "https:" || !["graph.facebook.com", "graph.threads.com"].includes(url.hostname) || url.port || url.username || url.password) throw new BrokerError("provider_host_rejected");
+  const stage = endpointStage(url.pathname);
+  let status: number | undefined;
   try {
     const response = await fetch(url, { ...init, redirect: "error", signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000) });
+    status = response.status;
     if (!response.body) throw new BrokerError("provider_unavailable");
     let size = 0; const chunks: Uint8Array[] = [];
     for await (const chunk of response.body) { size += chunk.length; if (size > 1_048_576) { await response.body.cancel().catch(() => undefined); throw new BrokerError("provider_response_too_large"); } chunks.push(chunk); }
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (!response.ok || body.error) throw new BrokerError(body.error?.code === 190 ? "reauth_required" : [10, 200].includes(body.error?.code) ? "permission_unavailable" : "provider_unavailable");
-    if (!record(body)) throw new BrokerError("provider_response_invalid"); return body;
-  } catch (error) { if (error instanceof BrokerError) throw error; throw new BrokerError("provider_unavailable"); }
+    let body: Json;
+    try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+    catch { throw new BrokerError("provider_unavailable", providerDiagnostic(stage, status)); }
+    if (!response.ok || body.error) throw new BrokerError(body.error?.code === 190 ? "reauth_required" : [10, 200].includes(body.error?.code) ? "permission_unavailable" : "provider_unavailable", providerDiagnostic(stage, status, record(body.error) ? body.error : undefined));
+    if (!record(body)) throw new BrokerError("provider_response_invalid", providerDiagnostic(stage, status)); return body;
+  } catch (error) { if (error instanceof BrokerError) { if (!error.diagnostic) throw new BrokerError(error.code, providerDiagnostic(stage, status)); throw error; } throw new BrokerError("provider_unavailable", providerDiagnostic(stage, status)); }
 };
 function record(x: unknown): x is Json { return x !== null && typeof x === "object" && !Array.isArray(x); }
 function id(value: unknown): string { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new BrokerError("provider_response_invalid"); return value; }

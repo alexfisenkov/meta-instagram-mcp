@@ -26,6 +26,44 @@ it("catalog fails closed per product and limits test admission to pinned subject
   expect(broker.catalog(a).products.find((p) => p.product === "threads")?.status).toBe("not_configured");
   await expect(broker.begin(b, "instagram")).rejects.toThrow("review_required");
 });
+it("audits only recognized callback flows with stable fields", async () => {
+  const { vault, provider } = await fixture(); const events: unknown[] = [];
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const success = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(success.authorizationUrl).searchParams.get("state")!, code: "secret-code" })).toContain("meta=connected");
+  const cancelled = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(cancelled.authorizationUrl).searchParams.get("state")!, error: "access_denied" })).toContain("meta=cancelled");
+  const failed = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(failed.authorizationUrl).searchParams.get("state")!, code: "secret-code", error: "secret-error" })).toContain("meta=error");
+  expect(await broker.callback({ state: "unmatched-random-state" })).toContain("meta=error");
+  expect(events).toEqual([
+    { event: "student_oauth_callback", stage: "grant_persist", product: "instagram", outcome: "connected", reason: "connected", hasCode: true, hasProviderError: false },
+    { event: "student_oauth_callback", stage: "callback_validation", product: "instagram", outcome: "cancelled", reason: "provider_cancelled", hasCode: false, hasProviderError: true },
+    { event: "student_oauth_callback", stage: "callback_validation", product: "instagram", outcome: "error", reason: "callback_rejected", hasCode: true, hasProviderError: true },
+  ]);
+  expect(JSON.stringify(events)).not.toMatch(/secret-code|secret-error|unmatched-random-state|student-a|masterskaya/);
+});
+it("carries only numeric provider diagnostics into callback audit", async () => {
+  const marker = "PRIVATE-url-code-state-token-body-message"; const { vault } = await fixture(); const events: unknown[] = [];
+  let diagnostic: any = Object.assign({ stage: "asset_discovery", status: 403, metaCode: 10, metaSubcode: 123 }, { rawBody: marker, url: marker, code: marker, state: marker, token: marker, message: marker });
+  let brokerCode = "provider_unavailable";
+  const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError(brokerCode, diagnostic as any); }, read: async () => { throw new Error(marker); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: marker })).toContain("meta=error");
+  brokerCode = marker;
+  const second = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(second.authorizationUrl).searchParams.get("state")!, code: marker })).toContain("meta=error");
+  diagnostic = { stage: marker, status: 5000, metaCode: "190", metaSubcode: -1, token: marker };
+  const third = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(third.authorizationUrl).searchParams.get("state")!, code: marker })).toContain("meta=error");
+  expect(events).toEqual([
+    { event: "student_oauth_callback", stage: "asset_discovery", product: "instagram", outcome: "error", reason: "provider_unavailable", hasCode: true, hasProviderError: false, status: 403, metaCode: 10, metaSubcode: 123 },
+    { event: "student_oauth_callback", stage: "asset_discovery", product: "instagram", outcome: "error", reason: "callback_failed", hasCode: true, hasProviderError: false, status: 403, metaCode: 10, metaSubcode: 123 },
+    { event: "student_oauth_callback", stage: "token_exchange", product: "instagram", outcome: "error", reason: "callback_failed", hasCode: true, hasProviderError: false },
+  ]);
+  expect(JSON.stringify(events)).not.toContain(marker);
+});
 it("one-time state binds subject/config and returns only safe connections", async () => {
   const { broker, vault } = await fixture(); const state = await connect(broker);
   const listed = await broker.list(a); expect(listed.connections).toHaveLength(2);

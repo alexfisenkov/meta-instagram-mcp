@@ -12,5 +12,11 @@ export interface StoredEvent { connectionId: string; eventId: string; receivedAt
 export interface Database { version: 1; revision: number; grants: Grant[]; connections: Connection[]; states: OAuthState[]; events: StoredEvent[]; generations: Record<string, number> }
 export interface ProductConfig { product: Product; key: string; provider: Provider; appId: string; appSecret: string; configId?: string; apiVersion: string; callbackUrl: string; admission: "disabled" | "test" | "live"; testSubjects: string[]; webhookVerifyToken?: string }
 export interface ReadInput { connectionId: string; operation: Operation; limit?: number; cursor?: string; mediaId?: string }
-export class BrokerError extends Error { constructor(public readonly code: string) { super(code); this.name = "BrokerError"; } }
+export type CallbackAuditStage = "state_validation" | "callback_validation" | "token_exchange" | "token_inspection" | "account_identity" | "asset_discovery" | "api_request" | "grant_validation" | "grant_persist";
+export interface ProviderDiagnostic { stage: CallbackAuditStage; status?: number; metaCode?: number; metaSubcode?: number }
+export interface CallbackAuditEvent { event: "student_oauth_callback"; stage: CallbackAuditStage; product: Product; outcome: "connected" | "cancelled" | "error"; reason: string; hasCode: boolean; hasProviderError: boolean; status?: number; metaCode?: number; metaSubcode?: number }
+export type CallbackAuditSink = (event: CallbackAuditEvent) => void;
+export class BrokerError extends Error {
+  constructor(public readonly code: string, public readonly diagnostic?: ProviderDiagnostic) { super(code); this.name = "BrokerError"; }
+}
 export function sameSubject(a: Subject, b: Subject): boolean { return a.tenantId === b.tenantId && a.sub === b.sub; }

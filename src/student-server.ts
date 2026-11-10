@@ -9,7 +9,7 @@ import { GrantLifecycle } from "./student/grant-lifecycle.js";
 try {
   const config = await loadStudentConfig(process.env); const vault = await StudentVault.open(config.directory, config.vaultKey); config.vaultKey.fill(0);
   try {
-    const provider = new MetaStudentProvider(); const broker = new StudentBroker(vault, config.registry, provider, config.platformOrigin);
+    const provider = new MetaStudentProvider(); const broker = new StudentBroker(vault, config.registry, provider, config.platformOrigin, Date.now, (event) => process.stderr.write(JSON.stringify(event) + "\n"));
     const lifecycle = new GrantLifecycle(vault, config.registry, provider); await lifecycle.tick();
     const server = await startStudentServer({ ...config, broker, vault }); lifecycle.start(config.refreshIntervalMs);
     let closing: Promise<void> | undefined;

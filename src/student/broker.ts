@@ -4,7 +4,7 @@ import type { ProviderAdapter } from "./provider.js";
 import { StudentVault } from "./vault.js";
 import { invalidateGrant } from "./grant-lifecycle.js";
 import { eventWithinRetention } from "./retention.js";
-import { BrokerError, PRODUCTS, sameSubject, type Connection, type Grant, type Product, type ReadInput, type Subject } from "./types.js";
+import { BrokerError, PRODUCTS, sameSubject, type CallbackAuditEvent, type CallbackAuditSink, type CallbackAuditStage, type Connection, type Grant, type Product, type ProviderDiagnostic, type ReadInput, type Subject } from "./types.js";
 function hash(state: string): string { return createHash("sha256").update(state).digest("hex"); }
 function generationKey(subject: Subject, product: Product): string { return JSON.stringify([subject.tenantId, subject.sub, product]); }
 function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
@@ -12,9 +12,22 @@ function revokeUnusedGrant(vault: StudentVault, grant: Grant): void {
   grant.providerUserId = ""; grant.scopes = []; delete grant.clientBusinessId; delete grant.expiresAt; delete grant.refreshedAt;
 }
 function safeConnection(c: Connection) { return { id: c.id, product: c.product, status: c.status, account: { id: c.providerId, label: c.label }, capabilities: c.status === "connected" ? c.capabilities : [], updatedAt: c.updatedAt, ...(c.reason ? { reason: c.reason } : {}) }; }
+const AUDIT_STAGES = new Set<CallbackAuditStage>(["state_validation", "callback_validation", "token_exchange", "token_inspection", "account_identity", "asset_discovery", "api_request", "grant_validation", "grant_persist"]);
+const AUDIT_REASONS = new Set(["state_rejected", "callback_rejected", "provider_unavailable", "provider_response_too_large", "provider_response_invalid", "provider_budget_exceeded", "provider_paging_cycle", "provider_host_rejected", "provider_path_rejected", "discovery_exceeds_limit", "reauth_required", "permission_unavailable", "grant_verification_failed", "no_authorized_assets", "oauth_cancelled", "vault_capacity_exceeded", "vault_changed", "vault_closed", "vault_commit_uncertain", "vault_integrity_failed", "vault_too_large", "writer_locked", "review_required", "not_configured", "provider_cancelled", "connected", "callback_failed"]);
+function safeDiagnostic(value: unknown): ProviderDiagnostic | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.stage !== "string" || !AUDIT_STAGES.has(candidate.stage as CallbackAuditStage)) return undefined;
+  const result: ProviderDiagnostic = { stage: candidate.stage as CallbackAuditStage };
+  for (const key of ["status", "metaCode", "metaSubcode"] as const) {
+    const n = candidate[key];
+    if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && n <= 1_000_000 && (key !== "status" || (n >= 100 && n <= 599))) result[key] = n;
+  }
+  return result;
+}
 export class StudentBroker {
   private readonly returnTarget: string;
-  constructor(private readonly vault: StudentVault, private readonly registry: StudentRegistry, private readonly provider: ProviderAdapter, platformOrigin: string, private readonly now = Date.now) {
+  constructor(private readonly vault: StudentVault, private readonly registry: StudentRegistry, private readonly provider: ProviderAdapter, platformOrigin: string, private readonly now = Date.now, private readonly audit?: CallbackAuditSink) {
     const origin = new URL(platformOrigin);
     if (origin.protocol !== "https:" || origin.origin !== platformOrigin || origin.username || origin.password) throw new BrokerError("invalid_platform_origin");
     this.returnTarget = `${origin.origin}/social`;
@@ -40,20 +53,25 @@ export class StudentBroker {
     return { authorizationUrl: authorizationUrl(config, state), expiresAt: new Date(expiresAt).toISOString() };
   }
   async callback(input: { state?: string; code?: string; error?: string }): Promise<string> {
-    let outcome = "error";
+    let outcome: CallbackAuditEvent["outcome"] = "error", recognized: { product: Product } | undefined, stage: CallbackAuditStage = "state_validation", reason = "callback_failed", diagnostic: ProviderDiagnostic | undefined;
     try {
       if (!input.state || !/^[A-Za-z0-9_-]{43}$/.test(input.state)) throw new BrokerError("state_rejected");
       const state = await this.vault.transaction((db) => { const index = db.states.findIndex((s) => s.hash === hash(input.state!)); if (index < 0) throw new BrokerError("state_rejected"); return db.states.splice(index, 1)[0]; });
+      recognized = state;
+      stage = "callback_validation";
       const config = this.registry.get(state.product);
       if (state.expiresAt <= this.now() || state.returnTarget !== this.returnTarget || !config || config.key !== state.configKey || config.provider !== state.provider || configFingerprint(config) !== state.fingerprint || this.registry.status(state.product, state) !== "ready") throw new BrokerError("state_rejected");
-      if (input.error && !input.code) outcome = "cancelled";
+      if (input.error && !input.code) { outcome = "cancelled"; reason = "provider_cancelled"; }
       else {
         if (!input.code || input.error || input.code.length > 4096) throw new BrokerError("callback_rejected");
+        stage = "token_exchange";
         const result = await this.provider.exchange(config, input.code);
+        stage = "grant_validation";
         if (!result.accessToken || !result.providerUserId || !result.assets.length || result.assets.some((asset) => asset.product !== state.product || !asset.providerId || !asset.capabilities.includes("account"))) throw new BrokerError("no_authorized_assets");
         const id = randomUUID(), updatedAt = new Date(this.now()).toISOString();
         const binding = { tenantId: state.tenantId, sub: state.sub, id, provider: config.provider };
         const grant: Grant = { ...binding, configKey: config.key, fingerprint: state.fingerprint, providerUserId: result.providerUserId, clientBusinessId: result.clientBusinessId, scopes: result.scopes, expiresAt: result.expiresAt, status: "active", credential: this.vault.seal(binding, { accessToken: result.accessToken, assetTokens: result.assetTokens }), createdAt: updatedAt };
+        stage = "grant_persist";
         await this.vault.transaction((db) => {
           if ((db.generations[generationKey(state, state.product)] ?? 0) !== state.generation) throw new BrokerError("oauth_cancelled");
           db.grants.push(grant);
@@ -68,9 +86,16 @@ export class StudentBroker {
             if (previous) Object.assign(previous, connection, { reason: undefined }); else db.connections.push(connection);
           }
           for (const old of db.grants.filter((g) => sameSubject(g, state) && g.id !== id && g.status === "active")) if (!db.connections.some((c) => c.grantId === old.id && c.status === "connected")) revokeUnusedGrant(this.vault, old);
-        }); outcome = "connected";
+        }); outcome = "connected"; reason = "connected";
       }
-    } catch { /* OAuth codes, states, provider payloads and exception messages never leave the boundary. */ }
+    } catch (error) {
+      if (error instanceof BrokerError) { reason = AUDIT_REASONS.has(error.code) ? error.code : "callback_failed"; diagnostic = safeDiagnostic(error.diagnostic); if (diagnostic) stage = diagnostic.stage; }
+      /* OAuth codes, states, provider payloads and exception messages never leave the boundary. */
+    }
+    if (recognized && this.audit) {
+      const details = outcome === "error" ? diagnostic : undefined;
+      try { this.audit({ event: "student_oauth_callback", stage: details?.stage ?? stage, product: recognized.product, outcome, reason: AUDIT_REASONS.has(reason) ? reason : "callback_failed", hasCode: typeof input.code === "string" && input.code.length > 0, hasProviderError: typeof input.error === "string" && input.error.length > 0, ...(details?.status !== undefined ? { status: details.status } : {}), ...(details?.metaCode !== undefined ? { metaCode: details.metaCode } : {}), ...(details?.metaSubcode !== undefined ? { metaSubcode: details.metaSubcode } : {}) }); } catch { /* Audit output must not affect callback behavior. */ }
+    }
     return `${this.returnTarget}?meta=${outcome}`;
   }
   async disconnect(subject: Subject, connectionId: string) {
