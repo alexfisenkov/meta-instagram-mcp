@@ -4,6 +4,7 @@ import { BrokerError, sameSubject, type Subject, type ReplyAttempt } from './typ
 import { StudentVault } from './vault.js';
 import type { ProviderAdapter } from './provider.js';
 import { inboxId, validReplyText } from './inbox-provider.js';
+import { replyWithinRetention } from './retention.js';
 import { invalidateGrant } from './grant-lifecycle.js';
 export type InboxAction = 'conversations' | 'history' | 'context' | 'markProof' | 'send' | 'receipt';
 export interface BrokerInboxInput {
@@ -27,7 +28,7 @@ export class StudentInboxBroker {
         if (!c)
             throw new BrokerError('not_found');
         if (action === 'receipt') {
-            const attempt = db.replyAttempts?.find(a => sameSubject(a, subject) && a.connectionId === c.id && a.intentId === input.intentId);
+            const attempt = db.replyAttempts?.find(a => sameSubject(a, subject) && a.connectionId === c.id && a.intentId === input.intentId && replyWithinRetention(a, this.now()));
             if (!attempt)
                 throw new BrokerError('not_found');
             return this.receipt(attempt);

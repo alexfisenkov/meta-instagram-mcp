@@ -65,7 +65,7 @@ export class MetaInbox {
         if (!['instagram', 'messenger'].includes(c.product) || !c.capabilities.includes('inbox') || c.product === 'instagram' && config.provider !== 'instagram_login' || c.product === 'messenger' && config.provider !== 'facebook_business')
             throw new BrokerError('operation_unavailable');
         const token = c.product === 'messenger' ? credential.assetTokens[c.providerId] : credential.accessToken;
-        if (!token || c.product === 'messenger' && token === credential.accessToken)
+        if (typeof token !== 'string' || !token || token.length > 8192 || c.product === 'messenger' && token === credential.accessToken)
             throw new BrokerError('permission_unavailable');
         const deadline = this.now() + 30000;
         let remaining = 32;
