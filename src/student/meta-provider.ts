@@ -10,7 +10,7 @@ function endpointStage(path: string): CallbackAuditStage {
   if (/\/assigned_[A-Za-z0-9_]+$/.test(path) || /\/(?:accounts|adaccounts|phone_numbers)$/.test(path)) return "asset_discovery";
   return "api_request";
 }
-function numeric(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : undefined; }
+function numeric(value: unknown): number | undefined { return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647 ? value : undefined; }
 function providerDiagnostic(stage: CallbackAuditStage, status?: unknown, error?: Json): ProviderDiagnostic {
   const result: ProviderDiagnostic = { stage };
   const safeStatus = numeric(status); if (safeStatus !== undefined && safeStatus >= 100 && safeStatus <= 599) result.status = safeStatus;
@@ -45,9 +45,10 @@ function scalarProjection(row: Json, fields: string[]): Json {
   const result: Json = {}; for (const field of fields) { const value = row[field]; if (typeof value === "string") result[field] = text(value); else if ((typeof value === "number" && Number.isFinite(value)) || typeof value === "boolean") result[field] = value; } return result;
 }
 const postFields = { instagram: "id,caption,media_type,permalink,timestamp,like_count,comments_count", facebook: "id,message,created_time,permalink_url", threads: "id,text,media_type,permalink,timestamp" };
-function bounded(request: MetaRequest): MetaRequest {
+function bounded(request: MetaRequest, beforeRequest?: (url: URL) => void): MetaRequest {
   const deadline = Date.now() + 30_000; let remaining = 32;
   return async (url, init = {}) => {
+    beforeRequest?.(url);
     if (--remaining < 0 || Date.now() >= deadline) throw new BrokerError("provider_budget_exceeded");
     const result = await request(url, { ...init, signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
     if (Date.now() >= deadline) throw new BrokerError("provider_budget_exceeded"); return result;
@@ -65,7 +66,20 @@ export class MetaStudentProvider implements ProviderAdapter {
     return this.request(this.url(config, path, query), { headers: { Authorization: `Bearer ${token}` } });
   }
   async exchange(config: ProductConfig, code: string): Promise<ExchangedGrant> {
-    return new MetaStudentProvider(bounded(this.request)).exchangeOnce(config, code);
+    let stage: CallbackAuditStage = "token_exchange";
+    try { return await new MetaStudentProvider(bounded(this.request, (url) => { stage = endpointStage(url.pathname); })).exchangeOnce(config, code); }
+    catch (error) {
+      let codeValue: string | undefined, hasValidDiagnostic = false;
+      try {
+        if (error instanceof BrokerError) {
+          codeValue = error.code;
+          const diagnostic = error.diagnostic;
+          hasValidDiagnostic = !!diagnostic && typeof diagnostic.stage === "string" && ["state_validation", "callback_validation", "token_exchange", "token_inspection", "account_identity", "asset_discovery", "api_request", "grant_validation", "grant_persist"].includes(diagnostic.stage);
+        }
+      } catch { throw error; }
+      if (codeValue && !hasValidDiagnostic) throw new BrokerError(codeValue, { stage });
+      throw error;
+    }
   }
   private async exchangeOnce(config: ProductConfig, code: string): Promise<ExchangedGrant> {
     const appKey = config.appSecret;

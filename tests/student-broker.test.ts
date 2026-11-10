@@ -64,6 +64,43 @@ it("carries only numeric provider diagnostics into callback audit", async () => 
   ]);
   expect(JSON.stringify(events)).not.toContain(marker);
 });
+it("keeps callback redirect safe when broker error accessors throw", async () => {
+  const marker = "PRIVATE-throwing-error-getter-marker"; const { vault } = await fixture(); const events: unknown[] = [];
+  const hostile = new Proxy(new BrokerError("provider_unavailable"), { get(target, key, receiver) { if (key === "code" || key === "diagnostic") throw new Error(marker); return Reflect.get(target, key, receiver); } });
+  const provider: ProviderAdapter = { exchange: async () => { throw hostile; }, read: async () => { throw new Error(marker); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "private-code" })).toBe("https://platform.example/social?meta=error");
+  expect(events).toEqual([{ event: "student_oauth_callback", stage: "token_exchange", product: "instagram", outcome: "error", reason: "callback_failed", hasCode: true, hasProviderError: false }]);
+  expect(JSON.stringify(events)).not.toContain(marker);
+});
+it("drops malformed numeric diagnostics without affecting the callback", async () => {
+  const { vault } = await fixture(); const events: unknown[] = [];
+  const diagnostics = [
+    { stage: "asset_discovery", status: Number.NaN, metaCode: Number.POSITIVE_INFINITY, metaSubcode: 2_147_483_648 },
+    { stage: "account_identity", status: "403", metaCode: "10", metaSubcode: -1 },
+  ];
+  let next = 0;
+  const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError("provider_unavailable", diagnostics[next++] as any); }, read: async () => { throw new Error(); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  for (let i = 0; i < diagnostics.length; i++) {
+    const login = await broker.begin(a, "instagram");
+    expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "private-code" })).toContain("meta=error");
+  }
+  expect(events).toEqual([
+    { event: "student_oauth_callback", stage: "asset_discovery", product: "instagram", outcome: "error", reason: "provider_unavailable", hasCode: true, hasProviderError: false },
+    { event: "student_oauth_callback", stage: "account_identity", product: "instagram", outcome: "error", reason: "provider_unavailable", hasCode: true, hasProviderError: false },
+  ]);
+});
+it("does not log unrecognized runtime products from consumed states", async () => {
+  const { vault, broker } = await fixture(); const events: unknown[] = [];
+  const audited = new StudentBroker(vault, new StudentRegistry(configs), { exchange: async () => { throw new Error(); }, read: async () => { throw new Error(); } }, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await audited.begin(a, "instagram"); const state = new URL(login.authorizationUrl).searchParams.get("state")!;
+  await vault.transaction((db) => { db.states[0].product = "private-product-marker" as any; });
+  expect(await audited.callback({ state, code: "private-code" })).toContain("meta=error");
+  expect(events).toEqual([]);
+  expect(JSON.stringify(events)).not.toContain("private-product-marker");
+});
 it("one-time state binds subject/config and returns only safe connections", async () => {
   const { broker, vault } = await fixture(); const state = await connect(broker);
   const listed = await broker.list(a); expect(listed.connections).toHaveLength(2);

@@ -28,16 +28,30 @@ it("adds Meta's unified-login response-type override only to instagram_unified",
 });
 it("preserves only numeric Meta error metadata and a fixed endpoint stage", async () => {
   const marker = "RAW-META-BODY-MARKER-token-code-state-secret";
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { message: marker, code: 190, error_subcode: 463, fbtrace_id: marker, type: marker } }), { status: 400 }));
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { message: marker, code: 190, error_subcode: 1234567, fbtrace_id: marker, type: marker } }), { status: 400 }));
   try {
     let thrown: unknown;
     try { await requestMeta(new URL("https://graph.facebook.com/v27.0/oauth/access_token?code=private-code")); } catch (error) { thrown = error; }
     expect(thrown).toBeInstanceOf(BrokerError);
     const error = thrown as BrokerError;
-    expect(error.diagnostic).toEqual({ stage: "token_exchange", status: 400, metaCode: 190, metaSubcode: 463 });
+    expect(error.diagnostic).toEqual({ stage: "token_exchange", status: 400, metaCode: 190, metaSubcode: 1234567 });
     expect(JSON.stringify(error)).not.toContain(marker);
     expect(fetchMock).toHaveBeenCalledOnce();
   } finally { fetchMock.mockRestore(); }
+});
+it.each([
+  { name: "bad inspection proof", expected: "token_inspection", debug: { app_id: "123", is_valid: true, user_id: "user", type: "USER", scopes: ["instagram_basic"] }, me: { id: "user", client_business_id: "business" }, assets: [{ id: "asset", username: "one" }] },
+  { name: "missing identity field", expected: "account_identity", debug: { app_id: "123", is_valid: true, user_id: "user", type: "SYSTEM_USER", scopes: ["instagram_basic"] }, me: { id: "user" }, assets: [{ id: "asset", username: "one" }] },
+  { name: "empty asset discovery", expected: "asset_discovery", debug: { app_id: "123", is_valid: true, user_id: "user", type: "SYSTEM_USER", scopes: ["instagram_basic"] }, me: { id: "user", client_business_id: "business" }, assets: [] },
+])("attaches the last fixed endpoint stage to local exchange failure: $name", async ({ expected, debug, me, assets }) => {
+  const provider = new MetaStudentProvider(async (url) => {
+    if (url.pathname.endsWith("/oauth/access_token")) return { access_token: "token" };
+    if (url.pathname.endsWith("/debug_token")) return { data: debug };
+    if (url.pathname.endsWith("/assigned_instagram_accounts")) return { data: assets };
+    if (url.pathname.endsWith("/me")) return me;
+    throw new Error("unexpected fixed endpoint");
+  });
+  await expect(provider.exchange(config, "code")).rejects.toMatchObject({ diagnostic: { stage: expected } });
 });
 it("declined optional grants do not become capabilities", async () => {
   const provider = new MetaStudentProvider(async (url) => {

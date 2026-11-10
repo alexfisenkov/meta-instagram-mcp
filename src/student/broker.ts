@@ -21,9 +21,17 @@ function safeDiagnostic(value: unknown): ProviderDiagnostic | undefined {
   const result: ProviderDiagnostic = { stage: candidate.stage as CallbackAuditStage };
   for (const key of ["status", "metaCode", "metaSubcode"] as const) {
     const n = candidate[key];
-    if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && n <= 1_000_000 && (key !== "status" || (n >= 100 && n <= 599))) result[key] = n;
+    if (typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 2_147_483_647 && (key !== "status" || (n >= 100 && n <= 599))) result[key] = n;
   }
   return result;
+}
+function safeAuditFailure(error: unknown): { reason: string; diagnostic?: ProviderDiagnostic } {
+  try {
+    if (!(error instanceof BrokerError)) return { reason: "callback_failed" };
+    const code = error.code;
+    const diagnostic = safeDiagnostic(error.diagnostic);
+    return { reason: typeof code === "string" && AUDIT_REASONS.has(code) ? code : "callback_failed", ...(diagnostic ? { diagnostic } : {}) };
+  } catch { return { reason: "callback_failed" }; }
 }
 export class StudentBroker {
   private readonly returnTarget: string;
@@ -89,12 +97,15 @@ export class StudentBroker {
         }); outcome = "connected"; reason = "connected";
       }
     } catch (error) {
-      if (error instanceof BrokerError) { reason = AUDIT_REASONS.has(error.code) ? error.code : "callback_failed"; diagnostic = safeDiagnostic(error.diagnostic); if (diagnostic) stage = diagnostic.stage; }
+      const failure = safeAuditFailure(error); reason = failure.reason; diagnostic = failure.diagnostic; if (diagnostic) stage = diagnostic.stage;
       /* OAuth codes, states, provider payloads and exception messages never leave the boundary. */
     }
     if (recognized && this.audit) {
       const details = outcome === "error" ? diagnostic : undefined;
-      try { this.audit({ event: "student_oauth_callback", stage: details?.stage ?? stage, product: recognized.product, outcome, reason: AUDIT_REASONS.has(reason) ? reason : "callback_failed", hasCode: typeof input.code === "string" && input.code.length > 0, hasProviderError: typeof input.error === "string" && input.error.length > 0, ...(details?.status !== undefined ? { status: details.status } : {}), ...(details?.metaCode !== undefined ? { metaCode: details.metaCode } : {}), ...(details?.metaSubcode !== undefined ? { metaSubcode: details.metaSubcode } : {}) }); } catch { /* Audit output must not affect callback behavior. */ }
+      try {
+        const product = recognized.product;
+        if (PRODUCTS.includes(product)) this.audit({ event: "student_oauth_callback", stage: details?.stage ?? stage, product, outcome, reason: AUDIT_REASONS.has(reason) ? reason : "callback_failed", hasCode: typeof input.code === "string" && input.code.length > 0, hasProviderError: typeof input.error === "string" && input.error.length > 0, ...(details?.status !== undefined ? { status: details.status } : {}), ...(details?.metaCode !== undefined ? { metaCode: details.metaCode } : {}), ...(details?.metaSubcode !== undefined ? { metaSubcode: details.metaSubcode } : {}) });
+      } catch { /* Audit output must not affect callback behavior. */ }
     }
     return `${this.returnTarget}?meta=${outcome}`;
   }
