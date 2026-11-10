@@ -1,9 +1,68 @@
 import { expect, it, vi } from "vitest";
 import { MetaStudentProvider, requestMeta } from "../src/student/meta-provider.js";
-import { authorizationUrl } from "../src/student/registry.js";
+import { authorizationUrl, StudentRegistry } from "../src/student/registry.js";
 import { BrokerError, type Connection, type ProductConfig } from "../src/student/types.js";
 const config: ProductConfig = { product: "instagram", key: "ig", provider: "instagram_unified", appId: "123", appSecret: "app-secret", configId: "456", apiVersion: "v27.0", callbackUrl: "https://broker.example/student/oauth/callback", admission: "live", testSubjects: [] };
+const instagramLoginConfig: ProductConfig = { ...config, provider: "instagram_login", configId: undefined };
 const connection: Connection = { id: "connection", tenantId: "masterskaya", sub: "student", grantId: "grant", product: "instagram", providerId: "100", label: "my-account", capabilities: ["account", "posts", "comments"], status: "connected", updatedAt: "now" };
+it("exchanges an Instagram Login grant using its documented response permissions and identity", async () => {
+  const calls: Array<{ url: URL; init?: RequestInit }> = [];
+  const provider = new MetaStudentProvider(async (url, init) => {
+    calls.push({ url, init });
+    if (url.hostname === "api.instagram.com") return { data: [{ access_token: "short-token", user_id: "ig-user", permissions: "instagram_business_basic,instagram_business_manage_insights,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish" }] };
+    if (url.pathname === "/access_token") return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    if (url.pathname === "/v27.0/me") return { user_id: "ig-user", username: "owner" };
+    throw new Error("unexpected direct Instagram request");
+  });
+  const grant = await provider.exchange(instagramLoginConfig, "authorization-code");
+  expect(grant).toMatchObject({ accessToken: "long-token", providerUserId: "ig-user", scopes: ["instagram_business_basic", "instagram_business_manage_insights", "instagram_business_manage_comments", "instagram_business_manage_messages", "instagram_business_content_publish"], assets: [{ product: "instagram", providerId: "ig-user", label: "owner", capabilities: ["account", "posts", "metrics", "comments", "inbox"] }] });
+  expect(calls[0].url.href).toBe("https://api.instagram.com/oauth/access_token");
+  expect(calls[0].init?.method).toBe("POST");
+  const form = calls[0].init?.body as FormData;
+  expect(form.get("grant_type")).toBe("authorization_code");
+  expect(form.get("redirect_uri")).toBe("https://broker.example/student/oauth/callback");
+  expect(form.get("client_id")).toBe("123");
+  expect(form.get("client_secret")).toBe("app-secret");
+  expect(calls[1].url.origin + calls[1].url.pathname).toBe("https://graph.instagram.com/access_token");
+  expect(calls[1].url.searchParams.get("grant_type")).toBe("ig_exchange_token");
+  expect(calls[1].url.searchParams.get("access_token")).toBe("short-token");
+  expect(calls[2].url.origin + calls[2].url.pathname).toBe("https://graph.instagram.com/v27.0/me");
+  expect(calls[2].url.searchParams.get("fields")).toBe("user_id,username");
+});
+it("registers direct Instagram Login only for Instagram and creates the Instagram-hosted auth URL", () => {
+  expect(new StudentRegistry([instagramLoginConfig]).get("instagram")?.provider).toBe("instagram_login");
+  expect(() => new StudentRegistry([{ ...instagramLoginConfig, product: "facebook" }])).toThrow("invalid_provider_config");
+  const auth = new URL(authorizationUrl(instagramLoginConfig, "state"));
+  expect(auth.origin + auth.pathname).toBe("https://www.instagram.com/oauth/authorize");
+  expect(auth.searchParams.get("scope")).toBe("instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish,instagram_business_manage_insights");
+});
+it("rejects an Instagram Login identity mismatch and ungranted base scope", async () => {
+  const make = (userId: string, permissions: string) => new MetaStudentProvider(async (url) => {
+    if (url.hostname === "api.instagram.com") return { data: [{ access_token: "short-token", user_id: "ig-user", permissions }] };
+    if (url.pathname.endsWith("/access_token")) return { access_token: "long-token", token_type: "bearer", expires_in: 5_184_000 };
+    return { user_id: userId, username: "owner" };
+  });
+  await expect(make("different-user", "instagram_business_basic").exchange(instagramLoginConfig, "code")).rejects.toThrow("grant_verification_failed");
+  await expect(make("ig-user", "instagram_business_manage_comments").exchange(instagramLoginConfig, "code")).rejects.toThrow("permission_unavailable");
+});
+it("reads direct Instagram account identity from the documented user_id field on graph.instagram.com", async () => {
+  let called: URL | undefined;
+  const provider = new MetaStudentProvider(async (url) => { called = url; return { user_id: "100", username: "owner" }; });
+  const result = await provider.read(instagramLoginConfig, connection, { accessToken: "token", assetTokens: {} }, { connectionId: "connection", operation: "account" });
+  expect(called).toBeDefined();
+  expect(called!.origin + called!.pathname).toBe("https://graph.instagram.com/v27.0/me");
+  expect(called!.searchParams.get("fields")).toBe("user_id,username");
+  expect(result.data).toEqual({ user_id: "100", username: "owner" });
+});
+it("allows only the fixed official Instagram Login token and Graph API hosts", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  try {
+    await expect(requestMeta(new URL("https://api.instagram.com/oauth/access_token"), { method: "POST" })).resolves.toEqual({ ok: true });
+    await expect(requestMeta(new URL("https://graph.instagram.com/v27.0/me"))).resolves.toEqual({ ok: true });
+    await expect(requestMeta(new URL("https://instagram.com/oauth/authorize"))).rejects.toThrow("provider_host_rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally { fetchMock.mockRestore(); }
+});
 it("Unified URL pins config_id and exchanges once directly for BISU, discovers all assigned IGs", async () => {
   const auth = new URL(authorizationUrl(config, "state")); expect(auth.origin + auth.pathname).toBe("https://www.facebook.com/dialog/oauth"); expect(auth.searchParams.get("config_id")).toBe("456"); expect(auth.searchParams.has("scope")).toBe(false);
   const seen: URL[] = [];

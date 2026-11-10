@@ -20,7 +20,7 @@ function providerDiagnostic(stage: CallbackAuditStage, status?: unknown, error?:
 }
 /** No redirects, caller URLs, retry, provider payload errors or environment token fallback. */
 export const requestMeta: MetaRequest = async (url, init = {}) => {
-  if (url.protocol !== "https:" || !["graph.facebook.com", "graph.threads.com"].includes(url.hostname) || url.port || url.username || url.password) throw new BrokerError("provider_host_rejected");
+  if (url.protocol !== "https:" || !["graph.facebook.com", "graph.threads.com", "graph.instagram.com", "api.instagram.com"].includes(url.hostname) || url.port || url.username || url.password) throw new BrokerError("provider_host_rejected");
   const stage = endpointStage(url.pathname);
   let status: number | undefined;
   try {
@@ -59,7 +59,8 @@ export class MetaStudentProvider implements ProviderAdapter {
   constructor(private readonly request: MetaRequest = requestMeta) {}
   private url(config: ProductConfig, path: string, query: Record<string, string> = {}): URL {
     if (!/^\/[A-Za-z0-9_/-]+$/.test(path) || path.includes("..")) throw new BrokerError("provider_path_rejected");
-    const url = new URL(`${config.provider === "threads" ? "https://graph.threads.com" : "https://graph.facebook.com"}/${config.apiVersion}${path}`);
+    const host = config.provider === "threads" ? "graph.threads.com" : config.provider === "instagram_login" ? "graph.instagram.com" : "graph.facebook.com";
+    const url = new URL(`https://${host}/${config.apiVersion}${path}`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value); return url;
   }
   private get(config: ProductConfig, token: string, path: string, query: Record<string, string> = {}): Promise<Json> {
@@ -83,6 +84,7 @@ export class MetaStudentProvider implements ProviderAdapter {
   }
   private async exchangeOnce(config: ProductConfig, code: string): Promise<ExchangedGrant> {
     const appKey = config.appSecret;
+    if (config.provider === "instagram_login") return this.exchangeInstagramLogin(config, code);
     let bearer: string, tokenResponse: Json;
     if (config.provider === "threads") {
       const url = new URL("https://graph.threads.com/oauth/access_token");
@@ -165,6 +167,35 @@ export class MetaStudentProvider implements ProviderAdapter {
     if (!assets.length) throw new BrokerError("no_authorized_assets");
     return { accessToken: bearer, assetTokens, providerUserId, clientBusinessId, scopes, expiresAt, assets };
   }
+  private async exchangeInstagramLogin(config: ProductConfig, code: string): Promise<ExchangedGrant> {
+    if (config.product !== "instagram") throw new BrokerError("invalid_provider_config");
+    const form = new FormData();
+    form.set("client_id", config.appId); form.set("client_secret", config.appSecret); form.set("grant_type", "authorization_code"); form.set("redirect_uri", config.callbackUrl); form.set("code", code);
+    const short = await this.request(new URL("https://api.instagram.com/oauth/access_token"), { method: "POST", body: form });
+    const shortGrant = Array.isArray(short.data) && short.data.length === 1 && record(short.data[0]) ? short.data[0] : undefined;
+    if (!shortGrant || typeof shortGrant.access_token !== "string" || !shortGrant.access_token || shortGrant.access_token.length > 8192) throw new BrokerError("grant_verification_failed");
+    const providerUserId = id(shortGrant.user_id);
+    if (typeof shortGrant.permissions !== "string") throw new BrokerError("grant_verification_failed");
+    const allowedScopes = new Set(["instagram_business_basic", "instagram_business_manage_insights", "instagram_business_manage_comments", "instagram_business_manage_messages", "instagram_business_content_publish"]);
+    const scopes = [...new Set(shortGrant.permissions.split(",").map((scope: string) => scope.trim()))];
+    if (scopes.some((scope) => !allowedScopes.has(scope))) throw new BrokerError("grant_verification_failed");
+    if (!scopes.includes("instagram_business_basic")) throw new BrokerError("permission_unavailable");
+
+    const longUrl = new URL("https://graph.instagram.com/access_token");
+    longUrl.searchParams.set("grant_type", "ig_exchange_token"); longUrl.searchParams.set("client_secret", config.appSecret); longUrl.searchParams.set("access_token", shortGrant.access_token);
+    const long = await this.request(longUrl);
+    if (typeof long.access_token !== "string" || !long.access_token || long.access_token.length > 8192 || long.token_type !== "bearer" || !Number.isSafeInteger(long.expires_in) || long.expires_in <= 0) throw new BrokerError("grant_verification_failed");
+    const expiresAt = Math.floor(Date.now() / 1000) + long.expires_in;
+    if (expiresAt <= Date.now() / 1000) throw new BrokerError("reauth_required");
+
+    const me = await this.get(config, long.access_token, "/me", { fields: "user_id,username" });
+    if (id(me.user_id) !== providerUserId) throw new BrokerError("grant_verification_failed");
+    const capabilities: Operation[] = ["account", "posts"];
+    if (scopes.includes("instagram_business_manage_insights")) capabilities.push("metrics");
+    if (scopes.includes("instagram_business_manage_comments")) capabilities.push("comments");
+    if (scopes.includes("instagram_business_manage_messages")) capabilities.push("inbox");
+    return { accessToken: long.access_token, assetTokens: {}, providerUserId, scopes, expiresAt, assets: [{ product: "instagram", providerId: providerUserId, label: text(me.username, providerUserId), capabilities }] };
+  }
   async refresh(config: ProductConfig, credential: Credential, expectedUserId?: string): Promise<Credential & { expiresAt: number; scopes: string[] }> {
     return new MetaStudentProvider(bounded(this.request)).refreshOnce(config, credential, expectedUserId);
   }
@@ -196,6 +227,12 @@ export class MetaStudentProvider implements ProviderAdapter {
     const root = `/${id(connection.providerId)}`, limit = String(input.limit ?? 20);
     const query = { limit, ...(input.cursor ? { after: input.cursor } : {}) };
     if (input.operation === "account") {
+      if (config.provider === "instagram_login" && connection.product === "instagram") {
+        const fields = "user_id,username";
+        const result = await this.get(config, bearer, "/me", { fields });
+        if (id(result.user_id) !== connection.providerId) throw new BrokerError("grant_verification_failed");
+        return { data: scalarProjection(result, fields.split(",")), coverage: "partial", limitations: ["selected_profile_fields_only"] };
+      }
       const fields = connection.product === "instagram" ? "id,username,name,followers_count,media_count" : connection.product === "threads" ? "id,username,name" : connection.product === "ads" ? "id,name,account_id,account_status,currency" : connection.product === "whatsapp" ? "id,verified_name,display_phone_number,quality_rating" : "id,name,fan_count,followers_count";
       const result = await this.get(config, bearer, root, { fields });
       if (id(result.id) !== connection.providerId) throw new BrokerError("grant_verification_failed");

@@ -1,6 +1,6 @@
 export const PRODUCTS = ["instagram", "facebook", "messenger", "threads", "ads", "whatsapp"] as const;
 export type Product = typeof PRODUCTS[number];
-export type Provider = "instagram_unified" | "facebook_business" | "threads";
+export type Provider = "instagram_unified" | "instagram_login" | "facebook_business" | "threads";
 export type Operation = "account" | "posts" | "metrics" | "comments" | "inbox";
 export interface Subject { tenantId: string; sub: string }
 export interface Sealed { iv: string; tag: string; ciphertext: string }

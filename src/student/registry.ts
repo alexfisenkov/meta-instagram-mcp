@@ -1,17 +1,17 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { BrokerError, PRODUCTS, type Product, type ProductConfig, type Subject } from "./types.js";
-const family = { instagram: "instagram_unified", facebook: "facebook_business", messenger: "facebook_business", threads: "threads", ads: "facebook_business", whatsapp: "facebook_business" } as const;
+import { BrokerError, PRODUCTS, type Product, type ProductConfig, type Provider, type Subject } from "./types.js";
+const family: Record<Product, readonly Provider[]> = { instagram: ["instagram_unified", "instagram_login"], facebook: ["facebook_business"], messenger: ["facebook_business"], threads: ["threads"], ads: ["facebook_business"], whatsapp: ["facebook_business"] };
 export const LABELS: Record<Product, string> = { instagram: "Instagram", facebook: "Facebook Pages", messenger: "Messenger", threads: "Threads", ads: "Meta Ads", whatsapp: "WhatsApp Business" };
 const ref = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
-const configSchema = z.object({ product: z.enum(PRODUCTS), key: z.string().regex(/^[a-z0-9_-]{1,64}$/), provider: z.enum(["instagram_unified", "facebook_business", "threads"]), appIdEnv: ref, appSecretEnv: ref, configId: z.string().regex(/^\d+$/).optional(), apiVersion: z.string().regex(/^v\d+\.0$/), admission: z.enum(["disabled", "test", "live"]).default("disabled"), testSubjects: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).max(100).default([]), webhookVerifyTokenEnv: ref.optional() }).strict();
+const configSchema = z.object({ product: z.enum(PRODUCTS), key: z.string().regex(/^[a-z0-9_-]{1,64}$/), provider: z.enum(["instagram_unified", "instagram_login", "facebook_business", "threads"]), appIdEnv: ref, appSecretEnv: ref, configId: z.string().regex(/^\d+$/).optional(), apiVersion: z.string().regex(/^v\d+\.0$/), admission: z.enum(["disabled", "test", "live"]).default("disabled"), testSubjects: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).max(100).default([]), webhookVerifyTokenEnv: ref.optional() }).strict();
 export class StudentRegistry {
   private readonly configs: Map<Product, ProductConfig>;
   constructor(configs: ProductConfig[]) {
     this.configs = new Map(); const keys = new Set<string>();
     for (const config of configs) {
-      if (this.configs.has(config.product) || keys.has(config.key) || config.provider !== family[config.product] || !/^\d+$/.test(config.appId) || !config.appSecret || !/^v\d+\.0$/.test(config.apiVersion) || (config.provider !== "threads" && !/^\d+$/.test(config.configId ?? ""))) throw new BrokerError("invalid_provider_config");
+      if (this.configs.has(config.product) || keys.has(config.key) || !family[config.product].includes(config.provider) || !/^\d+$/.test(config.appId) || !config.appSecret || !/^v\d+\.0$/.test(config.apiVersion) || ((config.provider === "instagram_unified" || config.provider === "facebook_business") && !/^\d+$/.test(config.configId ?? "")) || (config.provider === "instagram_login" && config.product !== "instagram")) throw new BrokerError("invalid_provider_config");
       const callback = new URL(config.callbackUrl);
       if (callback.protocol !== "https:" || callback.username || callback.password || !["/student/oauth/callback", "/meta/oauth/callback"].includes(callback.pathname) || callback.search || callback.hash) throw new BrokerError("invalid_callback_url");
       this.configs.set(config.product, structuredClone(config)); keys.add(config.key);
@@ -41,9 +41,10 @@ export function configFingerprint(c: ProductConfig): string {
   return createHash("sha256").update(JSON.stringify(["oauth-grant-v1", c.product, c.key, c.provider, c.appId, c.appSecret, c.configId ?? null, c.apiVersion, c.callbackUrl])).digest("hex");
 }
 export function authorizationUrl(c: ProductConfig, state: string): string {
-  const url = new URL(c.provider === "threads" ? "https://threads.com/oauth/authorize" : "https://www.facebook.com/dialog/oauth");
+  const url = new URL(c.provider === "threads" ? "https://threads.com/oauth/authorize" : c.provider === "instagram_login" ? "https://www.instagram.com/oauth/authorize" : "https://www.facebook.com/dialog/oauth");
   url.searchParams.set("client_id", c.appId); url.searchParams.set("redirect_uri", c.callbackUrl); url.searchParams.set("response_type", "code"); url.searchParams.set("state", state);
   if (c.provider === "threads") url.searchParams.set("scope", "threads_basic,threads_read_replies,threads_manage_insights");
+  else if (c.provider === "instagram_login") url.searchParams.set("scope", "instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish,instagram_business_manage_insights");
   else { url.searchParams.set("config_id", c.configId!); if (c.provider === "instagram_unified") { url.searchParams.set("display", "popup"); url.searchParams.set("prompt", "login"); url.searchParams.set("override_default_response_type", "true"); } }
   return url.toString();
 }

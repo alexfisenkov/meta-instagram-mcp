@@ -84,7 +84,8 @@ export class StudentBroker {
           if ((db.generations[generationKey(state, state.product)] ?? 0) !== state.generation) throw new BrokerError("oauth_cancelled");
           db.grants.push(grant);
           const confirmed = new Set(result.assets.map((asset) => asset.providerId)); const retiredIds = new Set<string>();
-          for (const previous of db.connections.filter((c) => sameSubject(c, state) && c.product === state.product && !confirmed.has(c.providerId))) {
+          // Direct Instagram Login grants one account at a time; a separate login must retain the user's other accounts.
+          for (const previous of db.connections.filter((c) => config.provider !== "instagram_login" && sameSubject(c, state) && c.product === state.product && !confirmed.has(c.providerId))) {
             previous.status = "disconnected"; previous.capabilities = []; previous.reason = "consent_asset_removed"; previous.updatedAt = updatedAt; retiredIds.add(previous.id);
           }
           db.events = db.events.filter((event) => !retiredIds.has(event.connectionId));
