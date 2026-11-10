@@ -173,16 +173,25 @@ it("carries only numeric provider diagnostics into callback audit", async () => 
   ]);
   expect(JSON.stringify(events)).not.toContain(marker);
 });
-it("audits fixed Instagram verification checkpoints without provider payloads", async () => {
-  const { vault } = await fixture(); const events: any[] = [];
-  for (const reason of ["instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"]) {
-    const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
-    const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
-    const login = await broker.begin(a, "instagram");
-    expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" })).toContain("meta=error");
-    expect(events.at(-1)?.reason).toBe(reason);
-  }
+it.each(["threads_app_binding_missing", "threads_app_token_invalid", "threads_inspection_response_invalid", "threads_inspection_not_valid", "threads_inspection_type_invalid", "threads_inspection_app_mismatch", "threads_inspection_scopes_invalid", "threads_inspection_identity_invalid", "threads_inspection_expiry_invalid", "threads_inspection_expired", "threads_account_identity_invalid", "threads_identity_mismatch", "threads_expected_identity_missing", "instagram_short_identity_missing", "instagram_short_identity_invalid", "instagram_profile_response_invalid", "instagram_profile_identity_missing", "instagram_profile_identity_invalid", "instagram_short_response_invalid", "instagram_permissions_invalid", "instagram_permissions_unexpected", "instagram_long_response_invalid", "instagram_token_type_invalid", "instagram_token_expiry_invalid"] as const)("audits fixed provider verification checkpoints without provider payloads: %s", async (reason) => {
+  const { vault } = await fixture(); const events: unknown[] = []; let exchanges = 0;
+  const provider: ProviderAdapter = { exchange: async () => { exchanges++; throw new BrokerError(reason); }, read: async () => { throw new Error("unused"); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  expect(await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" })).toContain("meta=error");
+  expect(exchanges).toBe(1);
+  expect(events).toEqual([{ event: "student_oauth_callback", stage: "token_exchange", product: "instagram", outcome: "error", reason, hasCode: true, hasProviderError: false }]);
+  const db = await vault.snapshot(); expect(db.states).toEqual([]); expect(db.grants).toEqual([]);
   expect(JSON.stringify(events)).not.toMatch(/PRIVATE-code|student-a|authorizationUrl|access_token|credential/);
+});
+it.each(["token_short_exchange", "token_long_exchange", "app_token_exchange", "token_refresh"] as const)("preserves the fixed %s audit checkpoint and only numeric Meta diagnostics", async (stage) => {
+  const { vault } = await fixture(); const events: unknown[] = [];
+  const provider: ProviderAdapter = { exchange: async () => { throw new BrokerError("provider_unavailable", { stage, status: 400, metaCode: 452, metaSubcode: 4279019 }); }, read: async () => { throw new Error("unused"); } };
+  const broker = new StudentBroker(vault, new StudentRegistry(configs), provider, "https://platform.example", Date.now, (event) => events.push(event));
+  const login = await broker.begin(a, "instagram");
+  await broker.callback({ state: new URL(login.authorizationUrl).searchParams.get("state")!, code: "PRIVATE-code" });
+  expect(events).toEqual([{ event: "student_oauth_callback", stage, product: "instagram", outcome: "error", reason: "provider_unavailable", hasCode: true, hasProviderError: false, status: 400, metaCode: 452, metaSubcode: 4279019 }]);
+  expect(JSON.stringify(events)).not.toMatch(/PRIVATE|https:|student-a|access_token/);
 });
 it("keeps callback redirect safe when broker error accessors throw", async () => {
   const marker = "PRIVATE-throwing-error-getter-marker"; const { vault } = await fixture(); const events: unknown[] = [];
@@ -269,6 +278,54 @@ it("a provider-revoked token becomes reauth_required for every asset sharing its
   await expect(reader.read(a, { connectionId: (await broker.list(a)).connections[0].id, operation: "account" })).rejects.toThrow("reauth_required");
   expect((await reader.list(a)).connections.map((c) => c.status)).toEqual(["reauth_required", "reauth_required"]);
   const grant = (await vault.snapshot()).grants[0]; expect(vault.credential(grant).accessToken).toBe("");
+});
+it.each([10, 200])("denies only the selected operation for Meta %s, keeps shared assets/profile reads and emits a safe read audit", async (metaCode) => {
+  const { broker, vault } = await fixture(); await connect(broker);
+  const before = (await broker.list(a)).connections, events: unknown[] = []; let calls = 0;
+  const reader = new StudentBroker(vault, new StudentRegistry(configs), { exchange: async () => { throw new Error(); }, read: async (_config, selected, _credential, input) => {
+    calls++;
+    if (input.operation === "posts") throw new BrokerError("permission_unavailable", { stage: "api_request", status: 403, metaCode, metaSubcode: 123, rawBody: "PRIVATE-payload-token" } as any);
+    return { data: { id: selected.providerId }, coverage: "partial", limitations: [] };
+  } }, "https://platform.example", Date.now, undefined, (event) => events.push(event));
+  await expect(reader.read(a, { connectionId: before[0].id, operation: "posts" })).rejects.toThrow("permission_unavailable");
+  const after = (await reader.list(a)).connections;
+  expect(after[0]).toMatchObject({ status: "connected", capabilities: ["account"], reason: "operation_permission_unavailable" });
+  expect(after[1]).toEqual(before[1]);
+  expect(vault.credential((await vault.snapshot()).grants[0]).accessToken).toBe("example-provider-token");
+  await expect(reader.read(a, { connectionId: before[0].id, operation: "account" })).resolves.toMatchObject({ data: { id: "ig-1" } });
+  await expect(reader.read(a, { connectionId: before[1].id, operation: "account" })).resolves.toMatchObject({ data: { id: "ig-2" } });
+  const priorCalls = calls;
+  await expect(reader.read(b, { connectionId: before[0].id, operation: "account" })).rejects.toThrow("connection_not_found");
+  expect(calls).toBe(priorCalls);
+  expect(events).toEqual([{ event: "student_connection_read_error", product: "instagram", operation: "posts", reason: "permission_unavailable", status: 403, metaCode, metaSubcode: 123 }]);
+  expect(JSON.stringify(events)).not.toMatch(/PRIVATE|ig-1|ig-2|student-a|example-provider-token|https:/);
+});
+it("fails closed for a denied identity read without invalidating another asset in the grant", async () => {
+  const { broker, vault } = await fixture(); await connect(broker); const before = (await broker.list(a)).connections;
+  const reader = new StudentBroker(vault, new StudentRegistry(configs), { exchange: async () => { throw new Error(); }, read: async () => { throw new BrokerError("permission_unavailable"); } }, "https://platform.example");
+  await expect(reader.read(a, { connectionId: before[0].id, operation: "account" })).rejects.toThrow("permission_unavailable");
+  const after = (await reader.list(a)).connections;
+  expect(after[0]).toMatchObject({ status: "reauth_required", capabilities: [], reason: "identity_verification_unavailable" });
+  expect(after[1]).toEqual(before[1]);
+  expect((await vault.snapshot()).grants[0].status).toBe("active");
+});
+it("does not let a late permission denial remove a capability from a replacement grant", async () => {
+  const { broker, vault, provider } = await fixture(); await connect(broker); const first = (await broker.list(a)).connections[0];
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; }), wait = new Promise<void>((resolve) => { release = resolve; });
+  const reader = new StudentBroker(vault, new StudentRegistry(configs), { ...provider, read: async () => { entered(); await wait; throw new BrokerError("permission_unavailable"); } }, "https://platform.example");
+  const pending = reader.read(a, { connectionId: first.id, operation: "posts" });
+  const rejected = expect(pending).rejects.toThrow("permission_unavailable");
+  await started; await connect(broker); release(); await rejected;
+  expect((await broker.list(a)).connections[0]).toMatchObject({ status: "connected", capabilities: ["account", "posts"] });
+});
+it("logs only a fixed read failure for unknown provider errors and ignores a failing audit sink", async () => {
+  const { broker, vault } = await fixture(); await connect(broker); const before = await broker.list(a), events: unknown[] = [];
+  const reader = new StudentBroker(vault, new StudentRegistry(configs), { exchange: async () => { throw new Error(); }, read: async () => { throw new Error("PRIVATE-provider-url-token-content"); } }, "https://platform.example", Date.now, undefined, (event) => { events.push(event); throw new Error("PRIVATE-sink"); });
+  await expect(reader.read(a, { connectionId: before.connections[0].id, operation: "posts" })).rejects.toThrow("PRIVATE-provider-url-token-content");
+  expect(await reader.list(a)).toEqual(before);
+  expect(events).toEqual([{ event: "student_connection_read_error", product: "instagram", operation: "posts", reason: "read_failed" }]);
+  expect(JSON.stringify(events)).not.toContain("PRIVATE");
 });
 it("narrowed reconsent retires missing own assets and events but preserves other subjects/products", async () => {
   const { broker, vault, provider } = await fixture(); await connect(broker); const before = (await broker.list(a)).connections;

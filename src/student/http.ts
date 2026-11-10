@@ -16,6 +16,8 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(options.port, "127.0.0.1", resolve); });
   const address = server.address(); if (!address || typeof address === "string") throw new BrokerError("listener_failed");
   const url = `http://127.0.0.1:${address.port}`;
+  // Только счётчик текущего процесса: ни содержимого callback, ни строк журнала.
+  let callbacksReceived = 0;
   async function dispatch(request: IncomingMessage, response: ServerResponse) {
     response.setHeader("Cache-Control", "no-store"); response.setHeader("Referrer-Policy", "no-referrer");
     const counts = new Map<string, number>(); for (let i = 0; i < request.rawHeaders.length; i += 2) { const name = request.rawHeaders[i].toLowerCase(); counts.set(name, (counts.get(name) ?? 0) + 1); }
@@ -29,10 +31,19 @@ export async function startStudentServer(options: Options): Promise<{ url: strin
       if (!options.legal) return json(response, 503, { error: "not_configured" });
       response.statusCode = 200; response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(renderLegal(options.legal, parsed.pathname === "/data-deletion")); return;
     }
+    // Точный контракт используется неизменяемыми release build/install probes.
     if (parsed.pathname === "/health") return json(response, request.method === "GET" ? 200 : 405, { status: "ok" });
     if (parsed.pathname === "/capabilities") return json(response, request.method === "GET" ? 200 : 405, request.method === "GET" ? { capabilities: STUDENT_BROKER_CAPABILITIES } : { error: "method_not_allowed" });
+    if (parsed.pathname === "/student/diagnostics/callback-count") {
+      if (request.socket.remoteAddress !== "127.0.0.1") return json(response, 403, { error: "loopback_required" });
+      if (!safeEqual(request.headers.authorization ?? "", `Bearer ${options.auth.serviceToken}`)) throw new BrokerError("unauthorized");
+      if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (parsed.search) throw new BrokerError("query_not_allowed");
+      return json(response, 200, { callbacksReceived });
+    }
     if (parsed.pathname === "/student/oauth/callback" || parsed.pathname === "/youtube/oauth/callback") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      callbacksReceived = Math.min(Number.MAX_SAFE_INTEGER, callbacksReceived + 1);
       if (["state", "code", "error", "iss"].some((key) => parsed.searchParams.getAll(key).length > 1)) throw new BrokerError("invalid_callback");
       const callbackBroker = parsed.pathname === "/youtube/oauth/callback" ? options.youtubeBroker ?? options.broker : options.broker;
       const target = await callbackBroker.callback({ state: parsed.searchParams.get("state") ?? undefined, code: parsed.searchParams.get("code") ?? undefined, error: parsed.searchParams.get("error") ?? undefined, issuer: parsed.searchParams.get("iss") ?? undefined, callbackPath: parsed.pathname });

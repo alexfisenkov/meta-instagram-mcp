@@ -2,6 +2,14 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- Provider checkpoint audit regressions use independent real-vault cases, keeping one begin/error/consumed-state lifecycle per case instead of accumulating 24 protected filesystem cycles inside a single Windows timeout. Runtime policy and test timeouts are unchanged.
+
+- Threads accepts the documented inspection shape without `app_id` only after a fresh dedicated app-token binding, with strict USER/scopes/identity/expiry checks; an explicit foreign app ID and all non-Threads missing app IDs are rejected. Fixed reasons expose the failing verification checkpoint without payloads.
+- Read failures emit only fixed metadata and numeric provider codes. Operation permission denials remove only the selected capability; identity checks and invalid-token handling remain fail closed without discarding unrelated working assets. Conversations use minimal documented metadata fields; live Inbox acceptance remains separate.
+
+- Direct Instagram Login retains the canonical desktop URL while trusted clients can select Meta’s current mobile/recovery `force_reauth`; the broker accepts one explicit flat/wrapped profile and bounded actual CSV/array permissions, preserves raw numeric identity precision and binds app-scoped identity to the verified professional account without returning provider payloads. Failed reauthorization retains existing connections.
+- Threads long-lived exchange/refresh use the documented query token contract and fixed short/long/app/refresh diagnostic stages. Loopback health preserves its exact release-probe response. A separate service-authenticated loopback diagnostic endpoint exposes a bounded process-local callback arrival count, including unknown state, without per-request logs; restart resets it.
+
 - Separate loopback hosted Meta broker with five subject-bound MCP tools; legacy single-account runtime preserved.
 - Strict service bearer plus short HS256 subject JWT, encrypted single-writer grant/asset/state vault, one-use bound OAuth, own-asset read checks and disconnect generation fencing.
 - Product-specific Instagram Unified/BISU, Facebook Pages, Messenger, Threads, Ads and WhatsApp discovery/read adapters; actual grant capabilities, safe DTOs and signature-first scoped webhooks.

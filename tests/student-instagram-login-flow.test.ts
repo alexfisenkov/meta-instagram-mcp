@@ -14,17 +14,17 @@ it("persists two independent Instagram Login accounts, keeps credentials private
   let vault = await StudentVault.open(dir, key);
   const owner = { tenantId: "masterskaya", sub: "synthetic-owner" }, other = { ...owner, sub: "synthetic-other" };
   const config: ProductConfig = { product: "instagram", key: "instagram-login", provider: "instagram_login", appId: "123", appSecret: "synthetic-app-secret", apiVersion: "v27.0", callbackUrl: "https://broker.example/meta/oauth/callback", admission: "test", testSubjects: [owner.sub] };
-  let providerCalls = 0;
+  let providerCalls = 0, mismatchedProfile = false;
   const provider = new MetaStudentProvider(async (url, init) => {
     providerCalls++;
     if (url.hostname === "api.instagram.com") {
       const account = String((init!.body as FormData).get("code"));
-      return { data: [{ access_token: `synthetic-short-${account}`, user_id: account, permissions: "instagram_business_basic" }] };
+      return { data: [{ access_token: `synthetic-short-${account}`, user_id: `app-${account}`, permissions: ["instagram_business_basic"] }] };
     }
     if (url.pathname === "/access_token") return { access_token: url.searchParams.get("access_token")!.replace("short", "long"), token_type: "bearer", expires_in: 5_184_000 };
     if (url.pathname === "/v27.0/me") {
       const account = String((init!.headers as Record<string, string>).Authorization).replace("Bearer synthetic-long-", "");
-      return { user_id: account, username: `profile-${account}` };
+      return { data: [{ id: mismatchedProfile ? "wrong-app" : `app-${account}`, user_id: mismatchedProfile ? "wrong-resource" : account, username: `profile-${account}`, access_token: "synthetic-private-profile-token" }] };
     }
     throw new Error("unexpected synthetic provider request");
   });
@@ -46,6 +46,12 @@ it("persists two independent Instagram Login accounts, keeps credentials private
       expect(providerCalls).toBe(beforeReplay);
     }
     expect((await broker.list(owner)).connections.map((c) => c.status)).toEqual(["connected", "connected"]);
+    const preserved = await broker.list(owner), grantsBefore = (await vault.snapshot()).grants;
+    const retry = await broker.begin(owner, "instagram"); mismatchedProfile = true;
+    expect(await broker.callback({ state: new URL(retry.authorizationUrl).searchParams.get("state")!, code: "one" })).toBe("https://platform.example/social?meta=error");
+    expect(await broker.list(owner)).toEqual(preserved);
+    expect((await vault.snapshot()).grants).toEqual(grantsBefore);
+    mismatchedProfile = false;
     await vault.close();
     vault = await StudentVault.open(dir, key); broker = makeBroker();
     const connections = (await broker.list(owner)).connections;
@@ -56,7 +62,7 @@ it("persists two independent Instagram Login accounts, keeps credentials private
       await expect(broker.read(other, { connectionId: connection.id, operation: "account" })).rejects.toThrow("connection_not_found");
     }
     expect((await broker.list(other)).connections).toEqual([]);
-    expect(JSON.stringify(await broker.list(owner))).not.toMatch(/synthetic-(?:short|long)|synthetic-app-secret|credential/);
+    expect(JSON.stringify(await broker.list(owner))).not.toMatch(/synthetic-(?:short|long|private)|synthetic-app-secret|credential|app-one|app-two/);
     expect(await readFile(join(dir, "vault.json"), "utf8")).not.toMatch(/synthetic-(?:short|long)|profile-one|profile-two/);
   } finally { await vault.close(); key.fill(0); await rm(dir, { recursive: true, force: true }); }
 });
