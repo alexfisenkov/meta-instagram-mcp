@@ -51,6 +51,7 @@ export const requestMeta: MetaRequest = async (url, init = {}) => {
       });
     }
     catch { throw new BrokerError("provider_unavailable", providerDiagnostic(stage, status)); }
+    if (response.ok && url.hostname === "www.googleapis.com" && url.pathname === "/youtube/v3/channels" && !record(body)) throw new BrokerError("youtube_channels_response_invalid", providerDiagnostic(stage, status));
     if (!response.ok || body.error) {
       const google = ["oauth2.googleapis.com", "openidconnect.googleapis.com", "www.googleapis.com"].includes(url.hostname);
       const errorCode = typeof body.error === "string" ? body.error : body.error?.code;

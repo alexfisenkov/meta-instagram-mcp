@@ -17,11 +17,28 @@ function googleId(value: unknown): string {
   return value;
 }
 function safeText(value: unknown, fallback = ""): string { return typeof value === "string" ? value.slice(0, 512) : fallback; }
+type ChannelValidationReason = "youtube_channels_response_invalid" | "youtube_channel_row_invalid" | "youtube_channels_cursor_invalid";
+function invalidChannels(reason: ChannelValidationReason): never { throw new BrokerError(reason, { stage: "asset_discovery" }); }
 function channelRow(value: unknown): Json {
-  if (!record(value)) throw new BrokerError("provider_response_invalid");
-  const channelId = googleId(value.id);
-  if (!record(value.snippet) || typeof value.snippet.title !== "string") throw new BrokerError("provider_response_invalid");
+  if (!record(value)) return invalidChannels("youtube_channel_row_invalid");
+  let channelId: string;
+  try { channelId = googleId(value.id); } catch { return invalidChannels("youtube_channel_row_invalid"); }
+  if (!record(value.snippet) || typeof value.snippet.title !== "string") return invalidChannels("youtube_channel_row_invalid");
   return { ...value, id: channelId };
+}
+function channelItems(body: unknown, priorCount: number): Json[] {
+  if (!record(body) || Object.hasOwn(body, "kind") && body.kind !== "youtube#channelListResponse") return invalidChannels("youtube_channels_response_invalid");
+  if (Object.hasOwn(body, "pageInfo")) {
+    if (!record(body.pageInfo)) return invalidChannels("youtube_channels_response_invalid");
+    for (const key of ["totalResults", "resultsPerPage"]) if (Object.hasOwn(body.pageInfo, key) && (!Number.isSafeInteger(body.pageInfo[key]) || body.pageInfo[key] < 0 || body.pageInfo[key] > 2_147_483_647)) return invalidChannels("youtube_channels_response_invalid");
+  }
+  // Discovery marks items optional and array-typed, not nullable. An omitted array
+  // is accepted only with positive response-kind + zero-total proof; {} is never empty.
+  const omitted = !Object.hasOwn(body, "items");
+  if (omitted ? body.kind !== "youtube#channelListResponse" || !record(body.pageInfo) || body.pageInfo.totalResults !== 0 : !Array.isArray(body.items) || body.items.length > 50) return invalidChannels("youtube_channels_response_invalid");
+  const items = omitted ? [] : body.items.map(channelRow);
+  if (record(body.pageInfo) && body.pageInfo.totalResults === 0 && (items.length > 0 || priorCount > 0)) return invalidChannels("youtube_channels_response_invalid");
+  return items;
 }
 function grantedScopes(value: unknown): string[] {
   if (typeof value !== "string" || value.length > 4096) throw new BrokerError("grant_verification_failed");
@@ -112,13 +129,13 @@ export class YouTubeStudentProvider {
       url.searchParams.set("part", "snippet,statistics,contentDetails"); url.searchParams.set("mine", "true"); url.searchParams.set("maxResults", "50");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
       const body = await this.request(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-      if (!Array.isArray(body.items) || body.items.length > 50) throw new BrokerError("provider_response_invalid");
-      const rows = body.items.map(channelRow);
+      const rows = channelItems(body, result.length);
       result.push(...rows);
       const next = body.nextPageToken;
-      if (next === undefined) return result;
-      if (typeof next !== "string" || !next || next.length > 2048 || /[\u0000-\u001f\u007f]/.test(next)) throw new BrokerError("provider_response_invalid");
-      if (cursors.has(next)) throw new BrokerError("provider_paging_cycle");
+      if (next === undefined || next === "") return result;
+      if (typeof next !== "string" || !next || next.length > 2048 || /[\u0000-\u001f\u007f]/.test(next)) return invalidChannels("youtube_channels_cursor_invalid");
+      if (record(body.pageInfo) && body.pageInfo.totalResults === 0) return invalidChannels("youtube_channels_response_invalid");
+      if (cursors.has(next)) return invalidChannels("youtube_channels_cursor_invalid");
       cursors.add(next); pageToken = next;
     }
     throw new BrokerError("discovery_exceeds_limit");
