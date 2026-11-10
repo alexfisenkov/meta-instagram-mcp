@@ -45,8 +45,9 @@ export class StudentInboxBroker {
             const current = await this.vault.snapshot();
             const selected = current.connections.find(v => v.id === c.id && sameSubject(v, subject));
             const active = current.grants.find(v => v.id === grant.id && sameSubject(v, subject));
-            if (!selected || selected.status !== 'connected' || selected.grantId !== grant.id || !selected.capabilities.includes('inbox') || !active || active.status !== 'active' || JSON.stringify(active.credential) !== JSON.stringify(grant.credential))
+            if (!selected || selected.status !== 'connected' || selected.grantId !== grant.id || !selected.capabilities.includes('inbox') || !active || active.status !== 'active' || JSON.stringify(active.credential) !== JSON.stringify(grant.credential) || active.expiresAt !== undefined && active.expiresAt <= this.now() / 1000)
                 throw new BrokerError('connection_unavailable');
+            return active.expiresAt;
         };
         const reduceInbox = async () => this.vault.transaction(data => {
             const selected = data.connections.find(v => v.id === c.id && sameSubject(v, subject));
@@ -77,7 +78,7 @@ export class StudentInboxBroker {
                     data.replyAttempts ??= [];
                     const previous = data.replyAttempts.find(a => sameSubject(a, subject) && a.intentId === intentId);
                     if (previous) {
-                        if (previous.connectionId !== c.id || previous.conversationId !== conversationId || previous.textHash !== textHash || previous.recipientHash !== recipientHash)
+                        if (previous.connectionId !== c.id || previous.conversationId !== conversationId || previous.textHash !== textHash || previous.recipientHash !== recipientHash || previous.expiresAt !== undefined && Date.parse(previous.expiresAt) !== deadline)
                             throw new BrokerError('intent_conflict');
                         return previous;
                     }
@@ -88,7 +89,7 @@ export class StudentInboxBroker {
                     if (!current || current.status !== 'connected' || current.grantId !== grant.id || !active || active.status !== 'active')
                         throw new BrokerError('connection_unavailable');
                     const timestamp = new Date(this.now()).toISOString();
-                    data.replyAttempts.push({ ...subject, intentId, connectionId: c.id, grantId: grant.id, conversationId: conversationId!, textHash, recipientHash, status: 'sending', createdAt: timestamp, updatedAt: timestamp });
+                    data.replyAttempts.push({ ...subject, intentId, connectionId: c.id, grantId: grant.id, conversationId: conversationId!, textHash, recipientHash, status: 'sending', createdAt: timestamp, updatedAt: timestamp, expiresAt: new Date(deadline).toISOString() });
                     return undefined;
                 });
                 if (existing)
@@ -99,7 +100,16 @@ export class StudentInboxBroker {
                     failureCode?: string;
                 };
                 try {
-                    outcome = await provider.send(config, c, credential, { conversationId: conversationId!, text, recipientHash }, unchanged);
+                    outcome = await provider.send(config, c, credential, { conversationId: conversationId!, text, recipientHash }, async () => {
+                        const activeExpiry = await unchanged();
+                        // This synchronous guard runs after the last await, immediately before POST.
+                        // Neither the persisted intent deadline nor the original grant lifetime is extended.
+                        return () => {
+                            const at = this.now();
+                            if (deadline <= at) throw new BrokerError('reply_intent_expired');
+                            if ([grant.expiresAt, activeExpiry].some(expiry => expiry !== undefined && expiry <= at / 1000)) throw new BrokerError('connection_unavailable');
+                        };
+                    });
                 }
                 catch (error) {
                     if (error instanceof BrokerError && ['reauth_required', 'grant_verification_failed'].includes(error.code))

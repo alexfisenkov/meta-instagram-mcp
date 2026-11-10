@@ -215,7 +215,7 @@ export class MetaInbox {
     async send(config: ProductConfig, c: Connection, credential: Credential, input: InboxInput & {
         text: string;
         recipientHash: string;
-    }, beforeSend?: () => Promise<void>): Promise<Delivery> {
+    }, beforeSend?: () => Promise<void | (() => void)>): Promise<Delivery> {
         this.validate(input);
         if (!validReplyText(c.product, input.text) || !/^[a-f0-9]{64}$/.test(input.recipientHash))
             throw new BrokerError('invalid_request');
@@ -225,7 +225,12 @@ export class MetaInbox {
             throw new BrokerError('recipient_changed');
         if (!p.replyPolicy.canReply || !p.peer)
             throw new BrokerError('reply_unavailable');
-        await beforeSend?.();
+        const finalAuthorization = await beforeSend?.();
+        // All asynchronous proof is complete. Recheck the fixed window and authorization
+        // deadlines synchronously; slow preflight must never extend an allowed send.
+        finalAuthorization?.();
+        const windowEnd = Date.parse(p.replyPolicy.windowEndsAt ?? '');
+        if (!Number.isFinite(windowEnd) || windowEnd <= this.now()) throw new BrokerError('reply_unavailable');
         try {
             const receipt = await r.session.call(`/${segment(c.providerId)}/messages`, {}, { recipient: { id: p.peer }, ...(c.product === 'messenger' ? { messaging_type: 'RESPONSE' } : {}), message: { text: input.text } });
             const id = receipt.message_id;
