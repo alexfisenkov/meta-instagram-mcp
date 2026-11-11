@@ -8,7 +8,7 @@ import { PublishingStore } from "../src/student/publishing-store.js";
 import { PublishingBroker } from "../src/student/publishing-broker.js";
 import { PublishingProviders, TIKTOK_DISCLOSURE_VERSION } from "../src/student/provider-publishing.js";
 import { PublishingHttp, mediaUrl, providerUrl, spoolMedia, type ProviderFetch } from "../src/student/provider-publishing-http.js";
-import { canonical, targetHash, type Submit, type Access } from "../src/student/publishing-types.js";
+import { canonical, targetHash, type Submit, type Access, type Delivery } from "../src/student/publishing-types.js";
 const subject = { tenantId: "masterskaya", sub: "synthetic-a" }, other = { tenantId: "masterskaya", sub: "synthetic-b" };
 const bytes = Buffer.from("synthetic MP4 source"), sha = createHash("sha256").update(bytes).digest("hex"), policy = { origin: "https://media.example.test", pathPrefix: "/api/v1/social/publishing/media/", maxBytes: 100000 };
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -150,6 +150,87 @@ async function progress(b: PublishingBroker, s: Submit, max = 8) {
     return b.status(subject, s.deliveryId);
 }
 describe("durable video publishing", () => {
+    it.each([{ label: "omitted", ids: undefined }, { label: "empty", ids: [] }])("does not invent a TikTok post ID for completed nonpublic delivery with $label ids", async ({ ids }) => {
+        const s = request("tiktok"), f = fixture(s);
+        const fetcher: ProviderFetch = async (input, init) => String(input).includes("status/fetch") ? json({ data: { status: "PUBLISH_COMPLETE", ...(ids === undefined ? {} : { publicaly_available_post_id: ids }) }, error: { code: "ok" } }) : f.fetcher(input, init);
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        const r = await progress(x.broker, s);
+        expect(r.state).toBe("published");
+        expect(r.providerId).toBeUndefined();
+        expect(r.permalink).toBeUndefined();
+        expect(JSON.stringify(r)).not.toContain("v_pub_file");
+    });
+    it.each([{ label: "omitted", ids: undefined }, { label: "empty", ids: [] }])("polls pending TikTok moderation read-only until a real post ID arrives, $label ids", async ({ ids }) => {
+        const s = request("tiktok");
+        s.options.privacyLevel = "PUBLIC_TO_EVERYONE";
+        s.targetHash = targetHash(s);
+        const f = fixture(s);
+        let polls = 0;
+        const fetcher: ProviderFetch = async (input, init) => {
+            if (String(input).includes("status/fetch")) {
+                polls++;
+                if (polls === 1)
+                    return json({ data: { status: "PUBLISH_COMPLETE", ...(ids === undefined ? {} : { publicaly_available_post_id: ids }) }, error: { code: "ok" } });
+                if (polls === 2)
+                    return json({ data: { status: "PROCESSING_UPLOAD", uploaded_bytes: 0 }, error: { code: "ok" } });
+                return new Response('{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7654321098765432109]},"error":{"code":"ok"}}');
+            }
+            return f.fetcher(input, init);
+        };
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        await x.store.transaction(d => {
+            delete d.deliveries[0].receipt.nextPollAt;
+        });
+        await x.broker.tick();
+        const pending = await x.broker.status(subject, s.deliveryId);
+        expect(pending).toMatchObject({ state: "processing", stage: "awaiting_moderation" });
+        expect(pending.providerId).toBeUndefined();
+        expect(Date.parse(pending.nextPollAt!) - Date.now()).toBeGreaterThan(59000);
+        await expect(x.broker.cancel(subject, { deliveryId: s.deliveryId, expectedVersion: pending.version })).rejects.toMatchObject({ code: "provider_outcome_unknown" });
+        const mediaGets = f.calls.filter(c => c.url.includes(policy.pathPrefix)).length;
+        const restarted = await x.restart();
+        await restarted.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        expect(await progress(restarted, s)).toMatchObject({ state: "published", providerId: "7654321098765432109" });
+        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(mediaGets);
+        expect(f.calls.filter(c => new URL(c.url).hostname === "open-upload.tiktokapis.com")).toHaveLength(0);
+        expect(f.calls.filter(c => c.url.includes("/video/init"))).toHaveLength(1);
+        expect(polls).toBe(3);
+    });
+    it("paces TikTok status requests across deliveries sharing one access token", async () => {
+        const s = request("tiktok");
+        s.options.privacyLevel = "PUBLIC_TO_EVERYONE";
+        s.targetHash = targetHash(s);
+        const f = fixture(s);
+        let statusCalls = 0;
+        const fetcher: ProviderFetch = async (input, init) => {
+            if (String(input).includes("status/fetch")) {
+                statusCalls++;
+                return json({ data: { status: "PUBLISH_COMPLETE", publicaly_available_post_id: [] }, error: { code: "ok" } });
+            }
+            return f.fetcher(input, init);
+        };
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        let d: Delivery = (await x.store.snapshot()).deliveries[0];
+        let delay = 0;
+        for (let i = 0; i < 35; i++) {
+            const step = await x.broker.providers.step({ ...d, request: { ...d.request, deliveryId: randomUUID() } }, x.access, "", async () => {
+                throw new Error("mutation forbidden during status polling");
+            });
+            expect(step.state).toBe("processing");
+            d = { ...d, checkpoint: step.checkpoint };
+            delay = step.pollAfterMs ?? 0;
+        }
+        expect(statusCalls).toBe(30);
+        expect(delay).toBeGreaterThan(0);
+        expect(delay).toBeLessThanOrEqual(60001);
+    });
     it("exposes exact YouTube byte/title/text limits and Pinterest title characters", async () => {
         const s = request(), x = await setup(s, fixture(s).fetcher), c = await x.broker.context(subject, s.connectionId);
         expect(c.limits).toEqual({ maxTitleCharacters: 100, maxCaptionBytes: 5000, forbidAngleBrackets: true });
@@ -369,7 +450,10 @@ describe("durable video publishing", () => {
         await x.broker.submit(subject, s);
         const r = await progress(x.broker, s);
         expect(r.state).toBe("published");
-        expect(r.providerId).toBeTruthy();
+        if (product === "tiktok")
+            expect(r.providerId).toBeUndefined();
+        else
+            expect(r.providerId).toBeTruthy();
         expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).not.toHaveLength(0);
         expect((await readdir(x.directory)).filter(p => p.startsWith(".media-"))).toEqual([]);
     });

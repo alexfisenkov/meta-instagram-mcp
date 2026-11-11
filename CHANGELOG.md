@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- TikTok completion отделён от публичного post ID: непубличный `PUBLISH_COMPLETE` допускает успешную квитанцию без выдуманного ID, публичная цель ждёт модерацию с read-only polling. Завершённая операция не возвращается к upload при регрессе статуса; интервалы и rolling token budget ограничивают status запросы. Runbook и capability notes фиксируют реальные unaudited ограничения аккаунта, видимости и числа пользователей.
+
 - YouTube metadata context и проверка учитывают точные 5000 байт UTF‑8 описания, 100 Unicode characters заголовка и запрет `<`/`>` в обоих полях. Pinterest title bound передаётся из provider context. Опциональный явный `containsSyntheticMedia` закреплён в hash и передаётся провайдеру без вывода о содержимом видео; дополнительный независимый fixture проверяет явное значение.
 
 - Исправления ревью видеопубликатора: явный YouTube categoryId закреплён в options/hash/metadata; добавлен точный официальный региональный TikTok upload host. Восстановление Pinterest берёт байты по checkpoint, а известные YouTube/TikTok операции сначала сверяются у провайдера — истёкшая source lease не блокирует уже завершённую передачу. Неизвестная финальная публикация Instagram/Pinterest по-прежнему не повторяется.

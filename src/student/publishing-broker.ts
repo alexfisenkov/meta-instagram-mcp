@@ -108,7 +108,7 @@ export class PublishingBroker {
                 throw new BrokerError("delivery_busy");
             if (["published", "cancelled"].includes(d.receipt.state))
                 return structuredClone(d.receipt);
-            if (d.checkpoint.inFlight || d.checkpoint.providerId || d.request.product === "tiktok" && (d.checkpoint.offset ?? 0) >= d.request.asset.size)
+            if (d.checkpoint.inFlight || d.checkpoint.providerId || d.checkpoint.operation === "tiktok_publish_complete" || d.request.product === "tiktok" && (d.checkpoint.offset ?? 0) >= d.request.asset.size)
                 throw new BrokerError("provider_outcome_unknown");
             d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: "cancelled", stage: "cancelled_locally", retryable: false };
             delete d.receipt.nextPollAt;
@@ -191,7 +191,7 @@ export class PublishingBroker {
                     d.processingStartedAt ??= new Date().toISOString();
                 d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: step.state, stage: step.stage, retryable: false, ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.providerId ? { providerId: step.providerId } : {}), ...(step.permalink ? { permalink: step.permalink } : {}) };
                 if (!["published", "failed", "cancelled", "unknown"].includes(step.state))
-                    d.receipt.nextPollAt = new Date(Date.now() + (a.product === "instagram" ? 60000 : 15000)).toISOString();
+                    d.receipt.nextPollAt = new Date(Date.now() + (step.pollAfterMs ?? (a.product === "instagram" ? 60000 : 15000))).toISOString();
                 else
                     delete d.receipt.nextPollAt;
                 d.updatedAt = new Date().toISOString();

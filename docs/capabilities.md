@@ -45,3 +45,12 @@ Media publishing остаётся отдельной legacy API операцие
 ## Установка
 
 Все четыре профиля, их prerequisites и текущие ограничения собраны в [инструкции установки](install.md). Для machine-readable локальной проверки используйте `node tools/doctor.mjs`; doctor выполняет только MCP initialize/listTools/status read, не отправляет Meta data write и не подтверждает live browser/phone readiness.
+
+
+## Отдельный student publishing: TikTok
+
+Этот opt-in контур описан в [publishing runbook](social-publishing.md) и не расширяет legacy owner/cloud allowlist. Конфигурация и синтетические тесты не подтверждают живой App Review, аудит или пользовательский OAuth.
+
+По [официальным Content Sharing Guidelines](https://developers.tiktok.com/docs/en/content-sharing-guidelines) unaudited клиент ограничен пятью публикующими пользователями за 24 часа, все публикующие аккаунты должны быть private в момент публикации, материалы — только `SELF_ONLY`. Изменение приватности аккаунтов автоматически не выполняется. Эти конкретные ограничения не заменяются общим статусом `ready`.
+
+По [официальному Get Post Status](https://developers.tiktok.com/docs/en/content-posting-api-reference-get-video-status) `PUBLISH_COMPLETE` означает состоявшееся размещение, а публичный post ID выдаётся только после одобрения публичного материала модерацией. Успех непубличной доставки может быть без post ID/ссылки; operation ID не считается post ID. Публичная доставка без ID остаётся в `awaiting_moderation` с чтением известной операции, минутным интервалом и лимитом текущего процесса 30 status запросов за 60 секунд на token. Повторная загрузка по этому состоянию не выполняется.

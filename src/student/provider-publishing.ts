@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { BrokerError } from "./types.js";
 import { PublishingHttp, responseJson, streamBody, providerUrl, tiktokUploadUrl } from "./provider-publishing-http.js";
 import { optionSchemas, type Access, type Checkpoint, type Context, type Delivery, type PublishState } from "./publishing-types.js";
@@ -12,6 +12,7 @@ export interface StepResult {
     providerId?: string;
     permalink?: string;
     failureCode?: string;
+    pollAfterMs?: number;
 }
 type MediaPath = () => Promise<string>;
 export interface ProviderMediaPaths {
@@ -28,6 +29,24 @@ function id(value: unknown): string {
 }
 const bearer = (a: Access) => ({ Authorization: `Bearer ${a.accessToken}` });
 export class PublishingProviders {
+    private readonly tiktokStatusWindows = new Map<string, number[]>();
+    private nextTikTokStatusSweep = 0;
+    private tiktokStatusBackoff(a: Access): number {
+        const now = Date.now();
+        if (now >= this.nextTikTokStatusSweep) {
+            for (const [key, times] of this.tiktokStatusWindows)
+                if (times[times.length - 1] < now - 60000)
+                    this.tiktokStatusWindows.delete(key);
+            this.nextTikTokStatusSweep = now + 60000;
+        }
+        const key = createHash("sha256").update(a.accessToken).digest("hex");
+        const recent = (this.tiktokStatusWindows.get(key) ?? []).filter(time => time >= now - 60000);
+        if (recent.length >= 30)
+            return Math.max(1, recent[0] + 60001 - now);
+        recent.push(now);
+        this.tiktokStatusWindows.set(key, recent);
+        return 0;
+    }
     constructor(readonly http = new PublishingHttp()) {
     }
     async context(a: Access): Promise<Context> {
@@ -275,6 +294,9 @@ export class PublishingProviders {
             delete c.inFlight;
             return { state: "uploading", stage: "video_upload", checkpoint: c };
         }
+        const backoff = this.tiktokStatusBackoff(a);
+        if (backoff)
+            return { state: "processing", stage: c.operation === "tiktok_publish_complete" ? "awaiting_moderation" : "status_poll_backoff", checkpoint: c, pollAfterMs: backoff };
         const b = await this.http.json("https://open.tiktokapis.com/v2/post/publish/status/fetch/", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json" }, body: JSON.stringify({ publish_id: c.mediaId }) });
         const data = b.data;
         if (!data || typeof data.status !== "string")
@@ -283,12 +305,18 @@ export class PublishingProviders {
             return { state: "failed", stage: "provider_failed", checkpoint: c, failureCode: "provider_processing_failed" };
         if (data.status === "PUBLISH_COMPLETE") {
             delete c.inFlight;
+            c.operation = "tiktok_publish_complete";
             const ids = data.publicaly_available_post_id;
-            if (o.privacyLevel === "PUBLIC_TO_EVERYONE" && (!Array.isArray(ids) || ids.length !== 1))
-                throw new BrokerError("provider_outcome_unknown");
-            const postId = Array.isArray(ids) && ids.length === 1 ? id(ids[0]) : c.mediaId;
-            return { state: "published", stage: "complete", checkpoint: c, providerId: postId };
+            if (ids !== undefined && (!Array.isArray(ids) || ids.length > 1))
+                throw new BrokerError("provider_response_invalid");
+            const postId = Array.isArray(ids) && ids.length === 1 ? id(ids[0]) : undefined;
+            if (!postId && o.privacyLevel === "PUBLIC_TO_EVERYONE")
+                return { state: "processing", stage: "awaiting_moderation", checkpoint: c, pollAfterMs: 60000 };
+            return { state: "published", stage: "complete", checkpoint: c, ...(postId ? { providerId: postId } : {}) };
         }
+        // Once posting is complete, later status reads must never re-enter byte upload.
+        if (c.operation === "tiktok_publish_complete")
+            return { state: "processing", stage: "awaiting_moderation", checkpoint: c, pollAfterMs: 60000 };
         if (data.status !== "PROCESSING_UPLOAD")
             return { state: "processing", stage: "post_processing", checkpoint: c };
         const offset = data.uploaded_bytes ?? 0;
