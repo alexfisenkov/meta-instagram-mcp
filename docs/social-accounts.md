@@ -240,3 +240,26 @@ initial modules; this is not a claim of test-first development for the whole wav
 Live OAuth, app review, real refresh, provider quota/cost and owner acceptance
 remain unverified. The full shared repository suite and release are orchestrator
 checks; local PASS here establishes no deployed or externally approved result.
+
+## R1 shared-grant concurrency verification
+
+Independent review found two shared-resource recovery failures: a local
+in-flight resource disconnect could be mistaken for provider authentication
+failure and disable its sibling; a verified refresh that lost the requested
+resource could discard rotated credentials still needed by an owned sibling.
+Provider verification and local store CAS now have separate failure paths.
+An unchanged subject/actor/token/refresh/scope/expiry/configuration binding is
+required before either credentials or failure states change. Credential rotation
+is committed for still-connected owned siblings before returning the requested
+resource's failure. Disconnected resources are never reactivated; a last-resource
+disconnect keeps its tokens cleared. If provider discovery confirms no owned
+connected resources remain, the grant needs reauthentication and its unusable
+tokens are cleared.
+
+`tests/student-connections-races.test.ts` uses actual encrypted ConnectionsStore
+and ConnectionsRuntime with deterministic HTTP promise barriers, without sleeps.
+The first unchanged-source run had five failing and two passing cases, covering
+both accepted defects, newer token/configuration protection and last-resource
+disconnect. The added zero-owned-survivor case also checks the credential-clearing
+branch. Existing OAuth/ownership/projection/HTTP tests run alongside these cases;
+this local review repair does not establish provider approval or live acceptance.

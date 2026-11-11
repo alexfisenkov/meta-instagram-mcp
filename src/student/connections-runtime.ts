@@ -5,7 +5,7 @@ import { StudentVault } from "./vault.js";
 import { ConnectionsStore } from "./connections-store.js";
 import { ConnectionsProviders } from "./connections-providers.js";
 import { connectionFingerprint, loadConnectionsConfig, baseConnectionScopes } from "./connections-config.js";
-import { connectionProducts, connectionReadSchema, type ConnectionConfig, type ConnectionGrant, type ConnectionProduct, type ConnectionResource } from "./connections-types.js";
+import { connectionProducts, connectionReadSchema, type ConnectionConfig, type ConnectionGrant, type ConnectionProduct, type ConnectionResource, type DiscoveredResource } from "./connections-types.js";
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const oauth: Record<ConnectionProduct, { authorize: string; token: string; issuer: string }> = {
   twitch: { authorize: "https://id.twitch.tv/oauth2/authorize", token: "https://id.twitch.tv/oauth2/token", issuer: "https://id.twitch.tv/oauth2" },
@@ -116,6 +116,11 @@ export class ConnectionsRuntime {
     return { actorId: identity.actorId, resources: identity.resources, accessToken: token.access_token as string, refreshToken, scopes, expiresAt: Date.now() + Math.min(token.expires_in, identity.expiresIn ?? token.expires_in) * 1000, refreshExpiresAt: token.refresh_token_expires_in ? Date.now() + token.refresh_token_expires_in * 1000 : previous?.refreshExpiresAt, fingerprint: connectionFingerprint(c), validatedAt: Date.now() };
   }
   private serial<T>(run: () => Promise<T>): Promise<T> { const result = this.tail.then(run); this.tail = result.catch(() => undefined); return result; }
+  /** A stale request may not change a replaced credential, configuration or grant. */
+  private unchangedGrant(live: ConnectionGrant | undefined, expected: ConnectionGrant): live is ConnectionGrant {
+    if (!live || !sameSubject(live, expected) || live.id !== expected.id || live.product !== expected.product || live.status !== "active" || live.actorId !== expected.actorId || live.accessToken !== expected.accessToken || live.refreshToken !== expected.refreshToken || live.fingerprint !== expected.fingerprint || live.expiresAt !== expected.expiresAt || live.refreshExpiresAt !== expected.refreshExpiresAt || JSON.stringify(live.scopes) !== JSON.stringify(expected.scopes)) return false;
+    try { return connectionFingerprint(this.config(expected.product, expected)) === expected.fingerprint; } catch { return false; }
+  }
   private async access(subject: Subject, connectionId: string, forceRefresh = false) {
     return this.serial(async () => {
       const db = await this.store.snapshot(), resource = db.resources.find(r => r.id === connectionId && sameSubject(r, subject)), grant = resource ? db.grants.find(g => g.id === resource.grantId && sameSubject(g, subject)) : undefined;
@@ -123,8 +128,9 @@ export class ConnectionsRuntime {
       const c = this.config(resource.product, subject);
       if (resource.status !== "connected" || grant.status !== "active" || grant.fingerprint !== connectionFingerprint(c)) throw new BrokerError("reauth_required");
       if (forceRefresh && !grant.refreshToken && grant.expiresAt > Date.now()) throw new BrokerError("refresh_unavailable");
+      let credentials = grant, resources: DiscoveredResource[];
+      // Only provider verification failures can invalidate a shared grant. Local CAS conflicts cannot.
       try {
-        let credentials = grant, resources;
         if (forceRefresh || grant.expiresAt <= Date.now() || grant.refreshToken && grant.expiresAt <= Date.now() + 60000) {
           if (!grant.refreshToken || grant.refreshExpiresAt !== undefined && grant.refreshExpiresAt <= Date.now()) throw new BrokerError("reauth_required");
           const fresh = await this.exchange(c, { grant_type: "refresh_token", refresh_token: grant.refreshToken }, grant);
@@ -134,29 +140,41 @@ export class ConnectionsRuntime {
           if (identity.actorId !== grant.actorId || identity.validatedScopes && !grant.scopes.every(s => identity.validatedScopes!.includes(s))) throw new BrokerError("grant_verification_failed");
           resources = identity.resources; credentials = { ...grant, validatedAt: Date.now() };
         }
-        const discovered = resources.find(r => r.providerId === resource.providerId);
-        if (!discovered) throw new BrokerError("resource_access_lost");
-        const owned = { ...discovered, capabilities: discovered.capabilities.filter(capability => forceRefresh || !resource.blockedOperations?.includes(capability)) };
-        await this.store.transaction(d => {
-          const live = d.grants.find(g => g.id === grant.id && sameSubject(g, subject));
-          const current = d.resources.find(r => r.id === resource.id && sameSubject(r, subject));
-          if (!live || live.status !== "active" || live.accessToken !== grant.accessToken || !current || current.status !== "connected") throw new BrokerError("reauth_required");
-          Object.assign(live, credentials);
-          Object.assign(current, owned);
-          if (forceRefresh) { current.blockedOperations = undefined; current.reason = undefined; }
-        });
-        return { c, grant: credentials, resource: { ...resource, ...owned } };
       } catch (e) {
-        if (e instanceof BrokerError && ["reauth_required", "grant_verification_failed", "permission_unavailable", "resource_access_lost"].includes(e.code)) await this.store.transaction(d => {
+        if (e instanceof BrokerError && ["reauth_required", "grant_verification_failed", "permission_unavailable"].includes(e.code)) await this.store.transaction(d => {
           const live = d.grants.find(g => g.id === grant.id && sameSubject(g, subject));
-          if (!live || live.status !== "active" || live.accessToken !== grant.accessToken) return;
-          if (e.code !== "resource_access_lost") live.status = "reauth_required";
-          for (const r of d.resources.filter(r => r.grantId === grant.id && sameSubject(r, subject) && r.status === "connected" && (e.code !== "resource_access_lost" || r.id === connectionId))) { r.status = "reauth_required"; r.reason = e.code; }
+          if (!this.unchangedGrant(live, grant)) return;
+          live.status = "reauth_required";
+          for (const r of d.resources.filter(r => r.grantId === grant.id && sameSubject(r, subject) && r.status === "connected")) { r.status = "reauth_required"; r.reason = e.code; }
         });
         throw e;
       }
+      const outcome = await this.store.transaction(d => {
+        const live = d.grants.find(g => g.id === grant.id && sameSubject(g, subject));
+        if (!this.unchangedGrant(live, grant)) throw new BrokerError("reauth_required");
+        const current = d.resources.find(r => r.id === resource.id && r.grantId === grant.id && r.providerId === resource.providerId && sameSubject(r, subject));
+        const requestedConnected = current?.status === "connected";
+        let surviving = 0;
+        for (const r of d.resources.filter(r => r.grantId === grant.id && sameSubject(r, subject) && r.status === "connected")) {
+          const owned = resources.find(found => found.providerId === r.providerId);
+          if (!owned) { r.status = "reauth_required"; r.reason = "resource_access_lost"; r.capabilities = []; continue; }
+          const resetOptional = forceRefresh && r.id === connectionId;
+          Object.assign(r, owned, { capabilities: owned.capabilities.filter(capability => resetOptional || !r.blockedOperations?.includes(capability)) });
+          if (resetOptional) { r.blockedOperations = undefined; r.reason = undefined; }
+          surviving++;
+        }
+        // Commit a verified same-actor rotation for still-connected owned siblings even if A vanished.
+        // Never revive a locally disconnected resource or retain new credentials without an owned survivor.
+        if (surviving) Object.assign(live, credentials);
+        else { live.status = "reauth_required"; live.accessToken = ""; live.refreshToken = undefined; }
+        return { resource: requestedConnected && current?.status === "connected" ? structuredClone(current) : undefined, reason: requestedConnected ? "resource_access_lost" : "reauth_required" };
+      });
+      // Throw after the successful sibling credential commit; this is not a provider auth failure.
+      if (!outcome.resource) throw new BrokerError(outcome.reason);
+      return { c, grant: credentials, resource: outcome.resource };
     });
   }
+
   async read(subject: Subject, input: unknown) {
     const parsed = connectionReadSchema.parse(input), access = await this.access(subject, parsed.connectionId);
     let data: Record<string, unknown>;
@@ -164,7 +182,7 @@ export class ConnectionsRuntime {
     catch (e) {
       if (e instanceof BrokerError && ["reauth_required", "permission_unavailable", "rate_limited", "billing_required", "provider_unavailable", "provider_response_partial", "resource_not_owned"].includes(e.code)) await this.store.transaction(d => {
         const r = d.resources.find(r => r.id === parsed.connectionId && sameSubject(r, subject)), live = d.grants.find(g => g.id === access.grant.id && sameSubject(g, subject));
-        if (!live || live.status !== "active" || live.accessToken !== access.grant.accessToken) return;
+        if (!this.unchangedGrant(live, access.grant)) return;
         if (r?.status === "connected") {
           r.reason = e.code;
           if (e.code === "permission_unavailable" && parsed.operation !== "account") { r.blockedOperations = [...new Set([...(r.blockedOperations ?? []), parsed.operation])]; r.capabilities = r.capabilities.filter(capability => capability !== parsed.operation); }
@@ -173,7 +191,7 @@ export class ConnectionsRuntime {
       });
       throw e;
     }
-    await this.store.transaction(d => { const r = d.resources.find(r => r.id === parsed.connectionId && sameSubject(r, subject)), live = d.grants.find(g => g.id === access.grant.id && sameSubject(g, subject)); if (!r || r.status !== "connected" || !live || live.status !== "active" || live.accessToken !== access.grant.accessToken) throw new BrokerError("reauth_required"); r.lastSuccessAt = new Date().toISOString(); if (!r.blockedOperations?.length) r.reason = undefined; });
+    await this.store.transaction(d => { const r = d.resources.find(r => r.id === parsed.connectionId && sameSubject(r, subject)), live = d.grants.find(g => g.id === access.grant.id && sameSubject(g, subject)); if (!r || r.status !== "connected" || !this.unchangedGrant(live, access.grant)) throw new BrokerError("reauth_required"); r.lastSuccessAt = new Date().toISOString(); if (!r.blockedOperations?.length) r.reason = undefined; });
     return data;
   }
   async refresh(subject: Subject, connectionId: string) { await this.access(subject, connectionId, true); return { connection: (await this.list(subject)).connections.find(r => r.id === connectionId) }; }
