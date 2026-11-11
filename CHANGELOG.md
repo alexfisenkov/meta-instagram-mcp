@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- Изолированный publishing namespace получил bounded offline subject purge helper: существующий writer lock, удаление собственных cache/temp copies перед атомарной очисткой credentials/states/delivery checkpoints и типизированные counts. Чужие записи и platform originals сохраняются; неправильный ключ, занятый writer, cache-directory symlink и превышение лимита обхода не дают ложного успешного удаления.
+
 - Проверенный приватный source spool переиспользуется между чанками и после рестарта, ограничен byte budget/LRU, защищён от eviction во время чтения и очищается после ingestion/terminal. Повреждённая/пропавшая копия восстанавливается только по действительному lease, оригиналы не удаляются. Upload steps продолжаются без processing-паузы. Уже принятая операция сверяется до проверки изменившихся прав публикации; каждая новая мутация проверяет свежий context. TikTok account label берётся из текущего `creator_nickname`.
 
 - TikTok completion отделён от публичного post ID: непубличный `PUBLISH_COMPLETE` допускает успешную квитанцию без выдуманного ID, публичная цель ждёт модерацию с read-only polling. Завершённая операция не возвращается к upload при регрессе статуса; интервалы и rolling token budget ограничивают status запросы. Runbook и capability notes фиксируют реальные unaudited ограничения аккаунта, видимости и числа пользователей.
