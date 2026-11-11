@@ -167,9 +167,13 @@ fallback to a synthetic zero. X requests remain billing-gated.
 
 `<broker-directory>/connections` is a separate StudentVault directory protected by
 the existing single-writer lock, encryption, private-file handling and CAS writes.
-Legacy and publishing schemas/readers see no new products. The offline existing
-`purgeStudentSubject` procedure also visits this vault and removes only the exact
-subject's grants/resources/states/generations. Read responses are not persisted.
+Legacy and publishing schemas/readers see no new products. The unified offline `purgeStudentSubject` procedure visits Meta, YouTube,
+read-account and publishing vaults and removes only the exact subject's records.
+Its root service writer lock remains held through all namespace mutations.
+Every existing vault is opened/decrypted before mutation, so a busy namespace or
+wrong separate key fails before records/cache are changed. Publishing cleanup
+removes only attributable working copies and delivery checkpoints; it does not
+remove original platform assets or remote publications. Read responses are not persisted.
 Before replacing encrypted storage, stop the process, preserve the private vault
 and its key by the operator's backup procedure, and keep their paths out of git.
 
@@ -199,6 +203,28 @@ check actual provider permissions/capabilities; `rate_limited` → retry later;
 recovery; `discovery_limit_exceeded`, `provider_response_invalid`,
 `provider_response_partial` → operator investigation. An uncertain or failed read
 is never reported as an empty successful dataset.
+
+## Unified offline deletion result
+
+The existing owner CLI remains `--subject <verified-subject> --confirm-purge`.
+It emits only aggregate `connections`, `grants`, `events`, `states`, `generations`
+on success, adding `deliveries` and `mediaCacheFiles` when the publishing
+namespace exists. Inline publishing credentials are counted with connections,
+not as separate read grants. A missing optional namespace is not created.
+
+The primary writer lock is acquired first and released last. Other stores are
+preflighted under their own locks before mutation. The publishing helper gets
+its own lock after preflight while the primary lock continues to exclude the
+normal service startup. Stop the service before running the operation and keep
+it stopped until the outcome is reviewed.
+
+Independent encrypted files and cache unlinking are not a distributed
+transaction. A failure after cleanup starts returns only `purge_incomplete`,
+without a successful count receipt, even if some deletion already committed.
+Do not interpret that error as rollback: inspect the stopped stores and rerun
+the same verified subject; the helper retains ownership records until its cache
+cleanup succeeds. No additional media retention scheduler or original-asset
+delete was added by this integration.
 
 ## Evidence and remaining gates
 
