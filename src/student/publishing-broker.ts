@@ -156,12 +156,24 @@ export class PublishingBroker {
                 throw new BrokerError("connection_product_mismatch");
             const context = await this.providers.context(a);
             this.providers.validate(original, context);
-            // A readback on a known provider ID/session does not depend on a renewable ingestion URL.
-            const needsBytes = !original.checkpoint.providerId && (a.product !== "instagram" || !original.checkpoint.mediaId) && (a.product !== "pinterest" || !original.checkpoint.mediaId || original.receipt.stage === "media_upload");
-            if (needsBytes)
-                media = await spoolMedia(original.request.asset, this.mediaPolicy, this.spoolDirectory, this.fetcher);
-            if (original.request.cover && (!original.checkpoint.providerId && !original.checkpoint.mediaId || a.product === "youtube" && original.checkpoint.providerId && original.checkpoint.operation !== "youtube_thumbnail_complete"))
-                cover = await spoolMedia(original.request.cover, this.mediaPolicy, this.spoolDirectory, this.fetcher);
+            // Known operations reconcile first; media is fetched only if that exact checkpoint needs more bytes.
+            const getAssetPath = async () => {
+                media ??= await spoolMedia(original.request.asset, this.mediaPolicy, this.spoolDirectory, this.fetcher);
+                return media.path;
+            };
+            const getCoverPath = async () => {
+                if (!original.request.cover)
+                    return "";
+                cover ??= await spoolMedia(original.request.cover, this.mediaPolicy, this.spoolDirectory, this.fetcher);
+                return cover.path;
+            };
+            const checkpoint = original.checkpoint;
+            const hasKnownOperation = checkpoint.providerId || (a.product === "youtube" ? checkpoint.sessionUrl : checkpoint.mediaId);
+            if (!hasKnownOperation && !checkpoint.inFlight) {
+                await getAssetPath();
+                if (original.request.cover)
+                    await getCoverPath();
+            }
             const step = await this.providers.step(original, a, media?.path ?? "", async (cp, state, stage) => {
                 await this.store.transaction(data => {
                     const d = this.owned(data.deliveries, original, id);
@@ -171,7 +183,7 @@ export class PublishingBroker {
                     d.receipt = { ...d.receipt, version: d.receipt.version + 1, state, stage, retryable: false };
                     d.updatedAt = new Date().toISOString();
                 });
-            }, cover?.path);
+            }, cover?.path, { asset: getAssetPath, cover: getCoverPath });
             await this.store.transaction(data => {
                 const d = this.owned(data.deliveries, original, id);
                 d.checkpoint = step.checkpoint;

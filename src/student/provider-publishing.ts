@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { BrokerError } from "./types.js";
-import { PublishingHttp, responseJson, streamBody, providerUrl } from "./provider-publishing-http.js";
+import { PublishingHttp, responseJson, streamBody, providerUrl, tiktokUploadUrl } from "./provider-publishing-http.js";
 import { optionSchemas, type Access, type Checkpoint, type Context, type Delivery, type PublishState } from "./publishing-types.js";
 export const TIKTOK_DISCLOSURE_VERSION = "tiktok-direct-post-2026-11-v1";
 export const TIKTOK_DISCLOSURE_TEXT = "By posting, you agree to TikTok's Music Usage Confirmation. For branded content, you also agree to TikTok's Branded Content Policy.";
@@ -12,6 +12,11 @@ export interface StepResult {
     providerId?: string;
     permalink?: string;
     failureCode?: string;
+}
+type MediaPath = () => Promise<string>;
+export interface ProviderMediaPaths {
+    asset: MediaPath;
+    cover?: MediaPath;
 }
 export type SaveCheckpoint = (cp: Checkpoint, state: PublishState, stage: string) => Promise<void>;
 function id(value: unknown): string {
@@ -113,15 +118,17 @@ export class PublishingProviders {
         if (r.product === "youtube" && (!r.title || r.title.length > 100 || r.caption.length > 5000))
             throw new BrokerError("youtube_metadata_invalid");
     }
-    async step(d: Delivery, a: Access, path: string, save: SaveCheckpoint, coverPath?: string): Promise<StepResult> {
+    async step(d: Delivery, a: Access, path: string, save: SaveCheckpoint, coverPath?: string, mediaPaths?: ProviderMediaPaths): Promise<StepResult> {
         const c = { ...d.checkpoint };
+        const assetPath: MediaPath = () => path ? Promise.resolve(path) : mediaPaths?.asset() ?? Promise.reject(new BrokerError("asset_unavailable"));
+        const selectedCoverPath: MediaPath = () => coverPath ? Promise.resolve(coverPath) : mediaPaths?.cover?.() ?? Promise.resolve("");
         if (a.product === "instagram")
             return this.instagram(d, a, c, save);
         if (a.product === "youtube")
-            return this.youtube(d, a, c, path, save, coverPath);
+            return this.youtube(d, a, c, assetPath, save, selectedCoverPath);
         if (a.product === "tiktok")
-            return this.tiktok(d, a, c, path, save);
-        return this.pinterest(d, a, c, path, save);
+            return this.tiktok(d, a, c, assetPath, save);
+        return this.pinterest(d, a, c, assetPath, save);
     }
     private igBase(a: Access) {
         if (!/^v\d+\.0$/.test(a.apiVersion))
@@ -162,7 +169,7 @@ export class PublishingProviders {
         delete c.inFlight;
         return { state: "processing", stage: "publication_readback", checkpoint: c };
     }
-    private async youtube(d: Delivery, a: Access, c: Checkpoint, path: string, save: SaveCheckpoint, coverPath?: string): Promise<StepResult> {
+    private async youtube(d: Delivery, a: Access, c: Checkpoint, getPath: MediaPath, save: SaveCheckpoint, getCoverPath: MediaPath): Promise<StepResult> {
         const r = d.request, o = optionSchemas.youtube.parse(r.options);
         if (c.providerId) {
             const b = await this.http.json(`https://www.googleapis.com/youtube/v3/videos?part=snippet,status,processingDetails&id=${encodeURIComponent(c.providerId)}`, { headers: bearer(a) });
@@ -178,6 +185,7 @@ export class PublishingProviders {
             if (v.status?.uploadStatus !== "processed" || v.processingDetails?.processingStatus !== "succeeded")
                 return { state: "processing", stage: "video_processing", checkpoint: c };
             if (r.cover && c.operation !== "youtube_thumbnail_complete") {
+                const coverPath = await getCoverPath();
                 if (!coverPath)
                     return { state: "processing", stage: "thumbnail_upload", checkpoint: c };
                 c.inFlight = "youtube_thumbnail";
@@ -195,7 +203,7 @@ export class PublishingProviders {
                 throw new BrokerError("provider_outcome_unknown");
             c.inFlight = "youtube_init";
             await save(c, "uploading", "session_create");
-            const response = await this.http.raw("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json", "X-Upload-Content-Length": String(r.asset.size), "X-Upload-Content-Type": r.asset.mime }, body: JSON.stringify({ snippet: { title: r.title, description: r.caption }, status: { privacyStatus: o.privacyStatus, selfDeclaredMadeForKids: o.madeForKids } }) });
+            const response = await this.http.raw("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json", "X-Upload-Content-Length": String(r.asset.size), "X-Upload-Content-Type": r.asset.mime }, body: JSON.stringify({ snippet: { title: r.title, description: r.caption, categoryId: o.categoryId }, status: { privacyStatus: o.privacyStatus, selfDeclaredMadeForKids: o.madeForKids } }) });
             if (!response.ok)
                 throw new BrokerError("provider_unavailable");
             const u = response.headers.get("location");
@@ -227,6 +235,7 @@ export class PublishingProviders {
         if (!Number.isSafeInteger(offset) || offset < 0 || offset >= r.asset.size)
             throw new BrokerError("provider_outcome_unknown");
         const end = Math.min(offset + 8 * 1024 * 1024, r.asset.size) - 1;
+        const path = await getPath();
         c.offset = offset;
         c.inFlight = "youtube_upload";
         await save(c, "uploading", "video_upload");
@@ -243,7 +252,7 @@ export class PublishingProviders {
         c.offset = end + 1;
         return { state: "uploading", stage: "video_upload", checkpoint: c };
     }
-    private async tiktok(d: Delivery, a: Access, c: Checkpoint, path: string, save: SaveCheckpoint): Promise<StepResult> {
+    private async tiktok(d: Delivery, a: Access, c: Checkpoint, getPath: MediaPath, save: SaveCheckpoint): Promise<StepResult> {
         const r = d.request, o = optionSchemas.tiktok.parse(r.options);
         if (!c.mediaId) {
             if (c.inFlight)
@@ -254,8 +263,9 @@ export class PublishingProviders {
             const b = await this.http.json("https://open.tiktokapis.com/v2/post/publish/video/init/", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json" }, body: JSON.stringify({ post_info: { title: r.caption, privacy_level: o.privacyLevel, disable_comment: o.disableComment, disable_duet: o.disableDuet, disable_stitch: o.disableStitch, brand_content_toggle: o.brandContentToggle, brand_organic_toggle: o.brandOrganicToggle, is_aigc: o.isAigc }, source_info: { source: "FILE_UPLOAD", video_size: r.asset.size, chunk_size: chunkSize, total_chunk_count: count } }) });
             c.mediaId = id(b.data?.publish_id);
             const url = b.data?.upload_url;
-            if (typeof url !== "string" || providerUrl(url).hostname !== "open-upload.tiktokapis.com")
+            if (typeof url !== "string")
                 throw new BrokerError("provider_response_invalid");
+            tiktokUploadUrl(url);
             c.uploadUrl = url;
             delete c.inFlight;
             return { state: "uploading", stage: "video_upload", checkpoint: c };
@@ -282,6 +292,7 @@ export class PublishingProviders {
         const size = Math.min(r.asset.size, 10000000), count = Math.max(1, Math.floor(r.asset.size / size)), end = offset / size >= count - 1 ? r.asset.size - 1 : offset + size - 1;
         if (offset % size !== 0)
             throw new BrokerError("provider_outcome_unknown");
+        const path = await getPath();
         c.inFlight = "tiktok_upload";
         await save(c, "uploading", "video_upload");
         const response = await this.http.raw(c.uploadUrl, { ...streamBody(path, offset, end), method: "PUT", headers: { "Content-Type": r.asset.mime, "Content-Length": String(end - offset + 1), "Content-Range": `bytes ${offset}-${end}/${r.asset.size}` } });
@@ -291,7 +302,7 @@ export class PublishingProviders {
         c.offset = end + 1;
         return { state: "processing", stage: "post_processing", checkpoint: c };
     }
-    private async pinterest(d: Delivery, a: Access, c: Checkpoint, path: string, save: SaveCheckpoint): Promise<StepResult> {
+    private async pinterest(d: Delivery, a: Access, c: Checkpoint, getPath: MediaPath, save: SaveCheckpoint): Promise<StepResult> {
         const r = d.request, o = optionSchemas.pinterest.parse(r.options);
         if (c.providerId) {
             const b = await this.http.json(`https://api.pinterest.com/v5/pins/${c.providerId}`, { headers: bearer(a) });
@@ -323,6 +334,7 @@ export class PublishingProviders {
                 throw new BrokerError("provider_outcome_unknown");
             if (!c.uploadUrl || !c.uploadParameters)
                 throw new BrokerError("provider_response_invalid");
+            const path = await getPath();
             const boundary = `publishing-${randomUUID()}`;
             const parts: string[] = [];
             for (const [key, value] of Object.entries(c.uploadParameters)) {

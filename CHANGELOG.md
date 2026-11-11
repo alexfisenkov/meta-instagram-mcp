@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- Исправления ревью видеопубликатора: явный YouTube categoryId закреплён в options/hash/metadata; добавлен точный официальный региональный TikTok upload host. Восстановление Pinterest берёт байты по checkpoint, а известные YouTube/TikTok операции сначала сверяются у провайдера — истёкшая source lease не блокирует уже завершённую передачу. Неизвестная финальная публикация Instagram/Pinterest по-прежнему не повторяется.
+
 - Опциональный видеопубликатор: отдельный encrypted write-grant/checkpoint vault, subject-bound delivery IDs и согласованный SHA-256 wire fixture; Instagram staged Reels, resumable YouTube с readback видимости и обложкой, TikTok creator/privacy/disclosures/status, Pinterest media/S3/video Pin с обложкой из кадра. Unknown publish не создаётся заново. Новые OAuth TikTok/Pinterest и отдельный YouTube upload flow сохраняют совместимые read grants и стабильные resource IDs. Контур выключен без явной media-конфигурации, прежний MCP catalog сохраняется. Проверки синтетические, включая tsc output; живой допуск, OAuth, UI и публикация отдельно.
 
 - Messenger uses separately issued, /me-verified Page tokens with actual messaging tasks and granted scopes. Missing Page tokens retain only a verified minimal profile; system grants never back Conversations. Messenger-only fingerprint revision requires fresh consent for prior scopes-only grants; other Meta fingerprints and adapters remain unchanged. App Review and live Inbox acceptance remain separate.

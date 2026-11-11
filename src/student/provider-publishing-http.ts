@@ -10,10 +10,21 @@ export function providerUrl(value: string): URL {
     const u = new URL(value);
     if (u.protocol !== "https:" || u.port || u.username || u.password || u.hash)
         throw new BrokerError("provider_host_rejected");
-    const allowed: Record<string, RegExp> = { "graph.instagram.com": /^\/v\d+\.0\/[A-Za-z0-9_]+(?:\/media|\/media_publish)?$/, "graph.facebook.com": /^\/v\d+\.0\/[A-Za-z0-9_]+(?:\/media|\/media_publish)?$/, "www.googleapis.com": /^\/(?:upload\/youtube\/v3\/(?:videos|thumbnails\/set)|youtube\/v3\/(?:channels|videos))$/, "oauth2.googleapis.com": /^\/token$/, "openidconnect.googleapis.com": /^\/v1\/userinfo$/, "open.tiktokapis.com": /^\/v2\/(?:oauth\/token|user\/info|post\/publish\/(?:creator_info\/query|video\/init|status\/fetch))\/$/, "open-upload.tiktokapis.com": /^\/video\/$/, "api.pinterest.com": /^\/v5\/(?:oauth\/token|user_account|boards|boards\/\d+|media|media\/\d+|pins|pins\/\d+)$/, "pinterest-media-upload.s3-accelerate.amazonaws.com": /^\/$/ };
+    const allowed: Record<string, RegExp> = { "graph.instagram.com": /^\/v\d+\.0\/[A-Za-z0-9_]+(?:\/media|\/media_publish)?$/, "graph.facebook.com": /^\/v\d+\.0\/[A-Za-z0-9_]+(?:\/media|\/media_publish)?$/, "www.googleapis.com": /^\/(?:upload\/youtube\/v3\/(?:videos|thumbnails\/set)|youtube\/v3\/(?:channels|videos))$/, "oauth2.googleapis.com": /^\/token$/, "openidconnect.googleapis.com": /^\/v1\/userinfo$/, "open.tiktokapis.com": /^\/v2\/(?:oauth\/token|user\/info|post\/publish\/(?:creator_info\/query|video\/init|status\/fetch))\/$/, "open-upload.tiktokapis.com": /^\/video\/$/, "upload.us.tiktokapis.com": /^\/video\/$/, "api.pinterest.com": /^\/v5\/(?:oauth\/token|user_account|boards|boards\/\d+|media|media\/\d+|pins|pins\/\d+)$/, "pinterest-media-upload.s3-accelerate.amazonaws.com": /^\/$/ };
     if (!allowed[u.hostname]?.test(u.pathname))
         throw new BrokerError("provider_host_rejected");
+    if (["open-upload.tiktokapis.com", "upload.us.tiktokapis.com"].includes(u.hostname)) {
+        const allowedKeys = new Set(["upload_id", "upload_token"]);
+        if (!u.searchParams.get("upload_id") || [...u.searchParams.keys()].some(key => !allowedKeys.has(key) || u.searchParams.getAll(key).length !== 1 || !/^[\x21-\x7e]{1,4096}$/.test(u.searchParams.get(key)!)))
+            throw new BrokerError("provider_path_rejected");
+    }
     return u;
+}
+export function tiktokUploadUrl(value: string): URL {
+    const parsed = providerUrl(value);
+    if (!["open-upload.tiktokapis.com", "upload.us.tiktokapis.com"].includes(parsed.hostname))
+        throw new BrokerError("provider_host_rejected");
+    return parsed;
 }
 export async function responseJson(response: Response): Promise<Record<string, any>> {
     if (!response.body)

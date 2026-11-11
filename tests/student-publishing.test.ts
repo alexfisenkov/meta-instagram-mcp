@@ -17,7 +17,7 @@ afterEach(async () => {
         await c();
 });
 function request(product: Submit["product"] = "youtube"): Submit {
-    const s: Submit = { deliveryId: randomUUID(), intentId: randomUUID(), intentHash: "a".repeat(64), targetHash: "b".repeat(64), connectionId: randomUUID(), product, asset: { id: randomUUID(), sha256: sha, size: bytes.length, mime: "video/mp4", fetchUrl: `${policy.origin}${policy.pathPrefix}lease`, expiresAt: new Date(Date.now() + 3600000).toISOString() }, title: "synthetic title", caption: "test caption", options: product === "youtube" ? { privacyStatus: "private", madeForKids: false } : product === "instagram" ? { shareToFeed: false } : product === "pinterest" ? { boardId: "321" } : { privacyLevel: "SELF_ONLY", disableComment: true, disableDuet: true, disableStitch: true, consent: true, brandContentToggle: false, brandOrganicToggle: false, isAigc: true, commercialContentDisclosureConfirmed: false, disclosureVersion: TIKTOK_DISCLOSURE_VERSION } };
+    const s: Submit = { deliveryId: randomUUID(), intentId: randomUUID(), intentHash: "a".repeat(64), targetHash: "b".repeat(64), connectionId: randomUUID(), product, asset: { id: randomUUID(), sha256: sha, size: bytes.length, mime: "video/mp4", fetchUrl: `${policy.origin}${policy.pathPrefix}lease`, expiresAt: new Date(Date.now() + 3600000).toISOString() }, title: "synthetic title", caption: "test caption", options: product === "youtube" ? { categoryId: "22", privacyStatus: "private", madeForKids: false } : product === "instagram" ? { shareToFeed: false } : product === "pinterest" ? { boardId: "321" } : { privacyLevel: "SELF_ONLY", disableComment: true, disableDuet: true, disableStitch: true, consent: true, brandContentToggle: false, brandOrganicToggle: false, isAigc: true, commercialContentDisclosureConfirmed: false, disclosureVersion: TIKTOK_DISCLOSURE_VERSION } };
     s.targetHash = targetHash(s);
     return s;
 }
@@ -150,6 +150,98 @@ async function progress(b: PublishingBroker, s: Submit, max = 8) {
     return b.status(subject, s.deliveryId);
 }
 describe("durable video publishing", () => {
+    it("rejects missing or noncanonical YouTube category before any provider call", async () => {
+        const s = request(), f = fixture(s), x = await setup(s, f.fetcher);
+        for (const options of [{ privacyStatus: "private", madeForKids: false }, { ...s.options, categoryId: "0" }, { ...s.options, categoryId: "01" }, { ...s.options, categoryId: 22 }]) {
+            const changed = { ...s, options };
+            changed.targetHash = targetHash(changed);
+            await expect(x.broker.submit(subject, changed)).rejects.toMatchObject({ code: "invalid_publish_request" });
+        }
+        expect(f.calls).toHaveLength(0);
+        expect(targetHash({ ...s, options: { ...s.options, categoryId: "23" } })).not.toBe(s.targetHash);
+    });
+    it.each(["youtube", "tiktok"] as const)("still requires verified source bytes when a known %s upload is incomplete", async (product) => {
+        const s = request(product), f = fixture(s), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+            delete d.deliveries[0].receipt.nextPollAt;
+        });
+        expect(await progress(x.broker, s)).toMatchObject({ state: "failed", failureCode: "asset_lease_rejected" });
+        expect(f.calls.filter(c => new URL(c.url).hostname === "open-upload.tiktokapis.com")).toHaveLength(0);
+        expect(f.calls.filter(c => c.method === "PUT" && c.url.includes("/upload/youtube") && c.body)).toHaveLength(0);
+    });
+    it("sends the explicitly confirmed YouTube category required by provider metadata", async () => {
+        const s = request(), f = fixture(s);
+        const fetcher: ProviderFetch = async (input, init) => {
+            if (String(input).includes("/upload/youtube/v3/videos") && init?.method === "POST") {
+                const metadata = JSON.parse(String(init.body));
+                if (metadata.snippet?.categoryId !== "22")
+                    return json({ error: { errors: [{ reason: "invalidVideoMetadata" }] } }, 400);
+            }
+            return f.fetcher(input, init);
+        };
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        expect((await progress(x.broker, s)).state).toBe("published");
+    });
+    it("accepts TikTok's documented regional upload host without broadening to other hosts", async () => {
+        const s = request("tiktok"), f = fixture(s);
+        const actualUploads: string[] = [];
+        const fetcher: ProviderFetch = async (input, init) => {
+            const u = new URL(String(input));
+            if (u.pathname.includes("/video/init"))
+                return json({ data: { publish_id: "v_pub_file~synthetic", upload_url: "https://upload.us.tiktokapis.com/video/?upload_id=67890&upload_token=chunkexample" }, error: { code: "ok" } });
+            if (u.hostname === "upload.us.tiktokapis.com") {
+                actualUploads.push(String(input));
+                return f.fetcher(String(input).replace("upload.us.tiktokapis.com", "open-upload.tiktokapis.com"), init);
+            }
+            return f.fetcher(input, init);
+        };
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        expect((await progress(x.broker, s)).state).toBe("published");
+        expect(actualUploads).toHaveLength(1);
+        for (const bad of ["https://upload.us.tiktokapis.com.evil.test/video/?upload_id=1&upload_token=x", "http://upload.us.tiktokapis.com/video/?upload_id=1&upload_token=x", "https://upload.us.tiktokapis.com/other/?upload_id=1&upload_token=x", "https://upload.us.tiktokapis.com/video/?upload_id=1&upload_id=2&upload_token=x", "https://upload.us.tiktokapis.com/video/?upload_id=1&upload_token=x&redirect=https://evil.test"]) {
+            expect(() => providerUrl(bad)).toThrow();
+        }
+    });
+    it("resumes a registered Pinterest media checkpoint after the receipt stage changes", async () => {
+        const s = request("pinterest"), f = fixture(s), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        const registered = await x.broker.status(subject, s.deliveryId);
+        expect(registered.stage).toBe("media_upload");
+        const restarted = await x.restart();
+        await restarted.resume(subject, { deliveryId: s.deliveryId, expectedVersion: registered.version });
+        expect((await progress(restarted, s)).state).toBe("published");
+        expect(f.calls.filter(c => c.method === "POST" && c.url.endsWith("/v5/media"))).toHaveLength(1);
+        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(2);
+    });
+    it.each(["youtube", "tiktok"] as const)("reconciles an already uploaded %s operation before touching an expired source lease", async (product) => {
+        const s = request(product), f = fixture(s, { loseUpload: product === "youtube" });
+        let loseTikUpload = true;
+        const fetcher: ProviderFetch = async (input, init) => {
+            const result = await f.fetcher(input, init);
+            if (product === "tiktok" && String(input).startsWith("https://open-upload.tiktokapis.com/") && loseTikUpload) {
+                loseTikUpload = false;
+                throw new Error("synthetic accepted upload response lost");
+            }
+            return result;
+        };
+        const x = await setup(s, fetcher);
+        await x.broker.submit(subject, s);
+        expect((await progress(x.broker, s)).state).toBe("unknown");
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        const requestsBefore = f.calls.filter(c => c.url.includes(policy.pathPrefix)).length;
+        const restarted = await x.restart(), unknown = await restarted.status(subject, s.deliveryId);
+        await restarted.resume(subject, { deliveryId: s.deliveryId, expectedVersion: unknown.version });
+        expect((await progress(restarted, s)).state).toBe("published");
+        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(requestsBefore);
+    });
     it("does not report cancellation after an external video already exists", async () => {
         const s = request(), x = await setup(s, fixture(s).fetcher);
         await x.broker.submit(subject, s);
