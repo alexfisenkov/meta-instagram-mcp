@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "products": [
+    { "product": "twitch", "clientIdEnv": "SOCIAL_TWITCH_CLIENT_ID", "clientSecretEnv": "SOCIAL_TWITCH_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] },
+    { "product": "linkedin", "clientIdEnv": "SOCIAL_LINKEDIN_CLIENT_ID", "clientSecretEnv": "SOCIAL_LINKEDIN_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] },
+    { "product": "google_business_profile", "clientIdEnv": "YOUTUBE_OAUTH_CLIENT_ID", "clientSecretEnv": "YOUTUBE_OAUTH_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] },
+    { "product": "x", "clientIdEnv": "SOCIAL_X_CLIENT_ID", "clientSecretEnv": "SOCIAL_X_CLIENT_SECRET", "admission": "disabled", "testSubjects": [], "billingApproved": false }
+  ]
+}

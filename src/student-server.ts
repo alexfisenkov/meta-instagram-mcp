@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createConnectionsRuntime } from "./student/connections-runtime.js";
 import { createPublishingRuntime } from "./student/publishing-runtime.js";
 import { loadStudentConfig } from "./student/config.js";
 import { StudentVault } from "./student/vault.js";
@@ -12,14 +13,15 @@ import type { CallbackAuditEvent, ReadAuditEvent } from "./student/types.js";
 try {
   const config = await loadStudentConfig(process.env);
   let vault: StudentVault | undefined, youtubeVault: StudentVault | undefined;
+  let connections: Awaited<ReturnType<typeof createConnectionsRuntime>>;
   let publishing: Awaited<ReturnType<typeof createPublishingRuntime>>;
   try {
     vault = await StudentVault.open(config.directory, config.vaultKey);
     if (config.registry.get("youtube")) youtubeVault = await StudentVault.open(join(config.directory, "youtube"), config.vaultKey);
+    connections = await createConnectionsRuntime(process.env, config);
     publishing = await createPublishingRuntime(process.env, config, vault, youtubeVault);
   } catch (error) {
-    await publishing?.close();
-    await Promise.allSettled([youtubeVault?.close(), vault?.close()].filter((value): value is Promise<void> => value !== undefined));
+    await Promise.allSettled([connections?.close(), publishing?.close(), youtubeVault?.close(), vault?.close()].filter((value): value is Promise<void> => value !== undefined));
     throw error;
   } finally { config.vaultKey.fill(0); }
   if (!vault) throw new Error("meta_vault_unavailable");
@@ -28,10 +30,12 @@ try {
   let closing: Promise<void> | undefined;
   const closeResources = async () => {
     try { await server?.close(); } finally {
-      try { await publishing?.close(); } finally {
-        try { await lifecycle?.stop(); } finally {
-          try { await youtubeLifecycle?.stop(); } finally {
-            await Promise.allSettled([youtubeVault?.close(), vault!.close()].filter((value): value is Promise<void> => value !== undefined));
+      try { await connections?.close(); } finally {
+        try { await publishing?.close(); } finally {
+          try { await lifecycle?.stop(); } finally {
+            try { await youtubeLifecycle?.stop(); } finally {
+              await Promise.allSettled([youtubeVault?.close(), vault!.close()].filter((value): value is Promise<void> => value !== undefined));
+            }
           }
         }
       }
@@ -44,7 +48,7 @@ try {
     const youtubeBroker = youtubeVault ? new StudentBroker(youtubeVault, config.registry, provider, config.platformOrigin, Date.now, audit, audit) : undefined;
     youtubeLifecycle = youtubeVault ? new GrantLifecycle(youtubeVault, config.registry, provider) : undefined;
     if (youtubeLifecycle) await youtubeLifecycle.tick();
-    server = await startStudentServer({ ...config, broker, youtubeBroker, vault, publishing: publishing?.runtime }); lifecycle.start(config.refreshIntervalMs); youtubeLifecycle?.start(config.refreshIntervalMs); publishing?.runtime.broker.start();
+    server = await startStudentServer({ ...config, broker, youtubeBroker, vault, publishing: publishing?.runtime, connections: connections?.runtime }); lifecycle.start(config.refreshIntervalMs); youtubeLifecycle?.start(config.refreshIntervalMs); publishing?.runtime.broker.start();
     const close = () => closing ??= closeResources();
     process.once("SIGINT", () => { void close(); }); process.once("SIGTERM", () => { void close(); });
     process.stderr.write(JSON.stringify({ event: "student_broker_started", transport: "loopback_http" }) + "\n");

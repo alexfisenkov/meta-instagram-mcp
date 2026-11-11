@@ -6,6 +6,7 @@ import { assertPrivateFile } from "../private-fs.js";
 import { loadStudentVaultConfig } from "./config.js";
 import { BrokerError, sameSubject, type Subject } from "./types.js";
 import { StudentVault } from "./vault.js";
+import { purgeReadConnections } from "./connections-store.js";
 
 /** Offline owner operation. Acquires the same exclusive process lock as the service. */
 export async function purgeStudentSubject(directory: string, key: Buffer, subject: Subject) {
@@ -15,6 +16,12 @@ export async function purgeStudentSubject(directory: string, key: Buffer, subjec
   try { const info = await lstat(join(directory, "youtube")); if (!info.isDirectory() || info.isSymbolicLink()) throw new BrokerError("vault_integrity_failed"); youtubeDirectory = join(directory, "youtube"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (youtubeDirectory) await assertPrivateFile(join(youtubeDirectory, "vault.json"));
+  let connectionsDirectory: string | undefined;
+  try {
+    const path = join(directory, "connections"), info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new BrokerError("vault_integrity_failed");
+    await assertPrivateFile(join(path, "vault.json")); connectionsDirectory = path;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const purgeVault = async (vaultDirectory: string) => {
     const vault = await StudentVault.open(vaultDirectory, key);
     try { return await vault.transaction((db) => {
@@ -37,6 +44,13 @@ export async function purgeStudentSubject(directory: string, key: Buffer, subjec
   if (youtubeDirectory) {
     const youtube = await purgeVault(youtubeDirectory);
     for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += youtube[key];
+  }
+  if (connectionsDirectory) {
+    const connections = await StudentVault.open(connectionsDirectory, key);
+    try {
+      const counts = await purgeReadConnections(connections, subject);
+      for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += counts[key];
+    } finally { await connections.close(); }
   }
   return totals;
 }
