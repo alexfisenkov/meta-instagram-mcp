@@ -2,7 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { StudentBroker } from "./broker.js";
 import { BrokerError, META_PRODUCTS, type Subject } from "./types.js";
-export function createStudentMcp(broker: StudentBroker, subject: Subject, youtubeBroker: StudentBroker = broker): McpServer {
+import type { PublishingRuntime } from "./publishing-runtime.js";
+import { assetSchema, submitSchema } from "./publishing-types.js";
+export function createStudentMcp(broker: StudentBroker, subject: Subject, youtubeBroker: StudentBroker = broker, publishing?: PublishingRuntime): McpServer {
   const server = new McpServer({ name: "meta-student-broker", version: "1.0.0" });
   const result = async (run: () => unknown | Promise<unknown>) => {
     try { const data = await run(); return { content: [{ type: "text" as const, text: JSON.stringify(data) }] }; }
@@ -20,5 +22,18 @@ export function createStudentMcp(broker: StudentBroker, subject: Subject, youtub
   server.registerTool("youtube_connections_begin", { description: "Begin a state-bound Google OAuth authorization for read-only YouTube channel access.", inputSchema: z.object({}).strict(), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false } }, () => result(() => youtubeBroker.begin(subject, "youtube")));
   server.registerTool("youtube_connections_disconnect", { description: "Disconnect one of this authenticated subject's own YouTube channels and revoke unused local grant credentials.", inputSchema: z.object({ connectionId: z.string().uuid() }).strict(), annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true } }, (args) => result(() => youtubeBroker.disconnect(subject, args.connectionId, ["youtube"])));
   server.registerTool("youtube_connections_read", { description: "Read the selected owned YouTube channel profile and documented channel counts using its confirmed read-only grant.", inputSchema: z.object({ connectionId: z.string().uuid() }).strict(), annotations: { readOnlyHint: true } }, (args) => result(() => youtubeBroker.read(subject, { connectionId: args.connectionId, operation: "account" }, ["youtube"])));
+  if (publishing) {
+  const pub = () => { if (!publishing) throw new BrokerError("not_configured"); return publishing; };
+  server.registerTool("social_connections_catalog", { description: "Configured video publishing OAuth admission; actual grant capabilities are checked separately.", inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}},()=>result(()=>pub().catalog(subject)));
+  server.registerTool("social_connections_list", { description:"Own video resources, merging read and write grants by stable resource identity.",inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}},()=>result(()=>pub().list(subject)));
+  server.registerTool("social_connections_begin", {description:"Begin separate subject-bound write consent, optionally upgrading one exact resource.",inputSchema:z.object({product:z.enum(["youtube","tiktok","pinterest"]),connectionId:z.string().uuid().optional()}).strict(),annotations:{readOnlyHint:false}},args=>result(()=>pub().begin(subject,args.product,args.connectionId)));
+  server.registerTool("social_connections_disconnect",{description:"Disable one isolated publishing grant; existing read grants are retained.",inputSchema:z.object({connectionId:z.string().uuid()}).strict(),annotations:{readOnlyHint:false}},args=>result(()=>pub().disconnect(subject,args.connectionId)));
+  server.registerTool("social_publish_context",{description:"Read fresh creator privacy, board and granted publish constraints.",inputSchema:z.object({connectionId:z.string().uuid()}).strict(),annotations:{readOnlyHint:true}},args=>result(()=>pub().broker.context(subject,args.connectionId)));
+  server.registerTool("social_publish_submit",{description:"Durably accept an exact previously confirmed delivery; large media is streamed separately.",inputSchema:submitSchema,annotations:{readOnlyHint:false,idempotentHint:true}},args=>result(()=>pub().broker.submit(subject,args)));
+  server.registerTool("social_publish_status",{description:"Read one own durable delivery receipt without resending.",inputSchema:z.object({deliveryId:z.string().uuid()}).strict(),annotations:{readOnlyHint:true}},args=>result(()=>pub().broker.status(subject,args.deliveryId)));
+  const revision=z.object({deliveryId:z.string().uuid(),expectedVersion:z.number().int().positive()}).strict();
+  server.registerTool("social_publish_resume",{description:"Explicitly reconcile an existing provider operation; renewed leases must keep exact asset identity.",inputSchema:revision.extend({asset:assetSchema.optional(),cover:assetSchema.optional()}).strict(),annotations:{readOnlyHint:false,idempotentHint:true}},args=>result(()=>pub().broker.resume(subject,args)));
+  server.registerTool("social_publish_cancel",{description:"Cancel only future local steps; never delete a provider post.",inputSchema:revision,annotations:{readOnlyHint:false,idempotentHint:true}},args=>result(()=>pub().broker.cancel(subject,args)));
+  }
   return server;
 }

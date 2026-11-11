@@ -6,7 +6,7 @@ const tokenEndpoint = "https://oauth2.googleapis.com/token";
 const userInfoEndpoint = "https://openidconnect.googleapis.com/v1/userinfo";
 const channelsEndpoint = "https://www.googleapis.com/youtube/v3/channels";
 const requestedScopes = ["openid", "profile", "https://www.googleapis.com/auth/youtube.readonly"];
-const allowedScopes = new Set([...requestedScopes, "https://www.googleapis.com/auth/userinfo.profile"]);
+const allowedScopes = new Set([...requestedScopes, "https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/userinfo.profile"]);
 const maxChannelPages = 10;
 
 type Json = Record<string, any>;
@@ -46,7 +46,7 @@ function grantedScopes(value: unknown): string[] {
   if (raw.some((scope) => !allowedScopes.has(scope))) throw new BrokerError("grant_verification_failed");
   const scopes = raw.map((scope) => scope === "https://www.googleapis.com/auth/userinfo.profile" ? "profile" : scope);
   if (requestedScopes.some((scope) => !scopes.includes(scope))) throw new BrokerError("permission_unavailable");
-  return requestedScopes;
+  return [...new Set(scopes)];
 }
 function expiresAt(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > 31_536_000) throw new BrokerError("grant_verification_failed");

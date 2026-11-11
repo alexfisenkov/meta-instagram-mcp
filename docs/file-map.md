@@ -175,3 +175,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 ### Где debug Meta API errors?
 
 Начать с `src/meta-client.ts` для error shape и token redaction, затем использовать `meta_raw_get` только с relative Graph paths.
+
+## Публикация видео
+
+`src/student/publishing-{types,store,broker,runtime}.ts` — отдельный wire/hash, encrypted checkpoint vault, runner и совместимая композиция. `provider-publishing{,-http,-oauth}.ts` — фиксированные официальные endpoints, stream/spool и независимый OAuth TikTok/Pinterest/YouTube upload. `tests/student-publishing*.test.ts` и `tests/fixtures/publishing-hash-fixture.json` — synthetic provider/transport/compatibility проверки. Включение, восстановление и ограничения: [social-publishing.md](social-publishing.md); приватный реестр — по `student-publishing.config.example.json`.

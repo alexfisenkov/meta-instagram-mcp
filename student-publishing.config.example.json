@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "products": [
+    { "product": "youtube", "clientIdEnv": "SOCIAL_YOUTUBE_CLIENT_ID", "clientSecretEnv": "SOCIAL_YOUTUBE_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] },
+    { "product": "tiktok", "clientIdEnv": "SOCIAL_TIKTOK_CLIENT_ID", "clientSecretEnv": "SOCIAL_TIKTOK_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] },
+    { "product": "pinterest", "clientIdEnv": "SOCIAL_PINTEREST_CLIENT_ID", "clientSecretEnv": "SOCIAL_PINTEREST_CLIENT_SECRET", "admission": "disabled", "testSubjects": [] }
+  ]
+}
