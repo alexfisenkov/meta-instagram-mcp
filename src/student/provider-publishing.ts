@@ -31,7 +31,8 @@ export class PublishingProviders {
     constructor(readonly http = new PublishingHttp()) {
     }
     async context(a: Access): Promise<Context> {
-        const base: Context = { connectionId: a.connectionId, product: a.product, accountLabel: a.label, canPublish: true, requirements: [], limits: {} };
+        const limits: Context["limits"] = a.product === "youtube" ? { maxTitleCharacters: 100, maxCaptionBytes: 5000, forbidAngleBrackets: true } : a.product === "pinterest" ? { maxTitleCharacters: 100, maxCaptionCharacters: 800 } : {};
+        const base: Context = { connectionId: a.connectionId, product: a.product, accountLabel: a.label, canPublish: true, requirements: [], limits };
         const required = a.product === "youtube" ? ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/youtube.upload"] : a.product === "tiktok" ? ["user.info.basic", "video.publish"] : a.product === "pinterest" ? ["user_accounts:read", "boards:read", "pins:read", "pins:write"] : [a.family === "instagram_login" ? "instagram_business_content_publish" : "instagram_content_publish"];
         if (required.some(s => !a.scopes.includes(s)))
             return { ...base, canPublish: false, reason: "write_consent_required", requirements: required.filter(s => !a.scopes.includes(s)) };
@@ -60,7 +61,7 @@ export class PublishingProviders {
                     boards.push({ id: row.id, name: row.name.slice(0, 512) });
                 }
                 if (!b.bookmark)
-                    return { ...base, boards, limits: { maxCaptionCharacters: 800 } };
+                    return { ...base, boards };
                 if (typeof b.bookmark !== "string" || b.bookmark === bookmark || b.bookmark.length > 2048)
                     throw new BrokerError("provider_response_invalid");
                 bookmark = b.bookmark;
@@ -97,6 +98,12 @@ export class PublishingProviders {
         const r = d.request;
         if (r.cover && r.product === "tiktok")
             throw new BrokerError("cover_not_supported");
+        if (c.limits.maxTitleCharacters && [...r.title].length > c.limits.maxTitleCharacters)
+            throw new BrokerError("title_too_long");
+        if (c.limits.maxCaptionBytes && Buffer.byteLength(r.caption, "utf8") > c.limits.maxCaptionBytes)
+            throw new BrokerError("caption_too_long");
+        if (c.limits.forbidAngleBrackets && /[<>]/.test(r.title + r.caption))
+            throw new BrokerError("forbidden_text_characters");
         if (c.limits.maxCaptionCharacters && r.caption.length > c.limits.maxCaptionCharacters)
             throw new BrokerError("caption_too_long");
         if (r.product === "tiktok") {
@@ -111,11 +118,9 @@ export class PublishingProviders {
             if (x && (x.commentDisabled && !o.disableComment || x.duetDisabled && !o.disableDuet || x.stitchDisabled && !o.disableStitch))
                 throw new BrokerError("interaction_option_unavailable");
         }
-        if (r.product === "pinterest" && r.title.length > 100)
-            throw new BrokerError("pinterest_title_too_long");
         if (r.product === "pinterest" && !c.boards?.some(b => b.id === r.options.boardId))
             throw new BrokerError("board_not_available");
-        if (r.product === "youtube" && (!r.title || r.title.length > 100 || r.caption.length > 5000))
+        if (r.product === "youtube" && !r.title)
             throw new BrokerError("youtube_metadata_invalid");
     }
     async step(d: Delivery, a: Access, path: string, save: SaveCheckpoint, coverPath?: string, mediaPaths?: ProviderMediaPaths): Promise<StepResult> {
@@ -203,7 +208,7 @@ export class PublishingProviders {
                 throw new BrokerError("provider_outcome_unknown");
             c.inFlight = "youtube_init";
             await save(c, "uploading", "session_create");
-            const response = await this.http.raw("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json", "X-Upload-Content-Length": String(r.asset.size), "X-Upload-Content-Type": r.asset.mime }, body: JSON.stringify({ snippet: { title: r.title, description: r.caption, categoryId: o.categoryId }, status: { privacyStatus: o.privacyStatus, selfDeclaredMadeForKids: o.madeForKids } }) });
+            const response = await this.http.raw("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json", "X-Upload-Content-Length": String(r.asset.size), "X-Upload-Content-Type": r.asset.mime }, body: JSON.stringify({ snippet: { title: r.title, description: r.caption, categoryId: o.categoryId }, status: { privacyStatus: o.privacyStatus, selfDeclaredMadeForKids: o.madeForKids, ...(o.containsSyntheticMedia !== undefined ? { containsSyntheticMedia: o.containsSyntheticMedia } : {}) } }) });
             if (!response.ok)
                 throw new BrokerError("provider_unavailable");
             const u = response.headers.get("location");

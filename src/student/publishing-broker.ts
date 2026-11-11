@@ -198,7 +198,7 @@ export class PublishingBroker {
             });
         }
         catch (e) {
-            const safe = new Set(["asset_lease_rejected", "asset_unavailable", "asset_integrity_failed", "asset_size_mismatch", "reauth_required", "permission_unavailable", "write_consent_required", "privacy_readback_mismatch", "provider_binding_mismatch", "grant_verification_failed", "provider_outcome_unknown", "provider_response_invalid", "commercial_disclosure_required", "privacy_option_unavailable", "interaction_option_unavailable", "board_not_available", "provider_unavailable", "provider_processing_timeout"]);
+            const safe = new Set(["asset_lease_rejected", "asset_unavailable", "asset_integrity_failed", "asset_size_mismatch", "reauth_required", "permission_unavailable", "write_consent_required", "privacy_readback_mismatch", "provider_binding_mismatch", "grant_verification_failed", "provider_outcome_unknown", "provider_response_invalid", "commercial_disclosure_required", "privacy_option_unavailable", "interaction_option_unavailable", "board_not_available", "provider_unavailable", "provider_processing_timeout", "title_too_long", "caption_too_long", "forbidden_text_characters"]);
             const code = e instanceof BrokerError && safe.has(e.code) ? e.code : "publishing_failed";
             await this.store.transaction(data => {
                 const d = this.owned(data.deliveries, original, id);

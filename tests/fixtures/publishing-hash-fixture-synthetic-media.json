@@ -1,0 +1,23 @@
+{
+  "connectionId": "11111111-1111-4111-8111-111111111111",
+  "product": "youtube",
+  "source": {
+    "asset": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 123456,
+      "mime": "video/mp4"
+    },
+    "cover": null
+  },
+  "title": "Привет 👋 <AI> & «тест»",
+  "caption": "Строка 1\n\"строка 2\"\\ /    ",
+  "options": {
+    "privacyStatus": "private",
+    "madeForKids": false,
+    "categoryId": "22",
+    "containsSyntheticMedia": true
+  },
+  "canonical": "[\"social-publish-target-v1\",\"11111111-1111-4111-8111-111111111111\",\"youtube\",{\"asset\":{\"id\":\"22222222-2222-4222-8222-222222222222\",\"mime\":\"video/mp4\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":123456},\"cover\":null},\"Привет 👋 <AI> & «тест»\",\"Строка 1\\n\\\"строка 2\\\"\\\\ / \\u2028 \\u2029\",{\"categoryId\":\"22\",\"containsSyntheticMedia\":true,\"madeForKids\":false,\"privacyStatus\":\"private\"}]",
+  "targetHash": "2f37499142065fa9d97e50562475e154a3c66dffda4368f39b38ecf0639cede5"
+}

@@ -150,6 +150,62 @@ async function progress(b: PublishingBroker, s: Submit, max = 8) {
     return b.status(subject, s.deliveryId);
 }
 describe("durable video publishing", () => {
+    it("exposes exact YouTube byte/title/text limits and Pinterest title characters", async () => {
+        const s = request(), x = await setup(s, fixture(s).fetcher), c = await x.broker.context(subject, s.connectionId);
+        expect(c.limits).toEqual({ maxTitleCharacters: 100, maxCaptionBytes: 5000, forbidAngleBrackets: true });
+        const pin = request("pinterest"), p = await setup(pin, fixture(pin).fetcher);
+        expect((await p.broker.context(subject, pin.connectionId)).limits).toEqual({ maxTitleCharacters: 100, maxCaptionCharacters: 800 });
+    });
+    it.each([["Cyrillic", "я".repeat(2500)], ["emoji", "😀".repeat(1250)]] as const)("enforces YouTube 5000/5001 UTF8 bytes for %s", async (_label, caption) => {
+        const s = request();
+        s.caption = caption;
+        s.targetHash = targetHash(s);
+        const f = fixture(s), x = await setup(s, f.fetcher);
+        expect(Buffer.byteLength(caption, "utf8")).toBe(5000);
+        expect((await x.broker.submit(subject, s)).state).toBe("queued");
+        const over = { ...s, deliveryId: randomUUID(), caption: caption + "a" };
+        over.targetHash = targetHash(over);
+        expect(Buffer.byteLength(over.caption, "utf8")).toBe(5001);
+        await expect(x.broker.submit(subject, over)).rejects.toMatchObject({ code: "caption_too_long" });
+        expect(f.calls.filter(c => c.method === "POST" && c.url.includes("/upload/"))).toHaveLength(0);
+    });
+    it("counts title characters as Unicode codepoints and rejects angle brackets in both text fields", async () => {
+        const s = request();
+        s.title = "😀".repeat(100);
+        s.targetHash = targetHash(s);
+        const x = await setup(s, fixture(s).fetcher);
+        expect((await x.broker.submit(subject, s)).state).toBe("queued");
+        const tooLong = { ...s, deliveryId: randomUUID(), title: s.title + "a" };
+        tooLong.targetHash = targetHash(tooLong);
+        await expect(x.broker.submit(subject, tooLong)).rejects.toMatchObject({ code: "title_too_long" });
+        for (const field of ["title", "caption"] as const)
+            for (const bracket of ["<", ">"]) {
+                const bad = { ...s, deliveryId: randomUUID(), [field]: "text" + bracket };
+                bad.targetHash = targetHash(bad);
+                await expect(x.broker.submit(subject, bad)).rejects.toMatchObject({ code: "forbidden_text_characters" });
+            }
+    });
+    it("binds optional explicit YouTube synthetic-media disclosure to the hash and provider status", async () => {
+        const base = request(), hashes: string[] = [];
+        for (const value of [undefined, false, true]) {
+            const s = { ...base, deliveryId: randomUUID(), options: value === undefined ? base.options : { ...base.options, containsSyntheticMedia: value } };
+            s.targetHash = targetHash(s);
+            hashes.push(s.targetHash);
+            const f = fixture(s), x = await setup(s, f.fetcher);
+            await x.broker.submit(subject, s);
+            expect((await progress(x.broker, s)).state).toBe("published");
+            const post = f.calls.find(c => c.method === "POST" && c.url.includes("/upload/youtube/v3/videos"));
+            const status = JSON.parse(String(post?.body)).status;
+            expect(Object.hasOwn(status, "containsSyntheticMedia")).toBe(value !== undefined);
+            if (value !== undefined)
+                expect(status.containsSyntheticMedia).toBe(value);
+        }
+        expect(new Set(hashes).size).toBe(3);
+        const bad = { ...base, options: { ...base.options, containsSyntheticMedia: "true" } };
+        bad.targetHash = targetHash(bad);
+        const x = await setup(bad, fixture(bad).fetcher);
+        await expect(x.broker.submit(subject, bad)).rejects.toMatchObject({ code: "invalid_publish_request" });
+    });
     it("rejects missing or noncanonical YouTube category before any provider call", async () => {
         const s = request(), f = fixture(s), x = await setup(s, f.fetcher);
         for (const options of [{ privacyStatus: "private", madeForKids: false }, { ...s.options, categoryId: "0" }, { ...s.options, categoryId: "01" }, { ...s.options, categoryId: 22 }]) {
@@ -302,8 +358,8 @@ describe("durable video publishing", () => {
         await x.broker.resume(subject, { deliveryId: s.deliveryId, expectedVersion: failed.version, asset: { ...s.asset, fetchUrl: s.asset.fetchUrl + "renewed" } });
         expect((await progress(x.broker, s)).state).toBe("published");
     });
-    it("matches the frozen independent Go Unicode fixture", async () => {
-        const f = JSON.parse(await readFile(new URL("./fixtures/publishing-hash-fixture.json", import.meta.url), "utf8"));
+    it.each(["publishing-hash-fixture.json", "publishing-hash-fixture-synthetic-media.json"])("matches the independent Unicode/hash fixture %s", async (fixtureName) => {
+        const f = JSON.parse(await readFile(new URL(`./fixtures/${fixtureName}`, import.meta.url), "utf8"));
         const s = { ...request(), connectionId: f.connectionId, product: f.product, asset: { ...request().asset, ...f.source.asset }, title: f.title, caption: f.caption, options: f.options };
         expect(canonical(["social-publish-target-v1", f.connectionId, f.product, f.source, f.title, f.caption, f.options])).toBe(f.canonical);
         expect(targetHash(s)).toBe(f.targetHash);

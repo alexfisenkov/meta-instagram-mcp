@@ -8,7 +8,7 @@ export const assetSchema = z.object({ id: z.string().uuid(), sha256: hash, size:
 export type Asset = z.infer<typeof assetSchema>;
 export const optionSchemas = {
     instagram: z.object({ shareToFeed: z.boolean() }).strict(),
-    youtube: z.object({ categoryId: z.string().regex(/^[1-9][0-9]{0,9}$/), privacyStatus: z.enum(["private", "unlisted", "public"]), madeForKids: z.boolean() }).strict(),
+    youtube: z.object({ categoryId: z.string().regex(/^[1-9][0-9]{0,9}$/), privacyStatus: z.enum(["private", "unlisted", "public"]), madeForKids: z.boolean(), containsSyntheticMedia: z.boolean().optional() }).strict(),
     tiktok: z.object({ privacyLevel: z.string().min(1).max(64), disableComment: z.boolean(), disableDuet: z.boolean(), disableStitch: z.boolean(), consent: z.literal(true), brandContentToggle: z.boolean(), brandOrganicToggle: z.boolean(), isAigc: z.boolean(), commercialContentDisclosureConfirmed: z.boolean(), disclosureVersion: z.string().max(128).optional() }).strict(),
     pinterest: z.object({ boardId: z.string().regex(/^\d{1,64}$/), link: z.string().url().max(2048).optional(), altText: z.string().max(500).optional(), coverImageKeyFrameTime: z.number().int().min(0).optional() }).strict(),
 };
@@ -51,6 +51,9 @@ export interface Context {
         maxBytes?: number;
         maxDurationSeconds?: number;
         maxCaptionCharacters?: number;
+        maxTitleCharacters?: number;
+        maxCaptionBytes?: number;
+        forbidAngleBrackets?: boolean;
     };
     disclosureVersion?: string;
     commercialContentDisclosureText?: string;

@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- YouTube metadata context и проверка учитывают точные 5000 байт UTF‑8 описания, 100 Unicode characters заголовка и запрет `<`/`>` в обоих полях. Pinterest title bound передаётся из provider context. Опциональный явный `containsSyntheticMedia` закреплён в hash и передаётся провайдеру без вывода о содержимом видео; дополнительный независимый fixture проверяет явное значение.
+
 - Исправления ревью видеопубликатора: явный YouTube categoryId закреплён в options/hash/metadata; добавлен точный официальный региональный TikTok upload host. Восстановление Pinterest берёт байты по checkpoint, а известные YouTube/TikTok операции сначала сверяются у провайдера — истёкшая source lease не блокирует уже завершённую передачу. Неизвестная финальная публикация Instagram/Pinterest по-прежнему не повторяется.
 
 - Опциональный видеопубликатор: отдельный encrypted write-grant/checkpoint vault, subject-bound delivery IDs и согласованный SHA-256 wire fixture; Instagram staged Reels, resumable YouTube с readback видимости и обложкой, TikTok creator/privacy/disclosures/status, Pinterest media/S3/video Pin с обложкой из кадра. Unknown publish не создаётся заново. Новые OAuth TikTok/Pinterest и отдельный YouTube upload flow сохраняют совместимые read grants и стабильные resource IDs. Контур выключен без явной media-конфигурации, прежний MCP catalog сохраняется. Проверки синтетические, включая tsc output; живой допуск, OAuth, UI и публикация отдельно.
