@@ -528,22 +528,26 @@ describe("durable video publishing", () => {
                 await expect(x.broker.submit(subject, bad)).rejects.toMatchObject({ code: "forbidden_text_characters" });
             }
     });
-    it("binds optional explicit YouTube synthetic-media disclosure to the hash and provider status", async () => {
-        const base = request(), hashes: string[] = [];
-        for (const value of [undefined, false, true]) {
-            const s = { ...base, deliveryId: randomUUID(), options: value === undefined ? base.options : { ...base.options, containsSyntheticMedia: value } };
-            s.targetHash = targetHash(s);
-            hashes.push(s.targetHash);
-            const f = fixture(s), x = await setup(s, f.fetcher);
-            await x.broker.submit(subject, s);
-            expect((await progress(x.broker, s)).state).toBe("published");
-            const post = f.calls.find(c => c.method === "POST" && c.url.includes("/upload/youtube/v3/videos"));
-            const status = JSON.parse(String(post?.body)).status;
-            expect(Object.hasOwn(status, "containsSyntheticMedia")).toBe(value !== undefined);
-            if (value !== undefined)
-                expect(status.containsSyntheticMedia).toBe(value);
-        }
+    it.each([["omitted", undefined], ["false", false], ["true", true]] as const)("binds %s YouTube synthetic-media disclosure to the confirmed provider status", async (_label, value) => {
+        const base = request();
+        const s = { ...base, options: value === undefined ? base.options : { ...base.options, containsSyntheticMedia: value } };
+        s.targetHash = targetHash(s);
+        const f = fixture(s), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        expect((await progress(x.broker, s)).state).toBe("published");
+        const post = f.calls.find(c => c.method === "POST" && c.url.includes("/upload/youtube/v3/videos"));
+        const status = JSON.parse(String(post?.body)).status;
+        expect(Object.hasOwn(status, "containsSyntheticMedia")).toBe(value !== undefined);
+        if (value !== undefined)
+            expect(status.containsSyntheticMedia).toBe(value);
+    });
+    it("keeps omitted, false and true YouTube synthetic-media disclosure hashes distinct", () => {
+        const base = request();
+        const hashes = [undefined, false, true].map(value => targetHash({ ...base, options: value === undefined ? base.options : { ...base.options, containsSyntheticMedia: value } }));
         expect(new Set(hashes).size).toBe(3);
+    });
+    it("rejects a string YouTube synthetic-media disclosure instead of coercing it", async () => {
+        const base = request();
         const bad = { ...base, options: { ...base.options, containsSyntheticMedia: "true" } };
         bad.targetHash = targetHash(bad);
         const x = await setup(bad, fixture(bad).fetcher);
