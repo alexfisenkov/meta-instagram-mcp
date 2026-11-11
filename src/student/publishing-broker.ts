@@ -2,14 +2,41 @@ import { canonical, identity, requestBinding, submitSchema, targetHash, type Acc
 import { PublishingStore } from "./publishing-store.js";
 import { PublishingProviders } from "./provider-publishing.js";
 import { BrokerError, sameSubject, type Subject } from "./types.js";
-import { mediaUrl, spoolMedia, type MediaPolicy, type ProviderFetch } from "./provider-publishing-http.js";
+import { mediaUrl, type MediaPolicy, type ProviderFetch } from "./provider-publishing-http.js";
+import { PublishingMediaCache, type MediaLease, type MediaReference } from "./publishing-media-cache.js";
 export type AccessResolver = (subject: Subject, connectionId: string) => Promise<Access>;
 /** Durable acceptance is separate from a bounded asynchronous provider runner. */
 export class PublishingBroker {
     private running = new Set<string>();
     private timer?: ReturnType<typeof setInterval>;
     private stopping = false;
+    private readonly mediaCache: PublishingMediaCache;
+    private prepared?: Promise<void>;
     constructor(readonly store: PublishingStore, private readonly resolveAccess: AccessResolver, readonly providers: PublishingProviders, readonly mediaPolicy: MediaPolicy, readonly spoolDirectory: string, private readonly fetcher: ProviderFetch = fetch) {
+        this.mediaCache = new PublishingMediaCache(spoolDirectory, mediaPolicy, fetcher);
+    }
+    private cacheReferences(d: Delivery): MediaReference[] {
+        if (["published", "failed", "cancelled"].includes(d.receipt.state))
+            return [];
+        const c = d.checkpoint, r = d.request, refs: MediaReference[] = [];
+        const sourceDone = Boolean(c.providerId) || r.product === "instagram" && Boolean(c.mediaId) || (r.product === "tiktok" && (c.operation === "tiktok_publish_complete" || (c.offset ?? 0) >= r.asset.size)) || (r.product === "pinterest" && (c.offset ?? 0) >= r.asset.size);
+        if (!sourceDone)
+            refs.push({ deliveryId: r.deliveryId, role: "asset", asset: r.asset });
+        if (r.cover && !(r.product === "instagram" && c.mediaId) && !(r.product === "youtube" && c.operation === "youtube_thumbnail_complete") && !c.providerId)
+            refs.push({ deliveryId: r.deliveryId, role: "cover", asset: r.cover });
+        else if (r.cover && r.product === "youtube" && c.operation !== "youtube_thumbnail_complete")
+            refs.push({ deliveryId: r.deliveryId, role: "cover", asset: r.cover });
+        return refs;
+    }
+    private prepare(): Promise<void> {
+        return this.prepared ??= (async () => {
+            const data = await this.store.snapshot();
+            await this.mediaCache.reconcile(data.deliveries.flatMap(d => this.cacheReferences(d)));
+        })();
+    }
+    private async cleanCache(d: Delivery): Promise<void> {
+        const keep = new Set(this.cacheReferences(d).map(ref => ref.role));
+        await Promise.allSettled((["asset", "cover"] as const).filter(role => !keep.has(role) && d.request[role]).map(role => this.mediaCache.discard({ deliveryId: d.request.deliveryId, role, asset: d.request[role]! })));
     }
     async context(subject: Subject, connectionId: string): Promise<Context> {
         return this.providers.context(await this.resolveAccess(subject, connectionId));
@@ -100,7 +127,7 @@ export class PublishingBroker {
         deliveryId: string;
         expectedVersion: number;
     }) {
-        return this.store.transaction(data => {
+        const receipt = await this.store.transaction(data => {
             const d = this.owned(data.deliveries, subject, input.deliveryId);
             if (d.receipt.version !== input.expectedVersion)
                 throw new BrokerError("version_conflict");
@@ -114,6 +141,10 @@ export class PublishingBroker {
             delete d.receipt.nextPollAt;
             return structuredClone(d.receipt);
         });
+        const d = (await this.store.snapshot()).deliveries.find(d => d.request.deliveryId === input.deliveryId && sameSubject(d, subject));
+        if (d)
+            await this.cleanCache(d);
+        return receipt;
     }
     start() {
         if (!this.timer) {
@@ -133,7 +164,20 @@ export class PublishingBroker {
     async tick() {
         if (this.stopping)
             return;
-        const due = (await this.store.snapshot()).deliveries.filter(d => ["queued", "uploading", "processing", "publishing"].includes(d.receipt.state) && (!d.receipt.nextPollAt || Date.parse(d.receipt.nextPollAt) <= Date.now()) && !this.running.has(d.request.deliveryId)).slice(0, Math.max(0, 2 - this.running.size));
+        const data = await this.store.snapshot();
+        const connectionKey = (d: Delivery) => `${d.tenantId}:${d.sub}:${d.request.connectionId}`;
+        const occupied = new Set(data.deliveries.filter(d => this.running.has(d.request.deliveryId)).map(connectionKey));
+        const candidates = data.deliveries.filter(d => ["queued", "uploading", "processing", "publishing"].includes(d.receipt.state) && (!d.receipt.nextPollAt || Date.parse(d.receipt.nextPollAt) <= Date.now()) && !this.running.has(d.request.deliveryId)).sort((a, b) => Number(b.receipt.state === "uploading") - Number(a.receipt.state === "uploading"));
+        const due: Delivery[] = [];
+        for (const d of candidates) {
+            if (due.length >= Math.max(0, 2 - this.running.size))
+                break;
+            const key = connectionKey(d);
+            if (occupied.has(key))
+                continue;
+            occupied.add(key);
+            due.push(d);
+        }
         await Promise.all(due.map(d => this.run(d)));
     }
     private owned(deliveries: Delivery[], subject: Subject, id: string) {
@@ -147,34 +191,48 @@ export class PublishingBroker {
         if (this.running.has(id))
             return;
         this.running.add(id);
-        let media: Awaited<ReturnType<typeof spoolMedia>> | undefined, cover: typeof media;
+        let media: MediaLease | undefined, cover: MediaLease | undefined;
         try {
             if (original.processingStartedAt && Date.now() - Date.parse(original.processingStartedAt) > 24 * 60 * 60 * 1000)
                 throw new BrokerError("provider_processing_timeout");
             const a = await this.resolveAccess(original, original.request.connectionId);
             if (a.product !== original.request.product)
                 throw new BrokerError("connection_product_mismatch");
-            const context = await this.providers.context(a);
-            this.providers.validate(original, context);
+            const checkpoint = original.checkpoint;
+            const hasKnownOperation = checkpoint.providerId || (a.product === "youtube" ? checkpoint.sessionUrl : checkpoint.mediaId);
+            if (!hasKnownOperation)
+                this.providers.validate(original, await this.providers.context(a));
             // Known operations reconcile first; media is fetched only if that exact checkpoint needs more bytes.
             const getAssetPath = async () => {
-                media ??= await spoolMedia(original.request.asset, this.mediaPolicy, this.spoolDirectory, this.fetcher);
+                await this.prepare();
+                media ??= await this.mediaCache.acquire({ deliveryId: id, role: "asset", asset: original.request.asset });
                 return media.path;
             };
             const getCoverPath = async () => {
                 if (!original.request.cover)
                     return "";
-                cover ??= await spoolMedia(original.request.cover, this.mediaPolicy, this.spoolDirectory, this.fetcher);
+                await this.prepare();
+                cover ??= await this.mediaCache.acquire({ deliveryId: id, role: "cover", asset: original.request.cover });
                 return cover.path;
             };
-            const checkpoint = original.checkpoint;
-            const hasKnownOperation = checkpoint.providerId || (a.product === "youtube" ? checkpoint.sessionUrl : checkpoint.mediaId);
             if (!hasKnownOperation && !checkpoint.inFlight) {
                 await getAssetPath();
                 if (original.request.cover)
                     await getCoverPath();
             }
             const step = await this.providers.step(original, a, media?.path ?? "", async (cp, state, stage) => {
+                if (cp.inFlight === "instagram_create") {
+                    mediaUrl(original.request.asset, this.mediaPolicy);
+                    if (original.request.cover)
+                        mediaUrl(original.request.cover, this.mediaPolicy);
+                }
+                if (cp.inFlight === "pinterest_pin" && original.request.cover)
+                    mediaUrl(original.request.cover, this.mediaPolicy);
+                const current = await this.resolveAccess(original, original.request.connectionId);
+                if (current.product !== a.product || current.providerId !== a.providerId)
+                    throw new BrokerError("provider_binding_mismatch");
+                this.providers.validate(original, await this.providers.context(current));
+                Object.assign(a, current);
                 await this.store.transaction(data => {
                     const d = this.owned(data.deliveries, original, id);
                     if (d.receipt.state === "cancelled")
@@ -191,25 +249,29 @@ export class PublishingBroker {
                     d.processingStartedAt ??= new Date().toISOString();
                 d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: step.state, stage: step.stage, retryable: false, ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.providerId ? { providerId: step.providerId } : {}), ...(step.permalink ? { permalink: step.permalink } : {}) };
                 if (!["published", "failed", "cancelled", "unknown"].includes(step.state))
-                    d.receipt.nextPollAt = new Date(Date.now() + (step.pollAfterMs ?? (a.product === "instagram" ? 60000 : 15000))).toISOString();
+                    d.receipt.nextPollAt = new Date(Date.now() + (step.pollAfterMs ?? (step.state === "uploading" ? 0 : a.product === "instagram" ? 60000 : 15000))).toISOString();
                 else
                     delete d.receipt.nextPollAt;
                 d.updatedAt = new Date().toISOString();
             });
         }
         catch (e) {
-            const safe = new Set(["asset_lease_rejected", "asset_unavailable", "asset_integrity_failed", "asset_size_mismatch", "reauth_required", "permission_unavailable", "write_consent_required", "privacy_readback_mismatch", "provider_binding_mismatch", "grant_verification_failed", "provider_outcome_unknown", "provider_response_invalid", "commercial_disclosure_required", "privacy_option_unavailable", "interaction_option_unavailable", "board_not_available", "provider_unavailable", "provider_processing_timeout", "title_too_long", "caption_too_long", "forbidden_text_characters"]);
+            const safe = new Set(["asset_lease_rejected", "asset_unavailable", "asset_integrity_failed", "asset_size_mismatch", "reauth_required", "permission_unavailable", "write_consent_required", "privacy_readback_mismatch", "provider_binding_mismatch", "grant_verification_failed", "provider_outcome_unknown", "provider_response_invalid", "commercial_disclosure_required", "privacy_option_unavailable", "interaction_option_unavailable", "board_not_available", "provider_unavailable", "provider_processing_timeout", "title_too_long", "caption_too_long", "forbidden_text_characters", "media_cache_capacity_exceeded"]);
             const code = e instanceof BrokerError && safe.has(e.code) ? e.code : "publishing_failed";
             await this.store.transaction(data => {
                 const d = this.owned(data.deliveries, original, id);
                 const unknown = Boolean(d.checkpoint.inFlight) || ["provider_outcome_unknown", "provider_processing_timeout"].includes(code);
-                const recoverable = unknown || ["asset_lease_rejected", "asset_unavailable", "provider_unavailable", "reauth_required"].includes(code);
+                const recoverable = unknown || ["asset_lease_rejected", "asset_unavailable", "provider_unavailable", "reauth_required", "media_cache_capacity_exceeded"].includes(code);
                 d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: unknown ? "unknown" : "failed", stage: "stopped", failureCode: code, retryable: recoverable && Boolean(d.checkpoint.mediaId || d.checkpoint.sessionUrl || d.checkpoint.providerId || !d.checkpoint.inFlight) };
                 delete d.receipt.nextPollAt;
             }).catch(() => undefined);
         }
         finally {
-            await Promise.allSettled([media?.cleanup(), cover?.cleanup()]);
+            media?.release();
+            cover?.release();
+            const latest = (await this.store.snapshot().catch(() => undefined))?.deliveries.find(d => d.request.deliveryId === id && sameSubject(d, original));
+            if (latest)
+                await this.cleanCache(latest);
             this.running.delete(id);
         }
     }

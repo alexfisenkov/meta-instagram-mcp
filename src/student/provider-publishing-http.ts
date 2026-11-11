@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants } from "node:fs";
 import { open, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { BrokerError } from "./types.js";
 import { ensurePrivateFile } from "../private-fs.js";
 import type { Asset } from "./publishing-types.js";
@@ -98,11 +99,13 @@ export function mediaUrl(asset: Asset, policy: MediaPolicy): URL {
     return u;
 }
 /** Verify the entire source before any provider mutation, using a private disk spool. */
-export async function spoolMedia(asset: Asset, policy: MediaPolicy, directory: string, fetcher: ProviderFetch = fetch): Promise<{
+export async function spoolMedia(asset: Asset, policy: MediaPolicy, directory: string, fetcher: ProviderFetch = fetch, deliveryId?: string): Promise<{
     path: string;
     cleanup(): Promise<void>;
 }> {
-    const u = mediaUrl(asset, policy), path = join(directory, `.media-${asset.id}-${crypto.randomUUID()}`);
+    if (deliveryId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deliveryId))
+        throw new BrokerError("invalid_media_cache_binding");
+    const u = mediaUrl(asset, policy), path = join(directory, `.media-${deliveryId ? deliveryId + "-" : ""}${asset.id}-${crypto.randomUUID()}`);
     const file = await open(path, "wx", 0o600);
     let good = false;
     try {
@@ -131,6 +134,18 @@ export async function spoolMedia(asset: Asset, policy: MediaPolicy, directory: s
             await unlink(path).catch(() => undefined);
     }
 }
+export async function* readMedia(path: string, start?: number, end?: number): AsyncGenerator<Buffer> {
+    const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+        if (!(await file.stat()).isFile())
+            throw new BrokerError("asset_integrity_failed");
+        for await (const chunk of file.createReadStream({ autoClose: false, ...(start === undefined ? {} : { start, end }) }))
+            yield chunk;
+    }
+    finally {
+        await file.close();
+    }
+}
 export function streamBody(path: string, start?: number, end?: number): RequestInit {
-    return { body: createReadStream(path, start === undefined ? {} : { start, end }) as unknown as RequestInit["body"], duplex: "half" } as RequestInit;
+    return { body: Readable.from(readMedia(path, start, end)) as unknown as RequestInit["body"], duplex: "half" } as RequestInit;
 }

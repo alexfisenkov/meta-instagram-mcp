@@ -1,7 +1,6 @@
-import { createReadStream } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { BrokerError } from "./types.js";
-import { PublishingHttp, responseJson, streamBody, providerUrl, tiktokUploadUrl } from "./provider-publishing-http.js";
+import { PublishingHttp, responseJson, streamBody, providerUrl, tiktokUploadUrl, readMedia } from "./provider-publishing-http.js";
 import { optionSchemas, type Access, type Checkpoint, type Context, type Delivery, type PublishState } from "./publishing-types.js";
 export const TIKTOK_DISCLOSURE_VERSION = "tiktok-direct-post-2026-11-v1";
 export const TIKTOK_DISCLOSURE_TEXT = "By posting, you agree to TikTok's Music Usage Confirmation. For branded content, you also agree to TikTok's Branded Content Policy.";
@@ -59,9 +58,9 @@ export class PublishingProviders {
             await this.verifyIdentity(a);
             const b = await this.http.json("https://open.tiktokapis.com/v2/post/publish/creator_info/query/", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json" }, body: "{}" });
             const d = b.data;
-            if (!d || !Array.isArray(d.privacy_level_options) || !d.privacy_level_options.length || d.privacy_level_options.some((x: unknown) => typeof x !== "string") || ![d.comment_disabled, d.duet_disabled, d.stitch_disabled].every(x => typeof x === "boolean") || !Number.isSafeInteger(d.max_video_post_duration_sec))
+            if (!d || typeof d.creator_nickname !== "string" || !d.creator_nickname.trim() || d.creator_nickname.length > 512 || !Array.isArray(d.privacy_level_options) || !d.privacy_level_options.length || d.privacy_level_options.some((x: unknown) => typeof x !== "string") || ![d.comment_disabled, d.duet_disabled, d.stitch_disabled].every(x => typeof x === "boolean") || !Number.isSafeInteger(d.max_video_post_duration_sec))
                 throw new BrokerError("provider_response_invalid");
-            return { ...base, privacyOptions: d.privacy_level_options, limits: { maxDurationSeconds: d.max_video_post_duration_sec, maxCaptionCharacters: 2200 }, disclosureVersion: TIKTOK_DISCLOSURE_VERSION, commercialContentDisclosureText: TIKTOK_DISCLOSURE_TEXT, interactionConstraints: { commentDisabled: d.comment_disabled, duetDisabled: d.duet_disabled, stitchDisabled: d.stitch_disabled } };
+            return { ...base, accountLabel: d.creator_nickname, privacyOptions: d.privacy_level_options, limits: { maxDurationSeconds: d.max_video_post_duration_sec, maxCaptionCharacters: 2200 }, disclosureVersion: TIKTOK_DISCLOSURE_VERSION, commercialContentDisclosureText: TIKTOK_DISCLOSURE_TEXT, interactionConstraints: { commentDisabled: d.comment_disabled, duetDisabled: d.duet_disabled, stitchDisabled: d.stitch_disabled } };
         }
         await this.verifyIdentity(a);
         if (a.product === "pinterest") {
@@ -292,7 +291,7 @@ export class PublishingProviders {
             tiktokUploadUrl(url);
             c.uploadUrl = url;
             delete c.inFlight;
-            return { state: "uploading", stage: "video_upload", checkpoint: c };
+            return { state: "uploading", stage: "video_upload", checkpoint: c, pollAfterMs: 3100 };
         }
         const backoff = this.tiktokStatusBackoff(a);
         if (backoff)
@@ -320,8 +319,13 @@ export class PublishingProviders {
         if (data.status !== "PROCESSING_UPLOAD")
             return { state: "processing", stage: "post_processing", checkpoint: c };
         const offset = data.uploaded_bytes ?? 0;
-        if (!Number.isSafeInteger(offset) || offset < 0 || offset >= r.asset.size || !c.uploadUrl)
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > r.asset.size || !c.uploadUrl)
             throw new BrokerError("provider_outcome_unknown");
+        if (offset === r.asset.size) {
+            c.offset = offset;
+            delete c.inFlight;
+            return { state: "processing", stage: "post_processing", checkpoint: c };
+        }
         const size = Math.min(r.asset.size, 10000000), count = Math.max(1, Math.floor(r.asset.size / size)), end = offset / size >= count - 1 ? r.asset.size - 1 : offset + size - 1;
         if (offset % size !== 0)
             throw new BrokerError("provider_outcome_unknown");
@@ -333,7 +337,7 @@ export class PublishingProviders {
             throw new BrokerError("provider_outcome_unknown");
         delete c.inFlight;
         c.offset = end + 1;
-        return { state: "processing", stage: "post_processing", checkpoint: c };
+        return { state: c.offset < r.asset.size ? "uploading" : "processing", stage: c.offset < r.asset.size ? "video_upload" : "post_processing", checkpoint: c, ...(c.offset < r.asset.size ? { pollAfterMs: 3100 } : {}) };
     }
     private async pinterest(d: Delivery, a: Access, c: Checkpoint, getPath: MediaPath, save: SaveCheckpoint): Promise<StepResult> {
         const r = d.request, o = optionSchemas.pinterest.parse(r.options);
@@ -378,7 +382,7 @@ export class PublishingProviders {
             const prefix = Buffer.from(parts.join("") + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="video.mp4"\r\nContent-Type: ${r.asset.mime}\r\n\r\n`), suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
             async function* body() {
                 yield prefix;
-                for await (const chunk of createReadStream(path))
+                for await (const chunk of readMedia(path))
                     yield chunk;
                 yield suffix;
             }
@@ -389,8 +393,11 @@ export class PublishingProviders {
             if (!response.ok)
                 throw new BrokerError("provider_outcome_unknown");
             delete c.inFlight;
+            c.offset = r.asset.size;
             return { state: "processing", stage: "media_processing", checkpoint: c };
         }
+        if (b.status === "processing" || b.status === "succeeded")
+            c.offset = r.asset.size;
         if (b.status !== "succeeded")
             return { state: "processing", stage: "media_processing", checkpoint: c };
         if (c.inFlight && c.inFlight !== "pinterest_upload")

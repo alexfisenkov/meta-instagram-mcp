@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- Проверенный приватный source spool переиспользуется между чанками и после рестарта, ограничен byte budget/LRU, защищён от eviction во время чтения и очищается после ingestion/terminal. Повреждённая/пропавшая копия восстанавливается только по действительному lease, оригиналы не удаляются. Upload steps продолжаются без processing-паузы. Уже принятая операция сверяется до проверки изменившихся прав публикации; каждая новая мутация проверяет свежий context. TikTok account label берётся из текущего `creator_nickname`.
+
 - TikTok completion отделён от публичного post ID: непубличный `PUBLISH_COMPLETE` допускает успешную квитанцию без выдуманного ID, публичная цель ждёт модерацию с read-only polling. Завершённая операция не возвращается к upload при регрессе статуса; интервалы и rolling token budget ограничивают status запросы. Runbook и capability notes фиксируют реальные unaudited ограничения аккаунта, видимости и числа пользователей.
 
 - YouTube metadata context и проверка учитывают точные 5000 байт UTF‑8 описания, 100 Unicode characters заголовка и запрет `<`/`>` в обоих полях. Pinterest title bound передаётся из provider context. Опциональный явный `containsSyntheticMedia` закреплён в hash и передаётся провайдеру без вывода о содержимом видео; дополнительный независимый fixture проверяет явное значение.

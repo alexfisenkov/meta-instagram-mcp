@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, rm, readFile, readdir, writeFile, unlink, open, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { StudentVault } from "../src/student/vault.js";
 import { PublishingStore } from "../src/student/publishing-store.js";
+import { PublishingMediaCache } from "../src/student/publishing-media-cache.js";
 import { PublishingBroker } from "../src/student/publishing-broker.js";
 import { PublishingProviders, TIKTOK_DISCLOSURE_VERSION } from "../src/student/provider-publishing.js";
 import { PublishingHttp, mediaUrl, providerUrl, spoolMedia, type ProviderFetch } from "../src/student/provider-publishing-http.js";
 import { canonical, targetHash, type Submit, type Access, type Delivery } from "../src/student/publishing-types.js";
 const subject = { tenantId: "masterskaya", sub: "synthetic-a" }, other = { tenantId: "masterskaya", sub: "synthetic-b" };
-const bytes = Buffer.from("synthetic MP4 source"), sha = createHash("sha256").update(bytes).digest("hex"), policy = { origin: "https://media.example.test", pathPrefix: "/api/v1/social/publishing/media/", maxBytes: 100000 };
+const bytes = Buffer.from("synthetic MP4 source"), sha = createHash("sha256").update(bytes).digest("hex"), policy = { origin: "https://media.example.test", pathPrefix: "/api/v1/social/publishing/media/", maxBytes: 64 * 1024 * 1024 };
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
     for (const c of cleanup.splice(0).reverse())
@@ -95,7 +96,7 @@ function fixture(s: Submit, options: {
         if (u.pathname === "/v2/user/info/")
             return json({ data: { user: { open_id: "456" } }, error: { code: "ok" } });
         if (u.pathname.includes("creator_info"))
-            return json({ data: { privacy_level_options: ["SELF_ONLY", "PUBLIC_TO_EVERYONE"], comment_disabled: true, duet_disabled: true, stitch_disabled: true, max_video_post_duration_sec: 180 }, error: { code: "ok" } });
+            return json({ data: { creator_avatar_url: "https://example.test/avatar", creator_username: "current_creator", creator_nickname: "Fresh TikTok Creator", privacy_level_options: ["SELF_ONLY", "PUBLIC_TO_EVERYONE"], comment_disabled: true, duet_disabled: true, stitch_disabled: true, max_video_post_duration_sec: 180 }, error: { code: "ok" } });
         if (u.pathname.includes("/video/init"))
             return json({ data: { publish_id: "v_pub_file~synthetic", upload_url: "https://open-upload.tiktokapis.com/video/?upload_id=synthetic" }, error: { code: "ok" } });
         if (u.hostname === "open-upload.tiktokapis.com") {
@@ -136,6 +137,94 @@ function fixture(s: Submit, options: {
             return posted;
         } };
 }
+function chunkedFixture(s: Submit, payload: Buffer, loseFinalResponse = false) {
+    const fallback = fixture(s), calls: {
+        url: string;
+        method: string;
+        range: string | null;
+    }[] = [];
+    let offset = 0, sourceGets = 0, initializations = 0;
+    const uploads: {
+        start: number;
+        end: number;
+        sha: string;
+    }[] = [];
+    let privacyOptions = ["SELF_ONLY", "PUBLIC_TO_EVERYONE"];
+    const fetcher: ProviderFetch = async (input, init = {}) => {
+        const url = String(input), u = new URL(url), method = init.method ?? "GET", headers = new Headers(init.headers), range = headers.get("content-range");
+        calls.push({ url, method, range });
+        if (u.hostname === "media.example.test") {
+            sourceGets++;
+            return new Response(payload);
+        }
+        if (u.pathname.includes("creator_info"))
+            return json({ data: { creator_avatar_url: "https://example.test/avatar", creator_username: "current_creator", creator_nickname: "Fresh TikTok Creator", privacy_level_options: privacyOptions, comment_disabled: true, duet_disabled: true, stitch_disabled: true, max_video_post_duration_sec: 180 }, error: { code: "ok" } });
+        if (u.pathname === "/upload/youtube/v3/videos" && method === "POST") {
+            initializations++;
+            return new Response(null, { headers: { location: "https://www.googleapis.com/upload/youtube/v3/videos?upload_id=large" } });
+        }
+        if (u.pathname.includes("/video/init")) {
+            initializations++;
+            return json({ data: { publish_id: "v_pub_file~large", upload_url: "https://upload.us.tiktokapis.com/video/?upload_id=large&upload_token=synthetic" }, error: { code: "ok" } });
+        }
+        if (u.pathname.includes("status/fetch"))
+            return json({ data: offset === payload.length ? { status: "PUBLISH_COMPLETE", publicaly_available_post_id: [] } : { status: "PROCESSING_UPLOAD", uploaded_bytes: offset }, error: { code: "ok" } });
+        if (method === "PUT" && (u.pathname === "/upload/youtube/v3/videos" || u.hostname === "upload.us.tiktokapis.com")) {
+            if (range?.startsWith("bytes */"))
+                return offset === payload.length ? json({ id: "video1" }) : new Response(null, { status: 308, headers: offset ? { range: `bytes=0-${offset - 1}` } : {} });
+            const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(range ?? "");
+            expect(match).not.toBeNull();
+            const start = Number(match![1]), end = Number(match![2]);
+            expect(start).toBe(offset);
+            expect(Number(match![3])).toBe(payload.length);
+            let size = 0;
+            const hash = createHash("sha256");
+            for await (const chunk of init.body as any) {
+                size += chunk.length;
+                hash.update(chunk);
+            }
+            expect(size).toBe(end - start + 1);
+            const sha = hash.digest("hex");
+            expect(sha).toBe(createHash("sha256").update(payload.subarray(start, end + 1)).digest("hex"));
+            uploads.push({ start, end, sha });
+            offset = end + 1;
+            if (offset === payload.length && loseFinalResponse) {
+                loseFinalResponse = false;
+                throw new Error("accepted final chunk but response lost");
+            }
+            if (s.product === "youtube")
+                return offset === payload.length ? json({ id: "video1" }) : new Response(null, { status: 308, headers: { range: `bytes=0-${offset - 1}` } });
+            return new Response(null, { status: offset === payload.length ? 201 : 206 });
+        }
+        return fallback.fetcher(input, init);
+    };
+    return { fetcher, calls, uploads, get sourceGets() {
+            return sourceGets;
+        }, get initializations() {
+            return initializations;
+        }, get offset() {
+            return offset;
+        }, set privacyOptions(value: string[]) {
+            privacyOptions = value;
+        } };
+}
+async function cacheFiles(directory: string) {
+    try {
+        return (await readdir(join(directory, ".media-cache"))).filter(name => name.startsWith("cache-")).map(name => join(directory, ".media-cache", name));
+    }
+    catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT")
+            return [];
+        throw e;
+    }
+}
+async function tickNow(b: PublishingBroker) {
+    await b.store.transaction(d => {
+        for (const entry of d.deliveries)
+            delete entry.receipt.nextPollAt;
+    });
+    await b.tick();
+}
 async function progress(b: PublishingBroker, s: Submit, max = 8) {
     for (let i = 0; i < max; i++) {
         await b.store.transaction(d => {
@@ -150,6 +239,162 @@ async function progress(b: PublishingBroker, s: Submit, max = 8) {
     return b.status(subject, s.deliveryId);
 }
 describe("durable video publishing", () => {
+    it("requires a live first-party lease for provider URL ingestion even with verified cached bytes", async () => {
+        const s = request("instagram"), f = fixture(s), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        const cache = new PublishingMediaCache(x.directory, policy, f.fetcher);
+        const lease = await cache.acquire({ deliveryId: s.deliveryId, role: "asset", asset: s.asset });
+        lease.release();
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        expect(await progress(x.broker, s)).toMatchObject({ state: "failed", failureCode: "asset_lease_rejected" });
+        expect(f.calls.filter(c => c.method === "POST" && c.url.endsWith("/123/media"))).toHaveLength(0);
+    });
+    it("checks an expired Pinterest cover URL before creating its Pin", async () => {
+        const s = request("pinterest");
+        s.cover = { ...s.asset, id: randomUUID(), mime: "image/jpeg", fetchUrl: s.asset.fetchUrl + "cover" };
+        s.targetHash = targetHash(s);
+        const f = fixture(s), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        await x.store.transaction(d => {
+            d.deliveries[0].request.cover!.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        expect(await progress(x.broker, s)).toMatchObject({ state: "failed", failureCode: "asset_lease_rejected" });
+        expect(f.calls.filter(c => c.method === "POST" && c.url.endsWith("/v5/pins"))).toHaveLength(0);
+    });
+    it("bounds cached bytes with unleased LRU eviction and never deletes an original", async () => {
+        const s = request(), f = fixture(s), x = await setup(s, f.fetcher), original = join(x.directory, "original.mp4");
+        await writeFile(original, "owner original");
+        const cache = new PublishingMediaCache(x.directory, policy, f.fetcher, bytes.length * 2);
+        const first = await cache.acquire({ deliveryId: randomUUID(), role: "asset", asset: { ...s.asset, id: randomUUID() } }), second = await cache.acquire({ deliveryId: randomUUID(), role: "asset", asset: { ...s.asset, id: randomUUID() } });
+        const third = { deliveryId: randomUUID(), role: "asset" as const, asset: { ...s.asset, id: randomUUID() } };
+        await expect(cache.acquire(third)).rejects.toMatchObject({ code: "media_cache_capacity_exceeded" });
+        first.release();
+        const lease = await cache.acquire(third);
+        lease.release();
+        second.release();
+        const paths = await cacheFiles(x.directory);
+        expect(paths).toHaveLength(2);
+        expect((await Promise.all(paths.map(path => stat(path)))).reduce((n, s) => n + s.size, 0)).toBeLessThanOrEqual(bytes.length * 2);
+        await cache.reconcile([]);
+        expect(await cacheFiles(x.directory)).toEqual([]);
+        expect(await readFile(original, "utf8")).toBe("owner original");
+        await expect(cache.acquire({ deliveryId: "../../original.mp4", role: "asset", asset: s.asset })).rejects.toMatchObject({ code: "invalid_media_cache_binding" });
+    });
+    it.runIf(process.platform !== "win32")("does not follow a replaced cache symlink outside the private cache", async () => {
+        const s = request(), f = fixture(s), x = await setup(s, f.fetcher), original = join(x.directory, "original.mp4");
+        await writeFile(original, "owner original");
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        const paths = await cacheFiles(x.directory);
+        expect(paths).toHaveLength(1);
+        await unlink(paths[0]);
+        await symlink(original, paths[0]);
+        expect((await progress(x.broker, s)).state).toBe("published");
+        expect(await readFile(original, "utf8")).toBe("owner original");
+        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(2);
+    });
+    it.each(["youtube", "tiktok"] as const)("reuses a verified >=20MiB %s spool across real chunks, restart and an expired source lease", async (product) => {
+        const payload = Buffer.alloc(20 * 1024 * 1024 + 123, 0x5a), s = request(product);
+        s.asset.size = payload.length;
+        s.asset.sha256 = createHash("sha256").update(payload).digest("hex");
+        s.targetHash = targetHash(s);
+        const f = chunkedFixture(s, payload), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        await tickNow(x.broker);
+        expect(f.uploads).toHaveLength(1);
+        const uploading = await x.broker.status(subject, s.deliveryId);
+        expect(uploading.state).toBe("uploading");
+        expect(Date.parse(uploading.nextPollAt!) - Date.now()).toBeLessThan(product === "tiktok" ? 3200 : 1000);
+        expect(await cacheFiles(x.directory)).toHaveLength(1);
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        const restarted = await x.restart();
+        expect((await progress(restarted, s)).state).toBe("published");
+        expect(f.initializations).toBe(1);
+        expect(f.sourceGets).toBe(1);
+        expect(f.uploads).toHaveLength(product === "youtube" ? 3 : 2);
+        expect(f.offset).toBe(payload.length);
+        expect(await cacheFiles(x.directory)).toEqual([]);
+    }, 20000);
+    it("detects cache tamper and never uploads changed bytes", async () => {
+        const payload = Buffer.alloc(20 * 1024 * 1024 + 123, 0x5a), s = request();
+        s.asset.size = payload.length;
+        s.asset.sha256 = createHash("sha256").update(payload).digest("hex");
+        s.targetHash = targetHash(s);
+        const f = chunkedFixture(s, payload), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        const paths = await cacheFiles(x.directory);
+        expect(paths).toHaveLength(1);
+        const file = await open(paths[0], "r+");
+        try {
+            await file.write(Buffer.from("corrupt"), 0, 7, 0);
+        }
+        finally {
+            await file.close();
+        }
+        expect((await progress(x.broker, s)).state).toBe("published");
+        expect(f.sourceGets).toBe(2);
+        expect(f.offset).toBe(payload.length);
+    }, 20000);
+    it("recovers a missing cached source only with the same asset and a fresh lease", async () => {
+        const payload = Buffer.alloc(20 * 1024 * 1024 + 123, 0x5a), s = request();
+        s.asset.size = payload.length;
+        s.asset.sha256 = createHash("sha256").update(payload).digest("hex");
+        s.targetHash = targetHash(s);
+        const f = chunkedFixture(s, payload), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        const paths = await cacheFiles(x.directory);
+        expect(paths).toHaveLength(1);
+        await unlink(paths[0]);
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        const failure = await progress(x.broker, s);
+        expect(failure).toMatchObject({ state: "failed", failureCode: "asset_lease_rejected" });
+        expect(f.uploads).toHaveLength(0);
+        await x.broker.resume(subject, { deliveryId: s.deliveryId, expectedVersion: failure.version, asset: { ...s.asset, fetchUrl: s.asset.fetchUrl + "renewed" } });
+        expect((await progress(x.broker, s)).state).toBe("published");
+        expect(f.sourceGets).toBe(2);
+        expect(f.initializations).toBe(1);
+    }, 20000);
+    it.each(["youtube", "tiktok"] as const)("reconciles already accepted %s upload despite changed publish context", async (product) => {
+        const s = request(product), f = chunkedFixture(s, bytes, true), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        const unknown = await progress(x.broker, s);
+        expect(unknown.state).toBe("unknown");
+        if (product === "youtube")
+            x.access.scopes = ["https://www.googleapis.com/auth/youtube.readonly"];
+        else
+            f.privacyOptions = ["PUBLIC_TO_EVERYONE"];
+        await x.store.transaction(d => {
+            d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
+        });
+        await x.broker.resume(subject, { deliveryId: s.deliveryId, expectedVersion: unknown.version });
+        expect((await progress(x.broker, s)).state).toBe("published");
+        expect(f.uploads).toHaveLength(1);
+        expect(f.sourceGets).toBe(1);
+        expect(f.initializations).toBe(1);
+    });
+    it("revalidates fresh publish context before an additional upload mutation", async () => {
+        const s = request(), f = chunkedFixture(s, bytes), x = await setup(s, f.fetcher);
+        await x.broker.submit(subject, s);
+        await x.broker.tick();
+        x.access.scopes = ["https://www.googleapis.com/auth/youtube.readonly"];
+        expect(await progress(x.broker, s)).toMatchObject({ state: "failed", failureCode: "write_consent_required" });
+        expect(f.uploads).toHaveLength(0);
+    });
+    it("uses creator_nickname from the latest documented TikTok creator-info response", async () => {
+        const s = request("tiktok"), f = chunkedFixture(s, bytes), x = await setup(s, f.fetcher);
+        expect(x.access.label).toBe("Synthetic");
+        expect((await x.broker.context(subject, s.connectionId)).accountLabel).toBe("Fresh TikTok Creator");
+    });
     it.each([{ label: "omitted", ids: undefined }, { label: "empty", ids: [] }])("does not invent a TikTok post ID for completed nonpublic delivery with $label ids", async ({ ids }) => {
         const s = request("tiktok"), f = fixture(s);
         const fetcher: ProviderFetch = async (input, init) => String(input).includes("status/fetch") ? json({ data: { status: "PUBLISH_COMPLETE", ...(ids === undefined ? {} : { publicaly_available_post_id: ids }) }, error: { code: "ok" } }) : f.fetcher(input, init);
@@ -301,6 +546,8 @@ describe("durable video publishing", () => {
         const s = request(product), f = fixture(s), x = await setup(s, f.fetcher);
         await x.broker.submit(subject, s);
         await x.broker.tick();
+        for (const path of await cacheFiles(x.directory))
+            await unlink(path);
         await x.store.transaction(d => {
             d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
             delete d.deliveries[0].receipt.nextPollAt;
@@ -354,7 +601,7 @@ describe("durable video publishing", () => {
         await restarted.resume(subject, { deliveryId: s.deliveryId, expectedVersion: registered.version });
         expect((await progress(restarted, s)).state).toBe("published");
         expect(f.calls.filter(c => c.method === "POST" && c.url.endsWith("/v5/media"))).toHaveLength(1);
-        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(2);
+        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(1);
     });
     it.each(["youtube", "tiktok"] as const)("reconciles an already uploaded %s operation before touching an expired source lease", async (product) => {
         const s = request(product), f = fixture(s, { loseUpload: product === "youtube" });
@@ -455,7 +702,7 @@ describe("durable video publishing", () => {
         else
             expect(r.providerId).toBeTruthy();
         expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).not.toHaveLength(0);
-        expect((await readdir(x.directory)).filter(p => p.startsWith(".media-"))).toEqual([]);
+        expect(await cacheFiles(x.directory)).toEqual([]);
     });
     it("preserves official TikTok int64 public post IDs without floating point corruption", async () => {
         const s = request("tiktok");
