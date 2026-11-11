@@ -3,8 +3,10 @@ import { z } from "zod";
 import { StudentBroker } from "./broker.js";
 import { BrokerError, META_PRODUCTS, type Subject } from "./types.js";
 import type { PublishingRuntime } from "./publishing-runtime.js";
+import type { ConnectionsRuntime } from "./connections-runtime.js";
+import { registerConnectionTools } from "./connections-mcp.js";
 import { assetSchema, submitSchema } from "./publishing-types.js";
-export function createStudentMcp(broker: StudentBroker, subject: Subject, youtubeBroker: StudentBroker = broker, publishing?: PublishingRuntime): McpServer {
+export function createStudentMcp(broker: StudentBroker, subject: Subject, youtubeBroker: StudentBroker = broker, publishing?: PublishingRuntime, connections?: ConnectionsRuntime): McpServer {
   const server = new McpServer({ name: "meta-student-broker", version: "1.0.0" });
   const result = async (run: () => unknown | Promise<unknown>) => {
     try { const data = await run(); return { content: [{ type: "text" as const, text: JSON.stringify(data) }] }; }
@@ -35,5 +37,6 @@ export function createStudentMcp(broker: StudentBroker, subject: Subject, youtub
   server.registerTool("social_publish_resume",{description:"Explicitly reconcile an existing provider operation; renewed leases must keep exact asset identity.",inputSchema:revision.extend({asset:assetSchema.optional(),cover:assetSchema.optional()}).strict(),annotations:{readOnlyHint:false,idempotentHint:true}},args=>result(()=>pub().broker.resume(subject,args)));
   server.registerTool("social_publish_cancel",{description:"Cancel only future local steps; never delete a provider post.",inputSchema:revision,annotations:{readOnlyHint:false,idempotentHint:true}},args=>result(()=>pub().broker.cancel(subject,args)));
   }
+  if (connections) registerConnectionTools(server, connections, subject);
   return server;
 }
