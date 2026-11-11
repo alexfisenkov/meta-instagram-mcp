@@ -2,6 +2,8 @@
 
 ## 0.3.0 — hosted student connections (not yet released)
 
+- TikTok server-stored originals переведены на обязательный `PULL_FROM_URL`: новая доставка передаёт узкую live first-party lease, без Node media GET/spool/PUT. Согласие, privacy, disclosure и content hash сохранены. Legacy FILE_UPLOAD checkpoints завершают только известную операцию; unknown init не повторяется, принятый pull нельзя выдавать за remotely aborted. Проверка media-domain ownership остаётся внешней предпосылкой, её provider отказ отображается честно.
+
 - Изолированный publishing namespace получил bounded offline subject purge helper: существующий writer lock, удаление собственных cache/temp copies перед атомарной очисткой credentials/states/delivery checkpoints и типизированные counts. Чужие записи и platform originals сохраняются; неправильный ключ, занятый writer, cache-directory symlink и превышение лимита обхода не дают ложного успешного удаления.
 
 - Проверенный приватный source spool переиспользуется между чанками и после рестарта, ограничен byte budget/LRU, защищён от eviction во время чтения и очищается после ingestion/terminal. Повреждённая/пропавшая копия восстанавливается только по действительному lease, оригиналы не удаляются. Upload steps продолжаются без processing-паузы. Уже принятая операция сверяется до проверки изменившихся прав публикации; каждая новая мутация проверяет свежий context. TikTok account label берётся из текущего `creator_nickname`.

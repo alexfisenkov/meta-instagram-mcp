@@ -19,7 +19,7 @@ export class PublishingBroker {
         if (["published", "failed", "cancelled"].includes(d.receipt.state))
             return [];
         const c = d.checkpoint, r = d.request, refs: MediaReference[] = [];
-        const sourceDone = Boolean(c.providerId) || r.product === "instagram" && Boolean(c.mediaId) || (r.product === "tiktok" && (c.operation === "tiktok_publish_complete" || (c.offset ?? 0) >= r.asset.size)) || (r.product === "pinterest" && (c.offset ?? 0) >= r.asset.size);
+        const sourceDone = Boolean(c.providerId) || r.product === "instagram" && Boolean(c.mediaId) || (r.product === "tiktok" && (c.sourceMode === "PULL_FROM_URL" || c.operation === "tiktok_publish_complete" || (c.offset ?? 0) >= r.asset.size)) || (r.product === "pinterest" && (c.offset ?? 0) >= r.asset.size);
         if (!sourceDone)
             refs.push({ deliveryId: r.deliveryId, role: "asset", asset: r.asset });
         if (r.cover && !(r.product === "instagram" && c.mediaId) && !(r.product === "youtube" && c.operation === "youtube_thumbnail_complete") && !c.providerId)
@@ -135,7 +135,7 @@ export class PublishingBroker {
                 throw new BrokerError("delivery_busy");
             if (["published", "cancelled"].includes(d.receipt.state))
                 return structuredClone(d.receipt);
-            if (d.checkpoint.inFlight || d.checkpoint.providerId || d.checkpoint.operation === "tiktok_publish_complete" || d.request.product === "tiktok" && (d.checkpoint.offset ?? 0) >= d.request.asset.size)
+            if (d.checkpoint.inFlight || d.checkpoint.providerId || d.checkpoint.operation === "tiktok_publish_complete" || d.checkpoint.sourceMode === "PULL_FROM_URL" && Boolean(d.checkpoint.mediaId) || d.request.product === "tiktok" && (d.checkpoint.offset ?? 0) >= d.request.asset.size)
                 throw new BrokerError("provider_outcome_unknown");
             d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: "cancelled", stage: "cancelled_locally", retryable: false };
             delete d.receipt.nextPollAt;
@@ -215,12 +215,14 @@ export class PublishingBroker {
                 cover ??= await this.mediaCache.acquire({ deliveryId: id, role: "cover", asset: original.request.cover });
                 return cover.path;
             };
-            if (!hasKnownOperation && !checkpoint.inFlight) {
+            if (!hasKnownOperation && !checkpoint.inFlight && a.product !== "tiktok") {
                 await getAssetPath();
                 if (original.request.cover)
                     await getCoverPath();
             }
             const step = await this.providers.step(original, a, media?.path ?? "", async (cp, state, stage) => {
+                if (cp.inFlight === "tiktok_init" && cp.sourceMode === "PULL_FROM_URL")
+                    mediaUrl(original.request.asset, this.mediaPolicy);
                 if (cp.inFlight === "instagram_create") {
                     mediaUrl(original.request.asset, this.mediaPolicy);
                     if (original.request.cover)
@@ -247,7 +249,7 @@ export class PublishingBroker {
                 d.checkpoint = step.checkpoint;
                 if (step.state === "processing")
                     d.processingStartedAt ??= new Date().toISOString();
-                d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: step.state, stage: step.stage, retryable: false, ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.providerId ? { providerId: step.providerId } : {}), ...(step.permalink ? { permalink: step.permalink } : {}) };
+                d.receipt = { ...d.receipt, version: d.receipt.version + 1, state: step.state, stage: step.stage, retryable: step.retryable ?? false, ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.providerId ? { providerId: step.providerId } : {}), ...(step.permalink ? { permalink: step.permalink } : {}) };
                 if (!["published", "failed", "cancelled", "unknown"].includes(step.state))
                     d.receipt.nextPollAt = new Date(Date.now() + (step.pollAfterMs ?? (step.state === "uploading" ? 0 : a.product === "instagram" ? 60000 : 15000))).toISOString();
                 else

@@ -74,6 +74,7 @@ export interface Access extends Subject {
     family?: string;
 }
 export interface Checkpoint {
+    sourceMode?: "PULL_FROM_URL" | "FILE_UPLOAD";
     operation?: string;
     sessionUrl?: string;
     mediaId?: string;

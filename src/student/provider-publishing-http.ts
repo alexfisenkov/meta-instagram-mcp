@@ -82,6 +82,9 @@ export class PublishingHttp {
     async json(url: string, init: RequestInit = {}): Promise<Record<string, any>> {
         const r = await this.raw(url, init);
         const b = await responseJson(r);
+        const endpoint = new URL(url);
+        if (r.status === 403 && endpoint.hostname === "open.tiktokapis.com" && endpoint.pathname === "/v2/post/publish/video/init/" && b.error?.code === "url_ownership_unverified" && b.data?.publish_id === undefined)
+            throw new BrokerError("url_ownership_unverified");
         if (!r.ok || b.error && b.error.code !== "ok")
             throw new BrokerError(r.status === 401 ? "reauth_required" : r.status === 403 ? "permission_unavailable" : "provider_unavailable");
         return b;

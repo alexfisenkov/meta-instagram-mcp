@@ -97,8 +97,12 @@ function fixture(s: Submit, options: {
             return json({ data: { user: { open_id: "456" } }, error: { code: "ok" } });
         if (u.pathname.includes("creator_info"))
             return json({ data: { creator_avatar_url: "https://example.test/avatar", creator_username: "current_creator", creator_nickname: "Fresh TikTok Creator", privacy_level_options: ["SELF_ONLY", "PUBLIC_TO_EVERYONE"], comment_disabled: true, duet_disabled: true, stitch_disabled: true, max_video_post_duration_sec: 180 }, error: { code: "ok" } });
-        if (u.pathname.includes("/video/init"))
-            return json({ data: { publish_id: "v_pub_file~synthetic", upload_url: "https://open-upload.tiktokapis.com/video/?upload_id=synthetic" }, error: { code: "ok" } });
+        if (u.pathname.includes("/video/init")) {
+            const body = JSON.parse(String(init.body));
+            expect(body.source_info).toEqual({ source: "PULL_FROM_URL", video_url: s.asset.fetchUrl });
+            uploaded = true;
+            return json({ data: { publish_id: "v_pub_url~synthetic" }, error: { code: "ok" } });
+        }
         if (u.hostname === "open-upload.tiktokapis.com") {
             for await (const _ of init.body as any) {
             }
@@ -136,6 +140,14 @@ function fixture(s: Submit, options: {
     return { fetcher, calls, get posted() {
             return posted;
         } };
+}
+async function legacyTikTok(b: PublishingBroker, s: Submit, url = "https://open-upload.tiktokapis.com/video/?upload_id=synthetic") {
+    await b.store.transaction(data => {
+        const d = data.deliveries.find(d => d.request.deliveryId === s.deliveryId)!;
+        d.checkpoint = { mediaId: "v_pub_file~legacy", uploadUrl: url };
+        d.receipt.state = "uploading";
+        d.receipt.stage = "video_upload";
+    });
 }
 function chunkedFixture(s: Submit, payload: Buffer, loseFinalResponse = false) {
     const fallback = fixture(s), calls: {
@@ -296,14 +308,17 @@ describe("durable video publishing", () => {
         expect(await readFile(original, "utf8")).toBe("owner original");
         expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(2);
     });
-    it.each(["youtube", "tiktok"] as const)("reuses a verified >=20MiB %s spool across real chunks, restart and an expired source lease", async (product) => {
+    it.each(["youtube", "tiktok"] as const)("reuses a verified >=20MiB %s spool for known chunk uploads (TikTok legacy), restart and expired lease", async (product) => {
         const payload = Buffer.alloc(20 * 1024 * 1024 + 123, 0x5a), s = request(product);
         s.asset.size = payload.length;
         s.asset.sha256 = createHash("sha256").update(payload).digest("hex");
         s.targetHash = targetHash(s);
         const f = chunkedFixture(s, payload), x = await setup(s, f.fetcher);
         await x.broker.submit(subject, s);
-        await x.broker.tick();
+        if (product === "tiktok")
+            await legacyTikTok(x.broker, s, "https://upload.us.tiktokapis.com/video/?upload_id=large&upload_token=synthetic");
+        else
+            await x.broker.tick();
         await tickNow(x.broker);
         expect(f.uploads).toHaveLength(1);
         const uploading = await x.broker.status(subject, s.deliveryId);
@@ -315,7 +330,7 @@ describe("durable video publishing", () => {
         });
         const restarted = await x.restart();
         expect((await progress(restarted, s)).state).toBe("published");
-        expect(f.initializations).toBe(1);
+        expect(f.initializations).toBe(product === "tiktok" ? 0 : 1);
         expect(f.sourceGets).toBe(1);
         expect(f.uploads).toHaveLength(product === "youtube" ? 3 : 2);
         expect(f.offset).toBe(payload.length);
@@ -367,6 +382,8 @@ describe("durable video publishing", () => {
     it.each(["youtube", "tiktok"] as const)("reconciles already accepted %s upload despite changed publish context", async (product) => {
         const s = request(product), f = chunkedFixture(s, bytes, true), x = await setup(s, f.fetcher);
         await x.broker.submit(subject, s);
+        if (product === "tiktok")
+            await legacyTikTok(x.broker, s, "https://upload.us.tiktokapis.com/video/?upload_id=large&upload_token=synthetic");
         const unknown = await progress(x.broker, s);
         expect(unknown.state).toBe("unknown");
         if (product === "youtube")
@@ -380,7 +397,7 @@ describe("durable video publishing", () => {
         expect((await progress(x.broker, s)).state).toBe("published");
         expect(f.uploads).toHaveLength(1);
         expect(f.sourceGets).toBe(1);
-        expect(f.initializations).toBe(1);
+        expect(f.initializations).toBe(product === "tiktok" ? 0 : 1);
     });
     it("revalidates fresh publish context before an additional upload mutation", async () => {
         const s = request(), f = chunkedFixture(s, bytes), x = await setup(s, f.fetcher);
@@ -545,7 +562,10 @@ describe("durable video publishing", () => {
     it.each(["youtube", "tiktok"] as const)("still requires verified source bytes when a known %s upload is incomplete", async (product) => {
         const s = request(product), f = fixture(s), x = await setup(s, f.fetcher);
         await x.broker.submit(subject, s);
-        await x.broker.tick();
+        if (product === "tiktok")
+            await legacyTikTok(x.broker, s);
+        else
+            await x.broker.tick();
         for (const path of await cacheFiles(x.directory))
             await unlink(path);
         await x.store.transaction(d => {
@@ -570,13 +590,11 @@ describe("durable video publishing", () => {
         await x.broker.submit(subject, s);
         expect((await progress(x.broker, s)).state).toBe("published");
     });
-    it("accepts TikTok's documented regional upload host without broadening to other hosts", async () => {
+    it("resumes a legacy TikTok regional upload checkpoint without broadening its hosts", async () => {
         const s = request("tiktok"), f = fixture(s);
         const actualUploads: string[] = [];
         const fetcher: ProviderFetch = async (input, init) => {
             const u = new URL(String(input));
-            if (u.pathname.includes("/video/init"))
-                return json({ data: { publish_id: "v_pub_file~synthetic", upload_url: "https://upload.us.tiktokapis.com/video/?upload_id=67890&upload_token=chunkexample" }, error: { code: "ok" } });
             if (u.hostname === "upload.us.tiktokapis.com") {
                 actualUploads.push(String(input));
                 return f.fetcher(String(input).replace("upload.us.tiktokapis.com", "open-upload.tiktokapis.com"), init);
@@ -585,8 +603,10 @@ describe("durable video publishing", () => {
         };
         const x = await setup(s, fetcher);
         await x.broker.submit(subject, s);
+        await legacyTikTok(x.broker, s, "https://upload.us.tiktokapis.com/video/?upload_id=67890&upload_token=chunkexample");
         expect((await progress(x.broker, s)).state).toBe("published");
         expect(actualUploads).toHaveLength(1);
+        expect(f.calls.filter(c => c.url.includes("/video/init"))).toHaveLength(0);
         for (const bad of ["https://upload.us.tiktokapis.com.evil.test/video/?upload_id=1&upload_token=x", "http://upload.us.tiktokapis.com/video/?upload_id=1&upload_token=x", "https://upload.us.tiktokapis.com/other/?upload_id=1&upload_token=x", "https://upload.us.tiktokapis.com/video/?upload_id=1&upload_id=2&upload_token=x", "https://upload.us.tiktokapis.com/video/?upload_id=1&upload_token=x&redirect=https://evil.test"]) {
             expect(() => providerUrl(bad)).toThrow();
         }
@@ -616,6 +636,8 @@ describe("durable video publishing", () => {
         };
         const x = await setup(s, fetcher);
         await x.broker.submit(subject, s);
+        if (product === "tiktok")
+            await legacyTikTok(x.broker, s);
         expect((await progress(x.broker, s)).state).toBe("unknown");
         await x.store.transaction(d => {
             d.deliveries[0].request.asset.expiresAt = "2020-01-01T00:00:00Z";
@@ -701,7 +723,10 @@ describe("durable video publishing", () => {
             expect(r.providerId).toBeUndefined();
         else
             expect(r.providerId).toBeTruthy();
-        expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).not.toHaveLength(0);
+        if (product === "tiktok")
+            expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).toHaveLength(0);
+        else
+            expect(f.calls.filter(c => c.url.includes(policy.pathPrefix))).not.toHaveLength(0);
         expect(await cacheFiles(x.directory)).toEqual([]);
     });
     it("preserves official TikTok int64 public post IDs without floating point corruption", async () => {

@@ -12,6 +12,7 @@ export interface StepResult {
     permalink?: string;
     failureCode?: string;
     pollAfterMs?: number;
+    retryable?: boolean;
 }
 type MediaPath = () => Promise<string>;
 export interface ProviderMediaPaths {
@@ -280,18 +281,23 @@ export class PublishingProviders {
         if (!c.mediaId) {
             if (c.inFlight)
                 throw new BrokerError("provider_outcome_unknown");
-            const chunkSize = Math.min(r.asset.size, 10000000), count = Math.max(1, Math.floor(r.asset.size / chunkSize));
+            c.sourceMode = "PULL_FROM_URL";
             c.inFlight = "tiktok_init";
-            await save(c, "uploading", "post_init");
-            const b = await this.http.json("https://open.tiktokapis.com/v2/post/publish/video/init/", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json" }, body: JSON.stringify({ post_info: { title: r.caption, privacy_level: o.privacyLevel, disable_comment: o.disableComment, disable_duet: o.disableDuet, disable_stitch: o.disableStitch, brand_content_toggle: o.brandContentToggle, brand_organic_toggle: o.brandOrganicToggle, is_aigc: o.isAigc }, source_info: { source: "FILE_UPLOAD", video_size: r.asset.size, chunk_size: chunkSize, total_chunk_count: count } }) });
+            await save(c, "processing", "post_init");
+            let b: Record<string, any>;
+            try {
+                b = await this.http.json("https://open.tiktokapis.com/v2/post/publish/video/init/", { method: "POST", headers: { ...bearer(a), "Content-Type": "application/json" }, body: JSON.stringify({ post_info: { title: r.caption, privacy_level: o.privacyLevel, disable_comment: o.disableComment, disable_duet: o.disableDuet, disable_stitch: o.disableStitch, brand_content_toggle: o.brandContentToggle, brand_organic_toggle: o.brandOrganicToggle, is_aigc: o.isAigc }, source_info: { source: "PULL_FROM_URL", video_url: r.asset.fetchUrl } }) });
+            }
+            catch (error) {
+                if (error instanceof BrokerError && error.code === "url_ownership_unverified") {
+                    delete c.inFlight;
+                    return { state: "failed", stage: "post_init_rejected", checkpoint: c, failureCode: "url_ownership_unverified", retryable: true };
+                }
+                throw error;
+            }
             c.mediaId = id(b.data?.publish_id);
-            const url = b.data?.upload_url;
-            if (typeof url !== "string")
-                throw new BrokerError("provider_response_invalid");
-            tiktokUploadUrl(url);
-            c.uploadUrl = url;
             delete c.inFlight;
-            return { state: "uploading", stage: "video_upload", checkpoint: c, pollAfterMs: 3100 };
+            return { state: "processing", stage: "post_download", checkpoint: c };
         }
         const backoff = this.tiktokStatusBackoff(a);
         if (backoff)
@@ -316,6 +322,9 @@ export class PublishingProviders {
         // Once posting is complete, later status reads must never re-enter byte upload.
         if (c.operation === "tiktok_publish_complete")
             return { state: "processing", stage: "awaiting_moderation", checkpoint: c, pollAfterMs: 60000 };
+        if (c.sourceMode === "PULL_FROM_URL")
+            return { state: "processing", stage: "post_download", checkpoint: c };
+        // Only already accepted FILE_UPLOAD checkpoints may continue sending local bytes.
         if (data.status !== "PROCESSING_UPLOAD")
             return { state: "processing", stage: "post_processing", checkpoint: c };
         const offset = data.uploaded_bytes ?? 0;
