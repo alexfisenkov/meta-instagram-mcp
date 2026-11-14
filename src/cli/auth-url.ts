@@ -11,6 +11,7 @@ if (!config.appId || !config.redirectUri) {
 const url = buildAuthUrl({
   authMode: config.authMode,
   appId: config.appId,
+  configId: config.configId,
   redirectUri: config.redirectUri,
   scopes: config.defaultScopes ?? defaultScopesForAuthMode(config.authMode),
   forceReauth: true,

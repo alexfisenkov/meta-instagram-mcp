@@ -264,6 +264,17 @@ try {
   if (process.platform !== "win32") await chmod(envPath, 0o600);
   envBeforeUpdate = await readFile(envPath, "utf8");
   const { loadExternalConfig } = await import(pathToFileURL(join(target, "tools", "run.mjs")).href);
+  const templateConfig = join(work, "template config");
+  await mkdir(templateConfig, { recursive: true });
+  const publicTemplate = await readFile(join(projectRoot, ".env.example"), "utf8");
+  const templatePath = join(templateConfig, ".env");
+  await writeFile(templatePath, publicTemplate, { mode: 0o600 });
+  if (process.platform !== "win32") await chmod(templatePath, 0o600);
+  assert.doesNotThrow(() => loadExternalConfig(templateConfig), "the shipped portable .env.example must load without editing or unsupported hosted-only keys");
+  await writeFile(templatePath, "META_AUTH_MODE=unified\nMETA_INSTAGRAM_CONFIG_ID=24680\nMETA_OAUTH_CALLBACK_LISTEN_PORT=8787\n", { mode: 0o600 });
+  if (process.platform !== "win32") await chmod(templatePath, 0o600);
+  assert.equal(loadExternalConfig(templateConfig).values.META_INSTAGRAM_CONFIG_ID, "24680", "installed external config must accept Unified configuration ids");
+  assert.equal(loadExternalConfig(templateConfig).values.META_OAUTH_CALLBACK_LISTEN_PORT, "8787", "installed callback helper must accept explicit loopback listen ports");
   assert.equal(loadExternalConfig(config).values.META_GRAPH_FALLBACK_IPS, "$(printf fixture-literal)", "dotenv content must remain literal text");
   await writeFile(envPath, "META_MCP_CONFIG_DIR=/tmp/should-not-be-overridden\n");
   if (process.platform !== "win32") await chmod(envPath, 0o600);

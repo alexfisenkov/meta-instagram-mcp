@@ -5,11 +5,11 @@
 - portable MCP для Node.js с конфигурацией и token-store вне каталога приложения;
 - четыре профиля: API stdio, API + server-owned persistent Chrome/extension/Native Host, external desktop browser и connected phone companion. Shared runtime paths для stdio/HTTP/API/browser/phone подключены в checkout. Выбранный release SHA, server deployment, host registration, OAuth scopes и live UI/device QA — отдельные gates: наличие опубликованной версии не доказывает, что конкретный runtime установлен или готов. Сверяйтесь с [матрицей возможностей](capabilities.md).
 
-## Диагностика установленной v0.2.8
+## Диагностика установленной версии
 
 Версия checkout не подтверждает опубликованный или установленный release. В status tools сверяйте `runtime.packageVersion` и `runtime.sourceRevision`; метаданные фиксируются при создании runtime, после обновления нужен перезапуск. Installer marker сопоставляется с версией пакета; первая строка server `.VERSION` содержит ровно полный source SHA, далее допустимы только пустые строки или комментарии оператора с `#`. Ошибочный/несовместимый marker даёт unknown, совпавший не доказывает отсутствие ручных изменений файлов.
 
-`meta_auth_status` с `{}` не выполняет новую Meta/UI проверку. Для свежей диагностики Facebook credential — `{"verify":true}`: один read-only `debug_token` GET, максимум 5 секунд, без retry, OAuth, refresh или записи token-store. Token expiry и data-access expiry независимы; числовой `0` — `no_expiry_reported`, не бессрочность. Cached proof живёт только в памяти, помечается cached/stale и не заменяет read-back нужного endpoint. Детали — в [операционном runbook](operations-runbook.md#проверить-версию-и-авторизацию).
+`meta_auth_status` с `{}` не выполняет новую Meta/UI проверку. Для свежей диагностики Facebook или Unified credential — `{"verify":true}`: один read-only `debug_token` GET, максимум 5 секунд, без retry, OAuth, refresh или записи token-store. Token expiry и data-access expiry независимы; числовой `0` — `no_expiry_reported`, не бессрочность. Cached proof живёт только в памяти, помечается cached/stale и не заменяет read-back нужного endpoint. Детали — в [операционном runbook](operations-runbook.md#проверить-версию-и-авторизацию).
 
 ## Приватный операционный контекст
 
@@ -119,6 +119,8 @@ claude mcp get meta-instagram-mcp
 
 ## Настроить OAuth
 
+Для нового **API setup with Unified login** сначала откройте [Unified Login](unified-login.md): своя App может использовать Dashboard-token путь без HTTPS callback; для OAuth из MCP нужны numeric config ID и собственный HTTPS redirect. Ниже — прежние login families. Их localhost HTTP callback не переносится в Unified.
+
 Отредактируйте приватный `.env` во внешнем каталоге конфигурации. Оставьте секреты только в этом файле или защищённой переменной окружения:
 
 ```env
@@ -159,15 +161,18 @@ Portable wrapper запускается через `tools/run.mjs`, переда
 
 ## Обновить, откатить или удалить
 
-Для обновления используйте отдельный source checkout и выбранный SHA следующего опубликованного release:
+Для обновления перейдите в чистый source checkout, из которого устанавливали MCP (это каталог с `install.sh`/`install.ps1`, не установленный `app`). Если его нет, сначала клонируйте репозиторий по разделу «Установить». Откройте последний опубликованный release и скопируйте его полный commit SHA. В новой сессии терминала введите этот SHA заново:
 
 ```bash
+printf 'Commit SHA нового release: '
+IFS= read -r REVISION
 git fetch --tags origin
 git checkout --detach "$REVISION"
 ./install.sh --revision "$REVISION"
 ```
 
 ```powershell
+$Revision = Read-Host "Commit SHA нового release"
 git fetch --tags origin
 git checkout --detach $Revision
 .\install.ps1 -Revision $Revision

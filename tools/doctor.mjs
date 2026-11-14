@@ -53,6 +53,7 @@ function safeConfigSummary(configDirectory) {
     configReadable: true,
     hasAppId: Boolean(process.env.META_INSTAGRAM_APP_ID || values.META_INSTAGRAM_APP_ID),
     hasAppSecret: Boolean(process.env.META_INSTAGRAM_APP_SECRET || values.META_INSTAGRAM_APP_SECRET),
+    hasConfigId: Boolean(process.env.META_INSTAGRAM_CONFIG_ID || values.META_INSTAGRAM_CONFIG_ID),
     hasEnvToken: Boolean(process.env.META_INSTAGRAM_ACCESS_TOKEN || values.META_INSTAGRAM_ACCESS_TOKEN)
   };
 }
@@ -198,6 +199,11 @@ async function runDoctor() {
             const operationalContext = await safeOperationalContext(payload.operationalContext);
             if (runtime) report.runtime = runtime;
             if (authorization) report.authorization = authorization;
+            const setup = payload.oauthSetup;
+            const knownSetupIssues = new Set(["app_id_required", "app_secret_required", "redirect_uri_required", "unified_config_id_required", "unified_app_id_invalid", "unified_https_redirect_required"]);
+            if (setup && typeof setup.ready === "boolean" && Array.isArray(setup.issues) && setup.issues.every((issue) => knownSetupIssues.has(issue))) {
+              report.oauthSetup = { ready: setup.ready, issues: [...new Set(setup.issues)] };
+            }
             if (operationalContext) report.operationalContext = operationalContext;
           } catch {
             report.mcp.authStatusCall = "unreadable";

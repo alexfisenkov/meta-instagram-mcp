@@ -66,9 +66,9 @@ Hosted multi-user: `src/student-server.ts` — отдельный entrypoint; `s
 | `src/read-context.ts` | Read execution context | Carries an advisory provider deadline/signal; underlying cancellation is operation-specific (currently Direct triage and companion queue reads). |
 | `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
 | `src/token-store.ts` | Local secret storage | Загружает/сохраняет long-lived token JSON вне repo с приватными POSIX mode или Windows ACL. |
-| `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook login URLs, меняет auth code на long-lived token, refreshes token, задает scope presets. |
-| `src/oauth-account-identity.ts` | OAuth identity verification | Проверяет fresh Instagram token identity или разрешает Facebook token через известный/единственный Page. |
-| `src/callback-server.ts` | OAuth callback | Обрабатывает state-bound Meta redirect, проверяет account/Page identity до backup и сохранения token; CLI helper поднимает localhost callback. |
+| `src/oauth.ts` | OAuth domain | Строит Instagram/Facebook/Unified login URLs, выполняет соответствующий token exchange и scope presets; Unified refresh требует reauth. |
+| `src/oauth-account-identity.ts` | OAuth identity verification | Проверяет fresh Instagram/Facebook identity и Unified BISU app/type/scopes/business/assigned account; поддерживает cancellation. |
+| `src/callback-server.ts` | OAuth callback | Обрабатывает state-bound Meta redirect, проверяет account/Page identity до backup и сохранения token; CLI helper поднимает loopback callback; HTTPS Unified требует управляемого TLS proxy. |
 | `src/http-json.ts` | HTTP-транспорт поверх node:https с запасными маршрутами | Правка сетевого слоя, отладка отказов DNS, отмена активного read-only запроса без запуска следующего маршрута. |
 | `src/meta-client.ts` | Graph HTTP client | Выполняет safe relative-path GETs, добавляет access token, нормализует Meta API errors без раскрытия token, прокидывает read cancellation signal. |
 | `src/tools.ts` | Legacy API use cases | Реализует auth, account/media/comments/insights, page list, resolver, raw GET и legacy publish handlers. |
@@ -76,6 +76,7 @@ Hosted multi-user: `src/student-server.ts` — отдельный entrypoint; `s
 | `src/source-router.ts`, `src/layered-tools.ts` | Layered reads and analysis | One shared API → browser → phone read deadline, fallback reserve, provider cancellation context, coverage/provenance, inbox triage/read and selected-observation host analysis. |
 | `src/runtime.ts`, `src/mcp-server.ts`, `src/server.ts` | Runtime composition and transports | Shared runtime factory for legacy + layered + mutation tools; stdio or Streamable HTTP selected by config. |
 | `src/companion-hub.ts`, `src/companion/`, `browser-extension/`, `native-host/` | Browser/phone companions | Durable task bridge, browser Native Host/extension and phone Appium companion. Graceful close stops polling and drains admitted work/receipt attempts before transport or Appium teardown; rejected read receipts may be redelivered. Expired queued/leased reads are canceled in the Hub. Presence in checkout does not prove registered/live devices. |
+| `src/oauth-setup.ts` | OAuth setup diagnostics | Фиксированные ошибки настройки Unified app/config/HTTPS без секретов и callback URL. |
 | `src/cli/auth-url.ts` | CLI helper | Печатает текущий OAuth login URL из local config. |
 | `src/cli/callback.ts` | CLI helper | Запускает localhost OAuth callback server. |
 
@@ -179,3 +180,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 ## Публикация видео
 
 `src/student/publishing-{types,store,broker,runtime,media-cache,purge}.ts` — отдельный wire/hash, encrypted checkpoint vault, runner, bounded verified private media cache, offline subject purge helper и совместимая композиция. `provider-publishing{,-http,-oauth}.ts` — фиксированные официальные endpoints, stream/spool и независимый OAuth TikTok/Pinterest/YouTube upload. `tests/student-publishing*.test.ts` и `tests/fixtures/publishing-hash-fixture.json` — synthetic provider/transport/compatibility проверки. Включение, восстановление и ограничения: [social-publishing.md](social-publishing.md); приватный реестр — по `student-publishing.config.example.json`.
+
+## Unified Login в portable MCP
+
+`docs/unified-login.md` — обновление, Meta Dashboard test token, HTTPS callback, выбор account и границы login challenge. `tests/unified-oauth.test.ts`, `tests/unified-context.test.ts`, `tests/portable-unified-runtime.test.ts` проверяют provider, state/grants/identity, host/domain routing и runtime/callback/CLI. `tools/test-installer.mjs` дополнительно загружает неизменённый `.env.example`, чтобы параметры hosted broker не ломали свежую portable установку.

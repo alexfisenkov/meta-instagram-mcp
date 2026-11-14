@@ -1,6 +1,6 @@
 import { requestJsonHttp, type JsonHttpRequestInit } from "./http-json.js";
 
-export type AuthMode = "facebook" | "instagram";
+export type AuthMode = "facebook" | "instagram" | "unified";
 
 export interface OAuthToken {
   accessToken: string;
@@ -10,15 +10,25 @@ export interface OAuthToken {
   userId?: string;
   pageId?: string;
   permissions?: string[];
+  clientBusinessId?: string;
 }
 
 export function defaultScopesForAuthMode(authMode: AuthMode): string[] {
-  return [...getScopePresets(authMode).analytics];
+  return [...getScopePresets(authMode)[authMode === "unified" ? "readOnly" : "analytics"]];
 }
 
 export type ScopePreset = "readOnly" | "inbox" | "comments" | "analytics" | "fullStandard";
 
 export function getScopePresets(authMode: AuthMode): Record<ScopePreset, string[]> {
+  if (authMode === "unified") {
+    return {
+      readOnly: ["instagram_basic"],
+      inbox: ["instagram_basic", "instagram_manage_messages"],
+      comments: ["instagram_basic", "instagram_manage_comments"],
+      analytics: ["instagram_basic", "instagram_manage_insights", "instagram_manage_comments"],
+      fullStandard: ["instagram_basic", "instagram_manage_insights", "instagram_manage_comments", "instagram_content_publish", "instagram_manage_messages"]
+    };
+  }
   if (authMode === "facebook") {
     return {
       readOnly: ["instagram_basic", "pages_show_list", "pages_read_engagement"],
@@ -65,12 +75,21 @@ export function getScopePresets(authMode: AuthMode): Record<ScopePreset, string[
 export function buildAuthUrl(options: {
   authMode: AuthMode;
   appId: string;
+  configId?: string;
   redirectUri: string;
   scopes: string[];
   forceReauth?: boolean;
   enableFacebookLogin?: boolean;
   graphApiVersion?: string;
 }): URL {
+  if (options.authMode === "unified") {
+    if (!isOAuthConfigurationId(options.configId) || !isOAuthConfigurationId(options.appId)) throw new Error("UNIFIED_CONFIG_ID_REQUIRED");
+    assertUnifiedRedirect(options.redirectUri);
+    const url = new URL("https://www.facebook.com/dialog/oauth");
+    for (const [key, value] of Object.entries({ client_id: options.appId, config_id: options.configId,
+      redirect_uri: options.redirectUri, response_type: "code", display: "popup", prompt: "login", override_default_response_type: "true" })) url.searchParams.set(key, value);
+    return url;
+  }
   const url = options.authMode === "facebook"
     ? new URL(`https://www.facebook.com/${options.graphApiVersion ?? "v25.0"}/dialog/oauth`)
     : new URL("https://www.instagram.com/oauth/authorize");
@@ -96,6 +115,18 @@ export async function exchangeCodeForLongLivedToken(options: {
   redirectUri: string;
   graphApiVersion: string;
 }): Promise<OAuthToken> {
+  if (options.authMode === "unified") {
+    assertUnifiedRedirect(options.redirectUri);
+    const { appId, appSecret, redirectUri, code } = options;
+    let result: Record<string, unknown>;
+    try {
+      result = await graphGet(`https://graph.facebook.com/${options.graphApiVersion}/oauth/access_token`, {
+        client_id: appId, client_secret: appSecret, redirect_uri: redirectUri, code,
+      });
+    } catch { throw new Error("UNIFIED_OAUTH_EXCHANGE_FAILED"); }
+    // This is a BISU token, not a Facebook user token to upgrade again.
+    return normalizeToken(result, "unified");
+  }
   if (options.authMode === "facebook") {
     const shortToken = await graphGet(`https://graph.facebook.com/${options.graphApiVersion}/oauth/access_token`, {
       client_id: options.appId,
@@ -144,6 +175,7 @@ export async function refreshLongLivedToken(options: {
   pageId?: string;
   graphApiVersion: string;
 }): Promise<OAuthToken> {
+  if (options.authMode === "unified") throw new Error("UNIFIED_REAUTH_REQUIRED");
   if (options.authMode === "facebook") {
     if (!options.appId || !options.appSecret) {
       throw new Error("META_INSTAGRAM_APP_ID and META_INSTAGRAM_APP_SECRET are required to refresh Facebook Login tokens.");
@@ -239,6 +271,16 @@ function normalizePermissions(value: unknown): string[] | undefined {
 function expiresAt(expiresIn: unknown): string | undefined {
   if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) return undefined;
   return new Date(Date.now() + expiresIn * 1000).toISOString();
+}
+
+export function assertUnifiedRedirect(value: string): void {
+  let redirect: URL;
+  try { redirect = new URL(value); } catch { throw new Error("UNIFIED_HTTPS_REDIRECT_REQUIRED"); }
+  if (redirect.protocol !== "https:" || redirect.username || redirect.password || redirect.hash) throw new Error("UNIFIED_HTTPS_REDIRECT_REQUIRED");
+}
+
+export function isOAuthConfigurationId(value: unknown): value is string {
+  return typeof value === "string" && /^[1-9]\d{0,63}$/.test(value);
 }
 
 function requireString(value: unknown, label: string): string {

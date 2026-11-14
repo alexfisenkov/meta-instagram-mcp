@@ -34,13 +34,14 @@ export interface ApiProvider {
 }
 
 const MSG_SCOPES: Record<ApiAccountContext["authMode"], string[]> = {
-  facebook: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"], instagram: ["instagram_business_manage_messages"]
+  facebook: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"], instagram: ["instagram_business_manage_messages"],
+  unified: ["instagram_basic", "instagram_manage_messages"]
 };
 const COMMENTS_SCOPE: Record<ApiAccountContext["authMode"], string> = {
-  facebook: "instagram_manage_comments", instagram: "instagram_business_manage_comments"
+  facebook: "instagram_manage_comments", instagram: "instagram_business_manage_comments", unified: "instagram_manage_comments"
 };
 const INSIGHTS_SCOPE: Record<ApiAccountContext["authMode"], string> = {
-  facebook: "instagram_manage_insights", instagram: "instagram_business_manage_insights"
+  facebook: "instagram_manage_insights", instagram: "instagram_business_manage_insights", unified: "instagram_manage_insights"
 };
 
 export function createApiProvider(options: ApiProviderOptions): ApiProvider {
@@ -77,7 +78,7 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
           source: "api", availability: available, accountBinding: ctx.accountBinding,
           capabilities: [
             ...(directAvailability === "ready" ? ["direct.read", "inbox.list", "conversation.read"] : [`direct.read:${directAvailability}`, `inbox.list:${directAvailability}`, `conversation.read:${directAvailability}`]),
-            ...(ctx.authMode === "facebook" ? ["message.react:unsupported", "message.unreact:unsupported"] : []),
+            ...(ctx.authMode !== "instagram" ? ["message.react:unsupported", "message.unreact:unsupported"] : []),
             ...(commentsAvailability === "ready" ? ["comments.read", "comments.list", "comments.replies"] : [`comments.read:${commentsAvailability}`, `comments.list:${commentsAvailability}`, `comments.replies:${commentsAvailability}`]),
             insightsAvailability === "ready" ? "insights.read" : `insights.read:${insightsAvailability}`,
             "comment.like:unsupported", "comment.unlike:unsupported"
@@ -156,7 +157,7 @@ export function createApiProvider(options: ApiProviderOptions): ApiProvider {
     async execute(intent, requestId, contextHash) {
       const cached = refreshed.get(contextHash);
       refreshed.delete(contextHash);
-      if (cached?.context.authMode === "facebook" && (intent.action === "message.react" || intent.action === "message.unreact")) {
+      if (cached && cached.context.authMode !== "instagram" && (intent.action === "message.react" || intent.action === "message.unreact")) {
         return { status: "FAILED", reason: "Facebook Login message reactions are unsupported by the verified Instagram API surface." };
       }
       if (!cached || cached.intent.action !== intent.action || cached.intent.target.nativeId !== intent.target.nativeId ||

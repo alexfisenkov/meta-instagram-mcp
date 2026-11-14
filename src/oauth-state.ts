@@ -2,13 +2,16 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { link, mkdir, open, readFile, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
+import { assertUnifiedRedirect, isOAuthConfigurationId, type AuthMode } from "./oauth.js";
 
-export type OAuthAuthMode = "instagram" | "facebook";
+export type OAuthAuthMode = AuthMode;
 
 export interface OAuthStateBinding {
   accountBinding: string;
   authMode: OAuthAuthMode;
   redirectUri: string;
+  appId?: string;
+  configId?: string;
   expectedAccountId?: string;
   expectedPageId?: string;
   /** Trusted authorization-request requirements, not evidence of provider grants. */
@@ -111,10 +114,14 @@ function isState(value: string): boolean {
 }
 
 function validateBinding(binding: OAuthStateBinding): void {
-  if (!binding.accountBinding || !binding.redirectUri || !["instagram", "facebook"].includes(binding.authMode)) {
+  if (!binding.accountBinding || !binding.redirectUri || !["instagram", "facebook", "unified"].includes(binding.authMode)) {
     throw new Error("OAuth state binding is incomplete.");
   }
   if (binding.requiredScopes !== undefined && !isScopeList(binding.requiredScopes)) throw new Error("OAuth scope binding is invalid.");
+  if (binding.authMode === "unified") {
+    if (!isOAuthConfigurationId(binding.appId) || !isOAuthConfigurationId(binding.configId)) throw new Error("UNIFIED_CONFIG_ID_REQUIRED");
+    assertUnifiedRedirect(binding.redirectUri);
+  }
   const redirect = new URL(binding.redirectUri);
   if (redirect.protocol !== "https:" && !(redirect.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(redirect.hostname))) {
     throw new Error("OAuth redirect URI must use HTTPS or loopback HTTP.");
@@ -125,6 +132,8 @@ function sameBinding(record: OAuthStateRecord, expected: OAuthStateBinding): boo
   return equal(record.accountBinding, expected.accountBinding)
     && equal(record.authMode, expected.authMode)
     && equal(record.redirectUri, expected.redirectUri)
+    && equal(record.appId ?? "", expected.appId ?? "")
+    && equal(record.configId ?? "", expected.configId ?? "")
     && (expected.expectedAccountId === undefined || equal(record.expectedAccountId ?? "", expected.expectedAccountId))
     && (expected.expectedPageId === undefined || equal(record.expectedPageId ?? "", expected.expectedPageId))
     && equal([...(record.requiredScopes ?? [])].sort().join(","), [...(expected.requiredScopes ?? [])].sort().join(","));
@@ -144,8 +153,10 @@ function isRecord(value: unknown): value is OAuthStateRecord {
     && "redirectUri" in value && typeof value.redirectUri === "string"
     && (!("expectedAccountId" in value) || typeof value.expectedAccountId === "string")
     && (!("expectedPageId" in value) || typeof value.expectedPageId === "string")
+    && (!("appId" in value) || typeof value.appId === "string")
+    && (!("configId" in value) || typeof value.configId === "string")
     && (!("requiredScopes" in value) || isScopeList(value.requiredScopes))
-    && "authMode" in value && (value.authMode === "facebook" || value.authMode === "instagram");
+    && "authMode" in value && (value.authMode === "facebook" || value.authMode === "instagram" || value.authMode === "unified");
 }
 
 function isScopeList(value: unknown): value is string[] {

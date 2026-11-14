@@ -13,6 +13,7 @@ import {
   type OAuthToken
 } from "./oauth.js";
 import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
+import { oauthSetupStatus } from "./oauth-setup.js";
 import { createPublishHandlers } from "./publish.js";
 import { captureRuntimeStatus, type RuntimeStatus } from "./runtime-status.js";
 import { createAuthorizationStatus } from "./authorization-status.js";
@@ -85,17 +86,23 @@ export function createToolHandlers(dependencies: ToolDependencies) {
   async function resolveToken(explicitToken?: string, tokenStore: Pick<TokenStoreTransaction, "load"> = store): Promise<ResolvedToken> {
     if (explicitToken) return { accessToken: explicitToken, authMode: dependencies.config.authMode };
     if (dependencies.config.accessToken) {
+      const stored = dependencies.config.authMode === "unified" ? await tokenStore.load() : undefined;
+      const bound = stored?.authMode === "unified" && stored.accessToken && sameSecret(stored.accessToken, dependencies.config.accessToken)
+        ? stored : undefined;
       return {
         accessToken: dependencies.config.accessToken,
         authMode: dependencies.config.authMode,
-        userId: dependencies.config.userId,
-        pageId: dependencies.config.pageId
+        userId: dependencies.config.userId ?? bound?.userId,
+        pageId: dependencies.config.pageId,
+        ...(bound ? { stored: bound } : {})
       };
     }
     const stored = await tokenStore.load();
     if (!stored?.accessToken) {
       throw new Error("No Instagram access token configured. Set META_INSTAGRAM_ACCESS_TOKEN or run meta_exchange_code first.");
     }
+    if (stored.authMode && stored.authMode !== dependencies.config.authMode
+      && (stored.authMode === "unified" || dependencies.config.authMode === "unified")) throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
     return {
       accessToken: stored.accessToken,
       authMode: stored.authMode ?? dependencies.config.authMode,
@@ -136,11 +143,13 @@ export function createToolHandlers(dependencies: ToolDependencies) {
       return {
         runtime: runtimeStatus,
         authorization,
+        oauthSetup: oauthSetupStatus(dependencies.config),
         operationalContext: await readOperationalContext(dependencies.config.tokenStorePath),
         config: {
           authMode: dependencies.config.authMode,
           hasAppId: Boolean(dependencies.config.appId),
           hasAppSecret: Boolean(dependencies.config.appSecret),
+          hasConfigId: Boolean(dependencies.config.configId),
           hasRedirectUri: Boolean(dependencies.config.redirectUri),
           defaultScopes: dependencies.config.defaultScopes ?? defaultScopesForAuthMode(dependencies.config.authMode),
           graphApiVersion: dependencies.config.graphApiVersion,
@@ -201,6 +210,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
       const url = buildAuthUrl({
         authMode: dependencies.config.authMode,
         appId: dependencies.config.appId,
+        configId: dependencies.config.configId,
         redirectUri: dependencies.config.redirectUri,
         scopes,
         forceReauth: args.forceReauth,
@@ -216,6 +226,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     },
 
     async exchangeCode(args: ToolArgs) {
+      if (dependencies.config.authMode === "unified") throw new Error("UNIFIED_STATEFUL_OAUTH_REQUIRED: use the state-bound callback or enter a Meta dashboard token in the private local config.");
       requireConfig(dependencies.config.appId, "META_INSTAGRAM_APP_ID");
       requireConfig(dependencies.config.appSecret, "META_INSTAGRAM_APP_SECRET");
       requireConfig(dependencies.config.redirectUri, "META_INSTAGRAM_REDIRECT_URI");
@@ -233,10 +244,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
           graphApiVersion: dependencies.config.graphApiVersion
         });
         if (save) {
-          const identity = await verifyOAuthAccountIdentity({
-            authMode: dependencies.config.authMode,
-            graphApiVersion: dependencies.config.graphApiVersion,
-          }, token, {
+          const identity = await verifyOAuthAccountIdentity(dependencies.config, token, {
             ...(dependencies.config.userId ? { expectedAccountId: dependencies.config.userId } : {}),
             ...(dependencies.config.pageId ? { expectedPageId: dependencies.config.pageId } : {}),
           }, (accessToken, authMode) => makeClient(accessToken, authMode));
@@ -294,7 +302,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
 
     async getAccountInfo(args: ToolArgs = {}) {
       const resolved = await resolveToken(args.accessToken);
-      const userId = resolved.authMode === "facebook" ? requireInstagramUserId(args, resolved, dependencies.config) : "me";
+      const userId = resolved.authMode !== "instagram" ? requireInstagramUserId(args, resolved, dependencies.config) : "me";
       return makeClient(resolved.accessToken, resolved.authMode).get(`/${encodeURIComponent(userId)}`, {
         fields: args.fields?.length ? args.fields : defaultAccountFields(resolved.authMode)
       });
@@ -398,6 +406,29 @@ export function createToolHandlers(dependencies: ToolDependencies) {
         const current = save ? resolved.stored ?? await tokenStore.load() : resolved.stored;
         if (save && current && (!current.accessToken || !sameSecret(resolved.accessToken, current.accessToken))) {
           throw new Error("TOKEN_STORE_NOT_EMPTY: account resolution must use the active token store.");
+        }
+        if (dependencies.config.authMode === "unified" && resolved.authMode !== "unified") throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+        if (resolved.authMode === "unified") {
+          if (current?.authMode && current.authMode !== "unified") throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+          if (args.pageId || resolved.pageId || dependencies.config.pageId) throw new Error("UNIFIED_FACEBOOK_PAGE_UNSUPPORTED");
+          const { accessToken } = resolved;
+          const expectedAccountId = current?.userId ?? dependencies.config.userId ?? args.userId;
+          if (args.userId && expectedAccountId && args.userId !== expectedAccountId) throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+          const identity = await verifyOAuthAccountIdentity(dependencies.config,
+          { accessToken, authMode: "unified" }, { ...(expectedAccountId ? { expectedAccountId } : {}) },
+          (accessToken, authMode) => makeClient(accessToken, authMode));
+          const instagramAccount = requireRecord(await makeClient(resolved.accessToken, "unified").get(`/${encodeURIComponent(identity.userId)}`, {
+            fields: defaultAccountFields("unified")
+          }), "Instagram account");
+          if (toStringValue(instagramAccount.id) !== identity.userId || typeof instagramAccount.username !== "string" || !instagramAccount.username.trim()) {
+            throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+          }
+          if (save) {
+            if (!sameStoredTokenSnapshot(current, await tokenStore.load())) throw new Error("TOKEN_STORE_CHANGED");
+            await tokenStore.save({ ...current, accessToken, tokenType: current?.tokenType ?? "bearer", authMode: "unified",
+              userId: identity.userId, username: instagramAccount.username, permissions: identity.permissions, clientBusinessId: identity.clientBusinessId });
+          }
+          return { authMode: "unified", resolutionMode: "assigned_instagram_account", instagramBusinessAccount: instagramAccount, saved: save };
         }
         const client = makeClient(resolved.accessToken, "facebook");
         if (args.userId) {
@@ -513,11 +544,11 @@ function sameSecret(left: string, right: string): boolean {
 }
 
 function graphBaseUrl(authMode: AuthMode): string {
-  return authMode === "facebook" ? "https://graph.facebook.com" : "https://graph.instagram.com";
+  return authMode === "instagram" ? "https://graph.instagram.com" : "https://graph.facebook.com";
 }
 
 function defaultAccountFields(authMode: AuthMode): string[] {
-  if (authMode === "facebook") {
+  if (authMode !== "instagram") {
     return [
       "id",
       "username",
@@ -548,13 +579,13 @@ function resolveInstagramUserId(args: ToolArgs, resolved: ResolvedToken, config:
   if (resolved.userId) return resolved.userId;
   if (config.userId) return config.userId;
   if (resolved.authMode === "instagram") return "me";
-  throw new Error("Missing Instagram user id. Run meta_resolve_instagram_account after Facebook Login or set META_INSTAGRAM_USER_ID.");
+  throw new Error("Missing Instagram user id. Run meta_resolve_instagram_account to select the granted Instagram account or set META_INSTAGRAM_USER_ID.");
 }
 
 function requireInstagramUserId(args: ToolArgs, resolved: ResolvedToken, config: MetaInstagramConfig): string {
   const userId = args.userId ?? resolved.userId ?? config.userId;
   if (!userId) {
-    throw new Error("Missing Instagram user id. Run meta_resolve_instagram_account after Facebook Login or set META_INSTAGRAM_USER_ID.");
+    throw new Error("Missing Instagram user id. Run meta_resolve_instagram_account to select the granted Instagram account or set META_INSTAGRAM_USER_ID.");
   }
   return userId;
 }

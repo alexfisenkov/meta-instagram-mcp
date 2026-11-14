@@ -1,6 +1,6 @@
 # Возможности и границы готовности
 
-В v0.2.8 `runtime.packageVersion` — версия пакета, а `meta_capabilities.version: 1` остаётся версией схемы. Оба status tools добавляют startup source revision; marker не подтверждает целостность checkout. `meta_auth_status` по умолчанию не проверяет Meta, а `verify: true` выполняет один Facebook `debug_token` GET в пределах 5 секунд. Live, cached/stale, stored metadata и `operationalContext` с `configuration_only` различаются; точный порядок диагностики — в [runbook](operations-runbook.md#проверить-версию-и-авторизацию). Проверка токена не доказывает успешное чтение конкретной операции или готовность browser/phone.
+В текущем runtime `runtime.packageVersion` — версия пакета, а `meta_capabilities.version: 1` остаётся версией схемы. Оба status tools добавляют startup source revision; marker не подтверждает целостность checkout. `meta_auth_status` по умолчанию не проверяет Meta, а `verify: true` выполняет один Facebook/Unified `debug_token` GET в пределах 5 секунд. Live, cached/stale, stored metadata и `operationalContext` с `configuration_only` различаются; точный порядок диагностики — в [runbook](operations-runbook.md#проверить-версию-и-авторизацию). Проверка токена не доказывает успешное чтение конкретной операции или готовность browser/phone.
 
 Runtime factory сохраняет legacy API tools и регистрирует общие layered read/triage/analysis и guarded action tools для stdio и Streamable HTTP. Capability report показывает runtime status, а не доказательство входа в аккаунт или production readiness. Fake tests и наличие исходников не подтверждают live Meta/browser/phone доступ.
 
@@ -57,3 +57,7 @@ Media publishing остаётся отдельной legacy API операцие
 
 
 Новые TikTok публикации с LMS server storage используют `PULL_FROM_URL`, как требуют Technical Considerations 2a/2d в [Content Sharing Guidelines](https://developers.tiktok.com/docs/en/content-sharing-guidelines). Node не скачивает и не переотправляет новый TikTok исходник. Владение media-domain/URL prefix должно быть реально подтверждено в TikTok; настроенный HTTPS origin, valid grant и Production Draft этого не доказывают. Живая отправка здесь не проверена и не объявляется готовой. Сохранённые FILE_UPLOAD checkpoints поддерживаются только для безопасного завершения уже известной операции, без нового init. Принятый pull не помечается remotely aborted по локальному cancel.
+
+## Portable Unified Login
+
+`META_AUTH_MODE=unified` добавляет BISU авторизацию, проверку App/SYSTEM_USER/expiry/target scopes и assigned Instagram assets без Facebook Page. Инструкция — [Unified Login](unified-login.md). Локальная конфигурация и синтетические tests не подтверждают App Review или реальный доступ аккаунта. Unified private replies и Direct reactions пока закрыты; обычные guarded действия не включаются самим обновлением.

@@ -1,7 +1,7 @@
 import { getScopePresets, type AuthMode } from "./oauth.js";
 import { requestJsonHttp } from "./http-json.js";
 
-const SUPPORTED_SCOPES = new Set([...Object.values(getScopePresets("facebook")).flat(), "public_profile", "email"]);
+const SUPPORTED_SCOPES = new Set([...Object.values(getScopePresets("facebook")).flat(), ...Object.values(getScopePresets("unified")).flat(), "public_profile", "email", "business_management", "ads_read", "ads_management", "instagram_manage_events"]);
 
 export function isSupportedScopeName(scope: unknown): scope is string {
   return typeof scope === "string" && SUPPORTED_SCOPES.has(scope) && !/^[a-f\d]{32}$/i.test(scope);
@@ -52,7 +52,7 @@ export function createAuthorizationStatus() {
     cached = undefined;
     const attempt = ++generation;
     if (!credential.accessToken) return unknown(credential.storeUnavailable ? "token_store_unavailable" : "no_token");
-    if (credential.authMode !== "facebook") return unknown("unsupported_auth_mode");
+    if (credential.authMode === "instagram") return unknown("unsupported_auth_mode");
     if (!credential.appId || !credential.appSecret) return unknown("missing_app_credentials");
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -61,11 +61,12 @@ export function createAuthorizationStatus() {
       if (!version) return unknown("verification_failed");
       const url = new URL(`https://graph.facebook.com/${version}/debug_token`);
       url.searchParams.set("input_token", credential.accessToken);
-      url.searchParams.set("access_token", `${credential.appId}|${credential.appSecret}`);
+      if (credential.authMode !== "unified") url.searchParams.set("access_token", `${credential.appId}|${credential.appSecret}`);
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new Error("verification_timeout")); }, 5000);
       });
-      const response = await Promise.race([requestJsonHttp(url, { method: "GET", headers: { accept: "application/json" },
+      const response = await Promise.race([requestJsonHttp(url, { method: "GET", headers: { accept: "application/json",
+        ...(credential.authMode === "unified" ? { authorization: `Bearer ${credential.appId}|${credential.appSecret}` } : {}) },
         timeoutMs: 5000, allowRouteRetry: false, signal: controller.signal }), timeout]);
       if (!response.ok) return unknown("verification_failed");
       const data = isRecord(response.body) ? response.body.data : undefined;
@@ -76,7 +77,12 @@ export function createAuthorizationStatus() {
         && scope !== credential.accessToken && scope !== credential.appSecret))) {
         return unknown("malformed_response");
       }
-      const tokenValid = data.is_valid;
+      if (credential.authMode === "unified" && data.is_valid && (data.type !== "SYSTEM_USER" || typeof data.user_id !== "string" || !data.user_id || data.expires_at === undefined || !(Array.isArray(data.scopes) && data.scopes.includes("instagram_basic")))) return unknown("malformed_response");
+      if (credential.authMode === "unified" && data.is_valid && [data.expires_at, data.data_access_expires_at].some((value) =>
+        value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000))) return unknown("malformed_response");
+      const unifiedExpired = credential.authMode === "unified" && [data.expires_at, data.data_access_expires_at].some((value) =>
+        typeof value === "number" && value > 0 && value * 1000 <= Date.now());
+      const tokenValid = data.is_valid && !unifiedExpired;
       const appMatches = hasAppId ? data.app_id === credential.appId : "unknown";
       const checkedAtMs = Date.now();
       const status: AuthorizationStatus = {

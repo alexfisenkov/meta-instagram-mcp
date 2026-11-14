@@ -2,17 +2,19 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { open, readFile, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { assertPrivateFile, ensurePrivateDirectory, ensurePrivateFile } from "./private-fs.js";
+import type { AuthMode } from "./oauth.js";
 
 /** Поля, которые пишем мы сами. Именно их принимает saveStoredToken. */
 export interface StoredTokenFields {
   accessToken?: string;
   tokenType?: string;
-  authMode?: "facebook" | "instagram";
+  authMode?: AuthMode;
   expiresAt?: string;
   userId?: string;
   username?: string;
   pageId?: string;
   permissions?: string[];
+  clientBusinessId?: string;
 }
 
 /**

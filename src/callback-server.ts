@@ -10,8 +10,10 @@ import { loadConfig } from "./config.js";
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken, type OAuthToken } from "./oauth.js";
 import { createOAuthStateStore, type OAuthStateBinding, type OAuthStateStore } from "./oauth-state.js";
 import { loadStoredToken, sameStoredTokenSnapshot, withTokenStoreLock, type StoredInstagramToken } from "./token-store.js";
-import { readFacebookGrantedPermissions, verifyOAuthAccountIdentity, type OAuthIdentityConstraints, type OAuthIdentityVerificationOptions, type VerifiedOAuthIdentity } from "./oauth-account-identity.js";
+import { readFacebookGrantedPermissions, readUnifiedGrantedPermissions, verifyOAuthAccountIdentity, type OAuthIdentityConstraints, type OAuthIdentityVerificationOptions, type VerifiedOAuthIdentity } from "./oauth-account-identity.js";
 import { MetaApiError, MetaTransportError } from "./meta-client.js";
+import { assertOAuthSetup } from "./oauth-setup.js";
+import type { AuthMode } from "./oauth.js";
 
 export type ParsedCallback =
   | { type: "code"; code: string; state?: string }
@@ -142,9 +144,9 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
         if (options.binding.authMode === "instagram" && next.userId &&
             !constantStringEqual(identity.userId, next.userId)) return reject("identity_mismatch");
         let permissions = next.permissions;
-        if (options.binding.authMode === "facebook") {
+        if (options.binding.authMode !== "instagram") {
           if (!consumed.requiredScopes?.length || !options.readGrantedPermissions) return reject("permissions_unverified");
-          permissions = await options.readGrantedPermissions(next);
+          permissions = await options.readGrantedPermissions(options.binding.authMode === "unified" ? { ...next, userId: identity.userId } : next);
           if (!Array.isArray(permissions) || permissions.some((permission) => typeof permission !== "string")
             || !consumed.requiredScopes.every((scope) => permissions!.includes(scope))) return reject("permissions_unverified");
         }
@@ -153,7 +155,8 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
           authMode: options.binding.authMode,
           userId: identity.userId,
           ...(identity.pageId ? { pageId: identity.pageId } : {}),
-          ...(options.binding.authMode === "facebook" ? { permissions } : next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
+          ...(identity.clientBusinessId ? { clientBusinessId: identity.clientBusinessId } : {}),
+          ...(options.binding.authMode !== "instagram" ? { permissions } : next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
         };
         phase = "commit";
         if (options.commitToken) {
@@ -192,10 +195,8 @@ export function renderCallbackHtml(model: CallbackHtmlModel): string {
 export async function runCallbackServer(): Promise<void> {
   const config = loadConfig();
   if (!config.appId || !config.redirectUri) throw new Error("Missing OAuth app ID or redirect URI configuration.");
-  const redirectUrl = new URL(config.redirectUri);
-  if (!redirectUrl.hostname || !["localhost", "127.0.0.1", "::1"].includes(redirectUrl.hostname) || redirectUrl.protocol !== "http:") {
-    throw new Error("Local callback helper only supports loopback HTTP redirect URIs.");
-  }
+  assertOAuthSetup(config);
+  const listener = resolveCallbackListener({ authMode: config.authMode, redirectUri: config.redirectUri });
   const current = await loadStoredToken(config.tokenStorePath);
   const expectedAccountId = config.userId ?? current?.userId;
   const expectedPageId = config.pageId ?? current?.pageId;
@@ -205,28 +206,48 @@ export async function runCallbackServer(): Promise<void> {
     authMode: config.authMode, redirectUri: config.redirectUri,
     ...(expectedAccountId ? { expectedAccountId } : {}),
     ...(expectedPageId ? { expectedPageId } : {}),
-    ...(config.authMode === "facebook" ? { requiredScopes: [...authorizationScopes] } : {}),
+    ...(config.authMode !== "instagram" ? { requiredScopes: [...authorizationScopes] } : {}),
+    ...(config.authMode === "unified" ? { appId: config.appId, configId: config.configId } : {}),
   };
   const stateStore = createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` });
   const service = createOAuthCallbackService({
     stateStore, binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
-    verifyAccount: (token, expected, verification) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected, undefined, verification),
-    readGrantedPermissions: (token) => readFacebookGrantedPermissions(config.graphApiVersion, token),
+    verifyAccount: (token, expected, verification) => verifyOAuthAccountIdentity(config, token, expected, undefined, verification),
+    readGrantedPermissions: (token) => config.authMode === "unified" ? readUnifiedGrantedPermissions(config, token) : readFacebookGrantedPermissions(config.graphApiVersion, token),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
     commitToken: (expected, token) => commitStoredOAuthToken(config.tokenStorePath, expected, token),
   });
+  const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId, redirectUri: config.redirectUri, scopes: authorizationScopes, forceReauth: true, graphApiVersion: config.graphApiVersion, configId: config.configId });
   const state = await service.issueState();
-  const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId, redirectUri: config.redirectUri, scopes: authorizationScopes, forceReauth: true, graphApiVersion: config.graphApiVersion });
   loginUrl.searchParams.set("state", state);
   const server = createServer(createOAuthCallbackHandler(service, config.redirectUri));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(Number(redirectUrl.port || 80), redirectUrl.hostname, resolve);
+    server.listen(listener.port, listener.host, resolve);
   });
-  console.log(`OAuth callback server listening on ${config.redirectUri}`);
+  console.log("OAuth callback listener ready on loopback. Complete the official login in your browser.");
   try { await launchOAuthAuthorization(loginUrl.toString()); }
   catch (error) { server.close(); throw error; }
+}
+
+/** HTTPS callbacks are forwarded by an owner-managed TLS proxy to this loopback listener. */
+export function resolveCallbackListener(
+  config: { authMode: AuthMode; redirectUri: string },
+  env: Record<string, string | undefined> = process.env,
+): { host: string; port: number } {
+  let redirect: URL;
+  try { redirect = new URL(config.redirectUri); } catch { throw new Error("OAUTH_REDIRECT_URI_INVALID"); }
+  if (redirect.username || redirect.password || redirect.hash) throw new Error("OAUTH_REDIRECT_URI_INVALID");
+  const loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(redirect.hostname);
+  if (redirect.protocol === "http:" && loopback && config.authMode !== "unified") {
+    return { host: redirect.hostname === "[::1]" ? "::1" : redirect.hostname, port: Number(redirect.port || 80) };
+  }
+  if (redirect.protocol !== "https:") throw new Error(config.authMode === "unified" ? "UNIFIED_HTTPS_REDIRECT_REQUIRED" : "OAUTH_REDIRECT_URI_INVALID");
+  const value = env.META_OAUTH_CALLBACK_LISTEN_PORT;
+  if (value === undefined || !value.trim()) throw new Error("HTTPS_CALLBACK_LISTENER_REQUIRED");
+  if (!/^[1-9]\d{0,4}$/.test(value) || Number(value) > 65535) throw new Error("OAUTH_CALLBACK_LISTEN_PORT_INVALID");
+  return { host: "127.0.0.1", port: Number(value) };
 }
 
 /** Opens the one-time authorization URL without exposing it through routine output. */
@@ -242,14 +263,15 @@ export async function launchOAuthAuthorization(
   }
 }
 
+export function oauthBrowserLaunchCommand(url: string, platform: NodeJS.Platform): { command: string; args: string[] } {
+  if (platform === "win32") return { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] };
+  if (platform === "darwin") return { command: "open", args: [url] };
+  if (platform === "linux") return { command: "xdg-open", args: [url] };
+  throw new Error("Unsupported platform.");
+}
+
 async function openSystemBrowser(url: string): Promise<void> {
-  const command = process.platform === "darwin" ? "open"
-    : process.platform === "win32" ? "powershell.exe"
-      : process.platform === "linux" ? "xdg-open" : undefined;
-  if (!command) throw new Error("Unsupported platform.");
-  const args = process.platform === "win32"
-    ? ["-NoProfile", "-Command", "Start-Process -LiteralPath $args[0]", url]
-    : [url];
+  const { command, args } = oauthBrowserLaunchCommand(url, process.platform);
   await promisify(execFile)(command, args, { windowsHide: true });
 }
 

@@ -10,7 +10,7 @@ import { commitStoredOAuthToken, createOAuthCallbackHandler, createOAuthCallback
 import { buildAuthUrl, defaultScopesForAuthMode, exchangeCodeForLongLivedToken } from "./oauth.js";
 import { createOAuthStateStore, type OAuthStateBinding } from "./oauth-state.js";
 import { loadStoredToken } from "./token-store.js";
-import { readFacebookGrantedPermissions, verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
+import { readFacebookGrantedPermissions, readUnifiedGrantedPermissions, verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 import type { WebhookReceiver } from "./webhooks.js";
 import { createWebhookReceiver } from "./webhooks.js";
 import { WebhookJournal } from "./webhook-journal.js";
@@ -28,6 +28,7 @@ import type { MutationExecutor } from "./action-safety.js";
 import { FileActionReadbackStore } from "./action-readback.js";
 import { assertOutsideDirectory } from "./private-fs.js";
 import { captureRuntimeStatus } from "./runtime-status.js";
+import { assertOAuthSetup, oauthSetupStatus } from "./oauth-setup.js";
 
 export interface RuntimeOptions {
   config?: MetaInstagramConfig;
@@ -98,10 +99,12 @@ export function createRuntime(options: RuntimeOptions = {}): InstagramRuntime {
     readbackStore,
     deleteEnabled: config.deleteEnabled === true,
     beginOAuth: async () => {
+      assertOAuthSetup(config);
       if (!oauth || !config.appId || !config.redirectUri) throw new Error("OAuth is not configured; the authorization route remains unavailable.");
-      const state = await oauth.service.issueState();
+      // Validate URL/configuration before issuing a one-use nonce.
       const loginUrl = buildAuthUrl({ authMode: config.authMode, appId: config.appId!, redirectUri: config.redirectUri!,
-        scopes: authorizationScopes, forceReauth: true, graphApiVersion: config.graphApiVersion });
+        scopes: authorizationScopes, forceReauth: true, graphApiVersion: config.graphApiVersion, configId: config.configId });
+      const state = await oauth.service.issueState();
       loginUrl.searchParams.set("state", state);
       return { authorizationUrl: loginUrl.toString(), expiresInSeconds: 600 };
     }
@@ -130,7 +133,7 @@ export function createRuntime(options: RuntimeOptions = {}): InstagramRuntime {
 }
 
 function configuredOAuth(config: MetaInstagramConfig, authorizationScopes: string[]): { service: OAuthCallbackService; redirectUri: string } | undefined {
-  if (!config.appId || !config.appSecret || !config.redirectUri) return undefined;
+  if (!config.appId || !config.appSecret || !config.redirectUri || !oauthSetupStatus(config).ready) return undefined;
   assertPrivatePath(config.tokenStorePath);
   let redirect: URL;
   try { redirect = new URL(config.redirectUri); } catch { return undefined; }
@@ -139,12 +142,13 @@ function configuredOAuth(config: MetaInstagramConfig, authorizationScopes: strin
   const binding: OAuthStateBinding = { accountBinding: `${config.authMode}:${expectedAccountId ?? "configured"}`, authMode: config.authMode,
     redirectUri: config.redirectUri, ...(expectedAccountId ? { expectedAccountId } : {}),
     ...(config.pageId ? { expectedPageId: config.pageId } : {}),
-    ...(config.authMode === "facebook" ? { requiredScopes: [...authorizationScopes] } : {}) };
+    ...(config.authMode !== "instagram" ? { requiredScopes: [...authorizationScopes] } : {}),
+    ...(config.authMode === "unified" ? { appId: config.appId, configId: config.configId } : {}) };
   const service = createOAuthCallbackService({
     stateStore: createOAuthStateStore({ directory: `${config.tokenStorePath}.oauth-state` }), binding,
     exchangeCode: (code) => exchangeCodeForLongLivedToken({ authMode: config.authMode, code, appId: config.appId!, appSecret: config.appSecret!, redirectUri: config.redirectUri!, graphApiVersion: config.graphApiVersion }),
-    verifyAccount: (token, expected, verification) => verifyOAuthAccountIdentity({ authMode: config.authMode, graphApiVersion: config.graphApiVersion }, token, expected, undefined, verification),
-    readGrantedPermissions: (token) => readFacebookGrantedPermissions(config.graphApiVersion, token),
+    verifyAccount: (token, expected, verification) => verifyOAuthAccountIdentity(config, token, expected, undefined, verification),
+    readGrantedPermissions: (token) => config.authMode === "unified" ? readUnifiedGrantedPermissions(config, token) : readFacebookGrantedPermissions(config.graphApiVersion, token),
     readCurrentToken: () => loadStoredToken(config.tokenStorePath),
     commitToken: (current, token) => commitStoredOAuthToken(config.tokenStorePath, current, token)
   });

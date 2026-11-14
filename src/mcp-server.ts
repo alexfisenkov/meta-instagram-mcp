@@ -23,7 +23,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_auth_status",
     {
       title: "Meta Auth Status",
-      description: "Show configuration, startup runtime identity and safe authorization metadata. verify=true performs one bounded read-only Facebook token check; the default makes no verification request or UI action.",
+      description: "Show configuration, startup runtime identity and safe authorization metadata. verify=true performs one bounded read-only Facebook or Unified SYSTEM_USER token check; the default makes no verification request or UI action.",
       inputSchema: z.object({ verify: z.boolean().default(false) }),
       annotations: { readOnlyHint: true }
     },
@@ -43,7 +43,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_build_login_url",
     {
       title: "Build Instagram Login URL",
-      description: "Build an official Instagram Business Login OAuth URL for selected analytics permissions.",
+      description: "Build the official login URL for the configured Instagram, Facebook, or Unified Login setup. Unified uses its Meta configuration ID and HTTPS callback; this preview does not issue state.",
       inputSchema: z.object({
         scopes: z.array(z.string()).optional(),
         scopePreset: z.enum(["readOnly", "analytics", "fullStandard"]).optional(),
@@ -58,7 +58,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_exchange_code",
     {
       title: "Exchange Instagram OAuth Code",
-      description: "Legacy exchange for an empty token store only. Existing credentials are never replaced here; use meta_begin_oauth and its state-bound callback to reauthorize. Set save=false to inspect without changing the store.",
+      description: "Legacy Instagram/Facebook exchange for an empty token store only; Unified requires the state-bound callback or a privately configured dashboard token. Existing credentials are never replaced here; use meta_begin_oauth and its state-bound callback to reauthorize. Set save=false to inspect without changing the store.",
       inputSchema: z.object({
         code: z.string().min(1),
         save: z.boolean().optional()
@@ -70,7 +70,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_refresh_token",
     {
       title: "Refresh Instagram Token",
-      description: "Refresh the current long-lived Instagram token before it expires.",
+      description: "Refresh the current legacy long-lived Instagram/Facebook token before it expires. Unified BISU tokens require reauthorization; they are never sent through a legacy refresh flow.",
       inputSchema: z.object({
         accessToken: z.string().optional(),
         save: z.boolean().optional()
@@ -230,7 +230,7 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_resolve_instagram_account",
     {
       title: "Resolve Instagram Account",
-      description: "Resolve and save an Instagram professional account id for later Graph API calls. Use pageId for Page-linked accounts or userId when Facebook Login granted direct Instagram access.",
+      description: "Resolve and save the Instagram account for later Graph calls from the configured credential. Unified verifies the Meta app, SYSTEM_USER grants, and assigned Instagram assets; use userId to select one of multiple granted accounts. Facebook Login supports Page-linked accounts. Prefer credentials entered in private local config, never in chat.",
       inputSchema: z.object({
         accessToken: z.string().optional(),
         pageId: z.string().optional(),

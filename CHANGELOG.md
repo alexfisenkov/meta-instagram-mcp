@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.3.0 — hosted student connections (not yet released)
+## 0.3.0 — 2026-11-14
+
+### Локальный MCP: Unified Login
+
+- Явный `META_AUTH_MODE=unified`, Meta config ID, BISU exchange без неподходящего user-token refresh и Graph v27.0 по умолчанию только для Unified. Старые login families сохранены.
+- Проверка app, SYSTEM_USER, срока, фактических и granular grants, business и assigned Instagram assets. System-user ID не становится Instagram ID; несколько accounts требуют выбора.
+- State привязан к App/config/account; ошибки, cancel и конфликты сохраняют старые credentials. Unified HTTP callback отклоняется, HTTPS может обслуживаться через явный loopback listener за своим TLS proxy.
+- Dashboard-token путь для личной Meta App, правильный Facebook Graph host и IG asset для чтения; status/setup/doctor дают безопасную диагностику.
+- Исправлен запуск официального входа на Windows; падение AI-клиента и login challenge Instagram не объявляются исправленными без отдельной проверки.
+- Шаблон portable config больше не включает активные hosted-only keys, отклоняемые локальным wrapper; добавлена проверка шаблона.
+- Инструкция: [Unified Login](docs/unified-login.md). Live Meta OAuth и доступ конкретных учеников требуют отдельной приёмки; unit/installer/CI результаты её не заменяют.
+
+### Hosted student connections
 
 - TikTok server-stored originals переведены на обязательный `PULL_FROM_URL`: новая доставка передаёт узкую live first-party lease, без Node media GET/spool/PUT. Согласие, privacy, disclosure и content hash сохранены. Legacy FILE_UPLOAD checkpoints завершают только известную операцию; unknown init не повторяется, принятый pull нельзя выдавать за remotely aborted. Проверка media-domain ownership остаётся внешней предпосылкой, её provider отказ отображается честно.
 

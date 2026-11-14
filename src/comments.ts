@@ -13,7 +13,7 @@ export interface CommentsDomain {
 }
 
 const COMMENT_SCOPE: Record<ApiAccountContext["authMode"], string> = {
-  facebook: "instagram_manage_comments", instagram: "instagram_business_manage_comments"
+  facebook: "instagram_manage_comments", instagram: "instagram_business_manage_comments", unified: "instagram_manage_comments"
 };
 const COMMENT_FIELDS = "id,text,timestamp,from,like_count,hidden,replies_count";
 

@@ -3,6 +3,7 @@ import { MetaClient, type FacebookPageClient } from "./meta-client.js";
 import { defaultScopesForAuthMode, type AuthMode } from "./oauth.js";
 import { loadStoredToken, type StoredInstagramToken } from "./token-store.js";
 import type { SourceReadContext } from "./read-context.js";
+import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 
 export interface AccountContextTokenStore {
   load(): Promise<StoredInstagramToken | undefined>;
@@ -38,17 +39,28 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
   const makeClient = options.clientFactory ?? ((accessToken: string, authMode: AuthMode) => new MetaClient({
     accessToken,
     apiVersion: options.config.graphApiVersion,
-    baseUrl: authMode === "facebook" ? "https://graph.facebook.com" : "https://graph.instagram.com"
+    baseUrl: authMode === "instagram" ? "https://graph.instagram.com" : "https://graph.facebook.com"
   }));
 
   return async (context) => {
     const signal = context?.signal;
+    signal?.throwIfAborted();
     const stored = await store.load();
     const useEnvironmentToken = Boolean(options.config.accessToken);
     const accessToken = options.config.accessToken ?? stored?.accessToken;
     if (!accessToken) throw new Error("No Instagram access token is configured.");
     const authMode = useEnvironmentToken ? options.config.authMode : stored?.authMode ?? options.config.authMode;
-    const instagramUserId = options.config.userId ?? (useEnvironmentToken ? undefined : stored?.userId);
+    if (!useEnvironmentToken && authMode !== options.config.authMode
+      && (authMode === "unified" || options.config.authMode === "unified")) throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+    let instagramUserId = options.config.userId ?? (useEnvironmentToken ? undefined : stored?.userId);
+    let unifiedPermissions: string[] | undefined;
+    if (authMode === "unified") {
+      const identity = await verifyOAuthAccountIdentity(options.config, { accessToken, authMode }, instagramUserId ? { expectedAccountId: instagramUserId } : {}, undefined,
+      signal ? { signal } : {});
+      instagramUserId = identity.userId;
+      unifiedPermissions = identity.permissions;
+      signal?.throwIfAborted();
+    }
     if (!instagramUserId) throw new Error("Instagram account identity is not resolved.");
     const facebookPageId = options.config.pageId ?? (useEnvironmentToken ? undefined : stored?.pageId);
     const userClient = makeClient(accessToken, authMode);
@@ -71,7 +83,7 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
         pageResolutionStatus = "unavailable";
       }
     }
-    let confirmedScopes = !useEnvironmentToken && Array.isArray(stored?.permissions)
+    let confirmedScopes = authMode === "unified" ? unifiedPermissions : !useEnvironmentToken && Array.isArray(stored?.permissions)
       ? stored.permissions.filter((item): item is string => typeof item === "string")
       : undefined;
     if (!confirmedScopes && authMode === "facebook") {

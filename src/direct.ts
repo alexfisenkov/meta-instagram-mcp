@@ -13,7 +13,8 @@ export interface DirectDomain {
 }
 
 const OWNER_SCOPES: Record<ApiAccountContext["authMode"], string[]> = {
-  facebook: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"], instagram: ["instagram_business_manage_messages"]
+  facebook: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"], instagram: ["instagram_business_manage_messages"],
+  unified: ["instagram_basic", "instagram_manage_messages"]
 };
 const DEFAULT_FIELDS = "id,from,to,message,created_time";
 const MAX_UNANSWERED_CONVERSATIONS = 20;
@@ -145,7 +146,7 @@ export function createDirectDomain(resolveContext: AccountContextResolver, now: 
     },
     async prepareReaction(target, reaction) {
       const ctx = await context();
-      if (ctx.authMode === "facebook") throw new Error("Facebook Login message reactions are unsupported by the verified Instagram API surface.");
+      if (ctx.authMode !== "instagram") throw new Error("Facebook Graph message reactions are unsupported by the verified Instagram API surface.");
       ensureScopes(ctx, OWNER_SCOPES[ctx.authMode]);
       ensureAccountTarget(target, ctx);
       if (reaction !== "love" && !/^emoji:.+$/u.test(reaction)) throw new Error("Direct reaction must be love or emoji:<character>.");

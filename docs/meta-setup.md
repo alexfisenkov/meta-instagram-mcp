@@ -1,5 +1,9 @@
 # Meta Setup Notes
 
+## Сначала выберите реальный login setup
+
+Если Dashboard предлагает **API setup with Unified login**, используйте `META_AUTH_MODE=unified` и [пошаговую инструкцию](unified-login.md). Unified, Instagram Login и Facebook Login используют разные App credentials, scopes, типы токенов и discovery. Ошибка одного пути не требует привязывать Facebook Page для другого.
+
 ## Facebook Login -> Instagram Graph API
 
 Ошибка `Invalid platform app` обычно означает, что обычный Meta/Facebook App ID используется в Instagram Login URL. Для стандартного Meta App используйте Facebook Login:

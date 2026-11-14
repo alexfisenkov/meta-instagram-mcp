@@ -7,14 +7,15 @@ MCP для работы с собственным Instagram-аккаунтом �
 ## Что важно про доступ Meta
 
 - Доступ возможен только в рамках permissions, которые выдаст Meta App и подтвердит пользователь.
+- `META_AUTH_MODE=unified` поддерживает **API setup with Unified login**: Meta App ID/Secret, configuration ID, BISU и Facebook Graph без обязательной Facebook Page. Для своей Meta App доступен путь с тестовым токеном из Dashboard; OAuth из MCP требует HTTPS callback. Пошагово — [Unified Login](docs/unified-login.md).
 - `META_AUTH_MODE=facebook` использует Facebook Login + Instagram Graph API. Page-linked resolve требует Facebook Page permissions, но direct Instagram access может работать и без `/me/accounts`, если OAuth consent выдал доступ к конкретному professional account.
 - `META_AUTH_MODE=instagram` нужен для отдельного Instagram Login-приложения с Instagram App ID/Secret и scopes вроде `instagram_business_basic`, `instagram_business_manage_insights`, `instagram_business_manage_comments`.
 - Срок зависит от типа и способа выдачи токена. Проверяйте отдельно token expiry и data-access expiry; значение `0` в Meta debug response означает только отсутствие сообщённого срока, а не бессрочный доступ.
 - Официального "полного бесконечного доступа ко всему Instagram" нет. Этот MCP расширяемо читает то, что разрешают Meta permissions и текущий аккаунт.
 
-## Диагностика v0.2.8
+## Диагностика авторизации
 
-Обычный `meta_auth_status` (`{}` или `{"verify":false}`) читает локальные метаданные без новой проверки Meta или UI. `{"verify":true}` проверяет выбранный Facebook credential через один GET `debug_token` с общим лимитом 5 секунд, без retry, refresh или записи token-store. Environment token приоритетнее сохранённого; неподдержанный auth mode и неполная конфигурация дают безопасный reason code.
+Обычный `meta_auth_status` (`{}` или `{"verify":false}`) читает локальные метаданные без новой проверки Meta или UI. `{"verify":true}` проверяет выбранный Facebook или Unified credential через один GET `debug_token` с общим лимитом 5 секунд, без retry, refresh или записи token-store. Для Unified проверяются также SYSTEM_USER и сроки доступа. Environment token приоритетнее сохранённого; неподдержанный auth mode и неполная конфигурация дают безопасный reason code. `oauthSetup.ready/issues` отдельно показывает готовность запуска OAuth, без секретов и callback URL.
 
 В `authorization` раздельно показаны `tokenValid`, `appMatches`, scope names, `tokenExpiry` и `dataAccessExpiry`. Только `verification: "live"` относится к новой проверке. Последний proof хранится в памяти процесса и привязан к выбранным credentials; обычный вызов маркирует его `cached`, через 5 минут — `freshness: "stale"`. Это не подтверждает доступность конкретного API endpoint или UI. Legacy поля сохраняются; строки токенов теперь непрозрачны: `[redacted]`.
 
@@ -48,9 +49,9 @@ npm run test:native-registration
 - `meta_scope_presets` - показывает поддерживаемые OAuth scope presets.
 - `meta_build_login_url` - строит официальный OAuth login URL.
 - `meta_exchange_code` - legacy обмен без state binding, сохраняет только в пустой token-store. Для первичной и повторной авторизации используйте state-bound `meta_begin_oauth` и callback.
-- `meta_refresh_token` - обновляет long-lived token.
+- `meta_refresh_token` - обновляет long-lived token прежних login families; Unified сообщает о необходимости повторного входа.
 - `meta_list_facebook_pages` - показывает Facebook Pages, доступные Facebook Login token, и связанные Instagram Business accounts.
-- `meta_resolve_instagram_account` - сохраняет IG user id из связанной Facebook Page или из direct IG user id.
+- `meta_resolve_instagram_account` - сохраняет проверенный IG user id из Unified assigned assets, связанной Facebook Page или direct IG user id.
 - `meta_get_account_info` - читает account info.
 - `meta_list_media` - читает список media.
 - `meta_get_media` - читает один media object.
