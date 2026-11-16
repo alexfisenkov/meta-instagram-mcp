@@ -8,6 +8,79 @@ const contentScript = await readFile(resolve(root, "browser-extension/content-sc
 const accountBinding = "owner:alex";
 
 describe("Instagram content script against DOM fixtures", () => {
+  it.each(["account.inspect", "account.snapshot"])("returns a bounded visible own-profile snapshot through %s", async (op) => {
+    const result = await runProfileSnapshotFixture({ op, limit: 2 });
+    expect(result).toMatchObject({ availability: "ready", data: { username: "alexfisenkov", profile: {
+      availability: "ready", visibleOnly: true, coverage: "partial",
+      media: [
+        { href: "https://www.instagram.com/p/own-one/", kind: "post", alt: "Own visible image" },
+        { href: "https://www.instagram.com/reel/own-two/", kind: "reel", text: "Own visible reel" }
+      ]
+    } } });
+    expect(result.data.profile.summary).toContain("Visible biography");
+    expect(result.data.profile.summary).toContain("123 posts");
+    expect(result.data.profile.media).toHaveLength(2);
+    expect(JSON.stringify(result.data.profile)).not.toMatch(/PRIVATE-|HIDDEN-|Direct settings|Edit secret|BODY-SECRET/);
+    expect(result.data.profile).not.toHaveProperty("followers");
+    expect(result.data.profile).not.toHaveProperty("postCount");
+  });
+
+  it("caps the profile snapshot even when a large limit is requested", async () => {
+    const result = await runProfileSnapshotFixture({ limit: 10000, manyMedia: true, longBio: true });
+    expect(result.data.profile.media).toHaveLength(20);
+    expect(result.data.profile.summary.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("excludes offscreen media from the visible-only profile read", async () => {
+    const result = await runProfileSnapshotFixture({ limit: 10 });
+    expect(result.data.profile.media).toHaveLength(3);
+    expect(JSON.stringify(result.data.profile)).not.toContain("PRIVATE-OFFSCREEN");
+  });
+
+  it("accepts owner-prefixed media routes and rejects a different profile prefix", async () => {
+    const result = await runProfileSnapshotFixture({ ownerPrefixed: true, limit: 10 });
+    expect(result.data.profile.media).toEqual([
+      { href: "https://www.instagram.com/p/own-one/", kind: "post", alt: "Own visible image" },
+      { href: "https://www.instagram.com/reel/own-two/", kind: "reel", text: "Own visible reel" },
+      { href: "https://www.instagram.com/p/own-three/", kind: "post", text: "Third visible post" }
+    ]);
+    expect(JSON.stringify(result.data.profile)).not.toContain("FOREIGN-PREFIX");
+  });
+
+  it("reads a verified own profile with the explicit English Edit profile control", async () => {
+    const result = await runProfileSnapshotFixture({ editLabel: "Edit profile", limit: 2 });
+    expect(result).toMatchObject({ availability: "ready", data: { profile: { availability: "ready" } } });
+    expect(result.data.profile.media).toHaveLength(2);
+  });
+
+  it.each([
+    { editLabel: "Edit account" },
+    { editLabel: "Edit profile", editHref: "/differentowner/" },
+  ])("does not infer ownership from an unrelated edit control %#", async (options) => {
+    const result = await runProfileSnapshotFixture(options);
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "edit_marker_missing" }] });
+    expect(result.data).toBeUndefined();
+  });
+
+  it.each(["/otherprofile/", "/direct/inbox/", "/accounts/edit/", "/alexfisenkov/?view=other"])("does not scrape profile content from %s after owner proof", async (route) => {
+    const result = await runProfileSnapshotFixture({ route });
+    expect(result).toMatchObject({ availability: "ready", data: { username: "alexfisenkov", profile: { availability: "needs_profile_page", visibleOnly: true, coverage: "unknown" } } });
+    expect(result.data.profile).not.toHaveProperty("summary");
+    expect(result.data.profile).not.toHaveProperty("media");
+  });
+
+  it.each(["missing_owner", "login"])("does not expose content without owner proof: %s", async (mode) => {
+    const result = await runProfileSnapshotFixture({ mode });
+    expect(result).toMatchObject({ availability: "needs_selection", errors: [{ code: "owner_marker_missing" }] });
+    expect(result.data).toBeUndefined();
+  });
+
+  it("keeps unsupported own-profile DOM partial instead of reading whole-body text", async () => {
+    const result = await runProfileSnapshotFixture({ ambiguousHeader: true });
+    expect(result.data.profile).toMatchObject({ availability: "unsupported_ui_version", coverage: "unknown", visibleOnly: true });
+    expect(result.data.profile).not.toHaveProperty("summary");
+  });
+
   it("answers a readiness ping without inspecting the Instagram page", async () => {
     const page = new Window({ url: "https://www.instagram.com/direct/inbox/", settings: { disableJavaScriptEvaluation: false } });
     let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
@@ -982,6 +1055,58 @@ async function runHeaderMenuDecoyFixture() {
 function makeVisible(element: Element) {
   Object.defineProperty(element, "getBoundingClientRect", { value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 32, bottom: 32, width: 32, height: 32, toJSON: () => ({}) }) });
   Object.defineProperty(element, "getClientRects", { value: () => [{ length: 1 }] });
+}
+
+async function runProfileSnapshotFixture(options: { op?: string; limit?: number; route?: string; mode?: string; manyMedia?: boolean; longBio?: boolean; ambiguousHeader?: boolean; ownerPrefixed?: boolean; editLabel?: string; editHref?: string } = {}) {
+  const page = new Window({ url: "https://www.instagram.com/alexfisenkov/", settings: { disableJavaScriptEvaluation: false } });
+  page.document.write(`<!doctype html><html><body>
+    <div id="rail"><a role="link" href="/alexfisenkov/"><img alt="Profile picture of alexfisenkov"></a></div>
+    <div>BODY-SECRET unrelated text</div>
+    <main><header><h2>alexfisenkov</h2><a role="link" href="${options.editHref ?? "/accounts/edit/"}">${options.editLabel ?? "Редактировать профиль"}</a>
+      <span>123 posts</span><p>${options.longBio ? "Visible biography ".repeat(300) : "Visible biography"}</p>
+      <span hidden>HIDDEN-HEADER</span><span style="display:none">HIDDEN-STYLE</span>
+      <span style="visibility:hidden">HIDDEN-VISIBILITY</span><span style="opacity:0">HIDDEN-OPACITY</span>
+      <form><span>PRIVATE-FORM</span><input value="PRIVATE-INPUT"></form><div contenteditable="true">PRIVATE-EDITABLE</div>
+      <a href="/direct/inbox/">Direct settings</a><a href="/accounts/edit/">Edit secret</a>
+      <nav>PRIVATE-NAV</nav><div role="dialog">PRIVATE-DIALOG</div>
+    </header><article>
+      <a href="${options.ownerPrefixed ? "/alexfisenkov" : ""}/p/own-one/?img_index=1"><img alt="Own visible image"><img hidden alt="PRIVATE-HIDDEN-ALT"></a>
+      <a href="/p/own-one/">Duplicate first</a>
+      <a href="${options.ownerPrefixed ? "/alexfisenkov" : ""}/reel/own-two/">Own visible reel</a>
+      <a href="/differentowner/p/foreign-prefix/">FOREIGN-PREFIX</a>
+      <a hidden href="/p/hidden-own/">HIDDEN-LINK</a>
+      <div style="display:none"><a href="/p/hidden-parent/">HIDDEN-PARENT</a></div>
+      <div aria-hidden="true"><a href="/p/aria-hidden/">HIDDEN-ARIA</a></div>
+      <form><a href="/p/form-media/">PRIVATE-FORM-LINK</a></form>
+      <div role="dialog"><a href="/p/dialog-media/">PRIVATE-DIALOG-LINK</a></div>
+      <a href="https://foreign.example/p/not-instagram/">PRIVATE-FOREIGN</a>
+      <a id="offscreen" href="/p/offscreen-media/">PRIVATE-OFFSCREEN</a>
+      <a href="/p/own-three/">Third visible post</a>
+      ${options.manyMedia ? Array.from({ length: 30 }, (_, i) => `<a href="/p/extra-${i}/">Extra ${i}</a>`).join("") : ""}
+    </article></main></body></html>`);
+  page.document.close();
+  for (const element of page.document.querySelectorAll("*")) {
+    if (element.id === "offscreen") Object.defineProperty(element, "getBoundingClientRect", { value: () => ({ top: 10000, bottom: 10032, left: 0, right: 32, width: 32, height: 32 }) });
+    else makeVisible(element);
+  }
+  if (options.mode === "missing_owner" || options.mode === "login") page.document.querySelector("#rail")?.remove();
+  if (options.mode === "login") page.history.pushState({}, "", "/accounts/login/");
+  let listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined;
+  Object.defineProperty(page, "chrome", { value: { runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } });
+  page.eval(contentScript);
+  const request = { kind: "observe", accountBinding, expectedAccountHandle: "alexfisenkov", operation: { op: options.op ?? "account.inspect", limit: options.limit ?? 10 } };
+  try {
+    if (options.route || options.ambiguousHeader) {
+      await invoke(listener, request);
+      if (options.route) page.history.pushState({}, "", options.route);
+      if (options.ambiguousHeader) {
+        // A second semantic header without another Edit control makes only the snapshot ambiguous.
+        const header = page.document.createElement("header"); header.textContent = "PRIVATE-SECOND-HEADER";
+        page.document.querySelector("main")!.append(header); makeVisible(header);
+      }
+    }
+    return await invoke(listener, request);
+  } finally { page.happyDOM.abort(); }
 }
 
 function invoke(listener: ((message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean) | undefined, message: unknown) {

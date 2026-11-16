@@ -1,6 +1,6 @@
 # Подключить Instagram через Unified Login
 
-Если в Meta App Dashboard показано **API setup with Unified login**, выберите `META_AUTH_MODE=unified`. Этот режим использует Meta App ID/Secret, configuration ID и Business Integration System User token (BISU). Facebook Page не требуется. `instagram` и `facebook` остаются для соответствующих прежних настроек; тип приложения нельзя определить только по его названию.
+Сначала проверьте [доступность прямого Instagram Login или браузерного пути](connect-instagram.md). Если после проверки осознанно выбран **API setup with Unified login** и доступно требуемое portfolio, используйте `META_AUTH_MODE=unified`. Наличие окна Unified не делает его обязательным первым шагом. Этот режим использует Meta App ID/Secret, configuration ID и Business Integration System User token (BISU). Facebook Page не требуется. `instagram` и `facebook` остаются для соответствующих прежних настроек; тип приложения нельзя определить только по его названию.
 
 Нужен профессиональный Instagram Business/Creator и business portfolio. Для своей Meta App используйте её Development/test setup. Доступ сторонних пользователей требует соответствующих разрешений и допуска Meta; установка MCP сама по себе их не выдаёт.
 

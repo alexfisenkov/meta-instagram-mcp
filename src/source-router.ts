@@ -2,7 +2,7 @@ import type { Availability, HistoryCompleteness, MutationIntent, Observation, So
 import type { ApiReadRequest } from "./api-provider.js";
 import type { SourceReadContext } from "./read-context.js";
 
-export type ReadRequest = ApiReadRequest;
+export type ReadRequest = ApiReadRequest & { source?: "auto" | "api" | "browser" | "phone" };
 
 export interface SourceProvider {
   readonly source: Exclude<SourceId, "user_supplied">;
@@ -78,16 +78,25 @@ export function createSourceRouter(options: SourceRouterOptions): SourceRouter {
       const skippedSources: RoutedRead["skippedSources"] = [];
       const errors: RoutedRead["errors"] = [];
       const deadline = Date.now() + timeoutMs;
+      const selectedSource = request.source ?? "auto";
+      if (!["auto", ...PRIORITY].includes(selectedSource)) throw new Error("Unsupported read source.");
       const target = "target" in request ? request.target : undefined;
       if (target && (!target.accountBinding || !hasVerifiableIdentity(target))) {
         return emptyResult(observations, triedSources, [target], skippedSources, [{ source: "api", code: "needs_selection", message: "A native id or explicit owner reference is required for a selected target." }]);
       }
       const browserInboxRowRef = target?.explicitOwnerRef?.startsWith(BROWSER_INBOX_ROW_REF_PREFIX) ?? false;
+      if (browserInboxRowRef && selectedSource !== "auto" && selectedSource !== "browser") {
+        return emptyResult(observations, triedSources, [], skippedSources, [{ source: "browser", code: "browser_ref_source_mismatch", message: "The selected target belongs only to the browser source." }]);
+      }
       if (browserInboxRowRef && request.operation !== "conversation.read") {
         return emptyResult(observations, triedSources, [], skippedSources, [{ source: "browser", code: "browser_ref_read_only", message: "A browser inbox row reference is valid only for a selected conversation read." }]);
       }
 
-      const ordered = PRIORITY.map((source) => bySource.get(source)).filter((item): item is SourceProvider => Boolean(item)).slice(0, maxProviders);
+      if (selectedSource !== "auto" && !bySource.has(selectedSource)) {
+        return emptyResult(observations, triedSources, [], [{ source: selectedSource, reason: "Selected source is not configured." }], [{ source: selectedSource, code: "not_connected", message: "Selected source is not configured." }]);
+      }
+      const selectedPriority = selectedSource === "auto" ? PRIORITY : [selectedSource];
+      const ordered = selectedPriority.map((source) => bySource.get(source)).filter((item): item is SourceProvider => Boolean(item)).slice(0, maxProviders);
       for (let providerIndex = 0; providerIndex < ordered.length; providerIndex += 1) {
         const provider = ordered[providerIndex]!;
         if (browserInboxRowRef && provider.source !== "browser") {

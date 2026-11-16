@@ -132,7 +132,7 @@ async function assertHealthListenerStops(url) {
 async function assertRuntimeTools(client, transport) {
   await client.connect(transport);
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 27, "the portable wrapper must start the compiled server with all runtime tools");
+  assert.equal(listed.tools.length, 28, "the portable wrapper must start the compiled server with all runtime tools");
   const capabilities = await client.callTool({ name: "meta_capabilities", arguments: {} });
   const capabilityPayload = JSON.parse(capabilities.content?.filter((item) => item.type === "text").map((item) => item.text).join("\n") ?? "{}");
   assert.equal(capabilityPayload.sources?.length, 3, "runtime capabilities must report API, browser, and phone independently");

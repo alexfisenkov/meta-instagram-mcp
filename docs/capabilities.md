@@ -61,3 +61,9 @@ Media publishing остаётся отдельной legacy API операцие
 ## Portable Unified Login
 
 `META_AUTH_MODE=unified` добавляет BISU авторизацию, проверку App/SYSTEM_USER/expiry/target scopes и assigned Instagram assets без Facebook Page. Инструкция — [Unified Login](unified-login.md). Локальная конфигурация и синтетические tests не подтверждают App Review или реальный доступ аккаунта. Unified private replies и Direct reactions пока закрыты; обычные guarded действия не включаются самим обновлением.
+
+## Выбор подключения и локальный Chrome
+
+`meta_connection_plan` даёт offline план: сначала проверить direct Instagram setup, отдельно browser без Meta App, затем conditional Unified/legacy Facebook. Он не проверяет Dashboard, не создаёт credentials/portfolio и не делает login. Публичный portable каталог теперь28 инструментов; private cloud allowlist этим автоматически не расширяется. `meta_read_source` принимает source:auto|api|browser|phone; явный источник не переключается при отказе.
+
+Direct exchange принимает flat/single wrapped grants и проверяет профессиональный user_id свежим /me. Dashboard token не доказывает scopes/App match; они остаются unknown без отдельной проверки. В Chrome account.inspect может дополнительно читать видимый header и ссылки собственного профиля, coverage partial. Отсутствие полного Insights/архива остаётся явным. Local-only HTTP browser bridge opt-in защищён bearer и точным origin/loopback, remote по-прежнему HTTPS.

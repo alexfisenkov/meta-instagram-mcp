@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — 2026-11-16
+
+- Новый offline read-only `meta_connection_plan`: сначала проверка доступного direct Instagram setup, отдельный browser путь без Meta App, conditional Unified и сохранение работающих legacy подключений. Конфигурация и caller observations не выдаются за live eligibility.
+- Direct Instagram Login теперь принимает flat либо однозначный wrapped short grant, Boolean URL parameters, actual permission CSV/array и fresh профессиональный user_id; прежние scope labels при reauth не наследуются. Добавлен корректный resolver для локально введённого Dashboard token без App Secret.
+- Миграция legacy app-scoped привязки сверяется со свежими id/user_id перед CAS; новые прямые привязки помечаются профессиональными. Stateful resolver больше не объявлен read-only, planner заранее объясняет конфликт environment/store credentials.
+- Windows registry preflight отказывает при неизвестном состоянии, использует UTF-8 .NET reader и не force-overwrites чужое значение; local browser bearer не открывает общий MCP/OAuth/webhook/phone endpoint.
+- Свежий template возвращён к прямому Instagram Login и минимальным scopes; инструкции и copy prompt больше не ведут всех сразу в business portfolio.
+- Local Chrome setup dry-run/apply: приватный bearer/config, preflight чужих registrations, Windows published EXE checksum без .NET. Stdio и защищённый loopback Hub используют один runtime. Remote HTTPS policy сохраняется; production HTTP разрешён только exact local browser bridge.
+- Явный source selector в `meta_read_source`; browser account.inspect дополнительно возвращает ограниченный видимый снимок своего profile и media links, без claims полного архива или Insights. Поддержаны RU/EN edit markers и owner-prefixed media links.
+- Документация разделяет UI/fixture/runtime/live acceptance; новая личная OAuth/Chrome регистрация не считается проверенной только по тестам. Writes по умолчанию не включаются.
+
 ## 0.3.0 — 2026-11-14
 
 ### Локальный MCP: Unified Login

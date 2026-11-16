@@ -67,13 +67,95 @@
     if (!READ_OPS.has(operation.op)) return failure(accountBinding, "unsupported", "operation is not allowlisted");
 
     if (operation.op === "account.inspect" || operation.op === "account.snapshot") {
-      return observation(accountBinding, { username, accountBinding, loggedIn: true, surface: "instagram", capabilities: LIVE_CAPABILITIES }, "ready", "complete", "not_applicable", []);
+      return observation(accountBinding, { username, accountBinding, loggedIn: true, surface: "instagram", capabilities: LIVE_CAPABILITIES,
+        profile: readVisibleOwnProfile(username, operation.limit) }, "ready", "complete", "not_applicable", []);
     }
     if (operation.op === "inbox.list") return readInbox(accountBinding, username, operation.limit);
     if (operation.op === "thread.read" || operation.op === "thread.scroll_older") return readThread(accountBinding, username, operation, message.taskExpiresAt);
     if (operation.op === "comments.list" || operation.op === "comments.replies") return readComments(accountBinding, username, operation);
     if (operation.op === "insights.read") return failure(accountBinding, "unsupported_ui_version", "insights semantic controls are not verified");
     return failure(accountBinding, "unsupported", "operation is not allowlisted");
+  }
+
+  /** The owner proof above is necessary but does not make the current route an own-profile page. */
+  function readVisibleOwnProfile(username, requestedLimit) {
+    const base = { visibleOnly: true, coverage: "unknown" };
+    if (!isExpectedProfilePath(username)) return { ...base, availability: "needs_profile_page",
+      limitations: ["open_the_verified_own_profile_page"] };
+    const mains = Array.from(document.querySelectorAll("main")).filter(isProfileVisible);
+    if (mains.length !== 1) return { ...base, availability: "unsupported_ui_version", limitations: ["unique_profile_main_required"] };
+    const main = mains[0];
+    const headers = Array.from(main.querySelectorAll("header")).filter(isProfileVisible);
+    if (headers.length !== 1) return { ...base, availability: "unsupported_ui_version", limitations: ["unique_profile_header_required"] };
+    const header = headers[0];
+    const ownEditControls = Array.from(header.querySelectorAll('a[role="link"][href]')).filter((element) => {
+      const url = safeInstagramUrl(element.href);
+      return isProfileVisible(element) && !element.hasAttribute("aria-label") && !element.hasAttribute("title")
+        && url && !url.username && !url.password && !url.port && !url.search && !url.hash && url.pathname === "/accounts/edit/"
+        && isOwnEditProfileLabel(element.textContent);
+    });
+    if (ownEditControls.length !== 1) return { ...base, availability: "unsupported_ui_version", limitations: ["own_profile_header_required"] };
+    const limit = boundedInteger(requestedLimit, 1, 20, 12);
+    const media = [];
+    const seen = new Set();
+    let scanned = 0;
+    for (const anchor of main.querySelectorAll("a[href]")) {
+      if (++scanned > 2000 || media.length >= limit) break;
+      if (!isProfileVisible(anchor) || anchor.closest("header, nav, aside") || excludedProfileContent(anchor)) continue;
+      const url = safeInstagramUrl(anchor.href);
+      const match = url?.pathname.match(/^\/(?:([A-Za-z0-9._]{1,30})\/)?(p|reel)\/([A-Za-z0-9_-]{1,128})\/?$/);
+      if (!match || (match[1] && match[1].toLowerCase() !== username.toLowerCase()) || url.username || url.password || url.port || seen.has(match[3])) continue;
+      seen.add(match[3]);
+      const image = Array.from(anchor.querySelectorAll("img[alt]")).find((element) => isProfileVisible(element) && !excludedProfileContent(element));
+      const alt = image ? cleanText(image.getAttribute("alt"), 400) : "";
+      const text = visibleProfileText(anchor, 400);
+      media.push({ href: `https://www.instagram.com/${match[2]}/${match[3]}/`, kind: match[2] === "p" ? "post" : "reel",
+        ...(alt ? { alt } : {}), ...(text ? { text } : {}) });
+    }
+    return { availability: "ready", visibleOnly: true, coverage: "partial", summary: visibleProfileText(header, 2000), media,
+      limitations: ["visible_profile_only", "media_links_not_author_verification", "no_metrics_inferred", "not_full_history"] };
+  }
+
+  function isProfileVisible(element) {
+    if (!isVisible(element)) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) <= 0) return false;
+    }
+    return true;
+  }
+
+  function excludedProfileContent(element) {
+    if (element.closest('form, input, textarea, select, button, script, style, template, noscript, nav, aside, [role="dialog"], [role="button"], [role="menu"], [role="menuitem"], [role="searchbox"], [aria-modal="true"], [role="textbox"], [contenteditable="true"]')) return true;
+    const anchor = element.closest("a[href]");
+    const path = anchor && safeInstagramUrl(anchor.href)?.pathname;
+    return Boolean(path && /^\/(?:accounts|direct)(?:\/|$)/.test(path));
+  }
+
+  /** Read text nodes from the chosen semantic region, never body text, form values or hidden controls. */
+  function visibleProfileText(root, max) {
+    const parts = [];
+    let visited = 0;
+    let length = 0;
+    function visit(node) {
+      if (++visited > 600 || length >= max) return;
+      if (node.nodeType === 3) {
+        const parent = node.parentElement;
+        if (!parent || !isProfileVisible(parent) || excludedProfileContent(parent)) return;
+        const text = cleanText(node.textContent, max - length);
+        if (text) { parts.push(text); length += text.length + 1; }
+        return;
+      }
+      if (node.nodeType !== 1 || !isProfileVisible(node) || excludedProfileContent(node)) return;
+      for (const child of node.childNodes) {
+        if (visited >= 600 || length >= max) break;
+        visit(child);
+      }
+    }
+    visit(root);
+    return cleanText(parts.join(" "), max);
   }
 
   function readInbox(accountBinding, username, requestedLimit) {
@@ -663,8 +745,12 @@
       return url && !url.username && !url.password && !url.port && url.pathname === "/accounts/edit/" && !url.search && !url.hash;
     });
     if (controls.length > 1) return "edit_marker_ambiguous";
-    if (controls.length === 0 || cleanText(controls[0].textContent, 128).toLowerCase() !== "редактировать профиль") return "edit_marker_missing";
+    if (controls.length === 0 || !isOwnEditProfileLabel(controls[0].textContent)) return "edit_marker_missing";
     return undefined;
+  }
+
+  function isOwnEditProfileLabel(value) {
+    return ["редактировать профиль", "edit profile"].includes(cleanText(value, 128).toLowerCase());
   }
 
   function isVisible(element) {

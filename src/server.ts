@@ -11,6 +11,9 @@ export function createServer(options: RuntimeOptions = {}) {
 }
 
 async function main(): Promise<void> {
+  const bridgeFlag = process.env.INSTAGRAM_MCP_BROWSER_BRIDGE;
+  if (bridgeFlag !== undefined && bridgeFlag !== "" && bridgeFlag !== "true" && bridgeFlag !== "false") throw new Error("BROWSER_BRIDGE_FLAG_INVALID");
+  if (bridgeFlag === "true" && process.env.INSTAGRAM_MCP_TRANSPORT && process.env.INSTAGRAM_MCP_TRANSPORT !== "stdio") throw new Error("BROWSER_BRIDGE_TRANSPORT_CONFLICT");
   const runtime = createRuntime();
   await runtime.initialize();
   if (process.env.INSTAGRAM_MCP_TRANSPORT === "http") {
@@ -22,14 +25,30 @@ async function main(): Promise<void> {
     process.once("SIGTERM", shutdown);
     return;
   }
+  const listener = bridgeFlag === "true" ? await runtime.startHttpServer({ ...loadHttpOptionsFromEnv(), browserBridgeOnly: true }) : undefined;
   const transport = new StdioServerTransport();
-  await runtime.createMcpServer().connect(transport);
-  console.error("meta-instagram-mcp running on stdio");
+  const server = runtime.createMcpServer();
+  let closing = false;
+  const shutdown = () => {
+    if (closing) return;
+    closing = true;
+    void Promise.allSettled([server.close(), ...(listener ? [listener.close()] : [])]).then((results) => {
+      process.exit(results.some((result) => result.status === "rejected") ? 1 : 0);
+    });
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  process.stdin.once("end", shutdown);
+  process.stdin.once("error", shutdown);
+  server.server.onclose = shutdown;
+  try { await server.connect(transport); }
+  catch (error) { await listener?.close().catch(() => undefined); throw error; }
+  console.error(listener ? "meta-instagram-mcp running on stdio with a private loopback browser bridge" : "meta-instagram-mcp running on stdio");
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.name : "server startup failed");
+    console.error(error instanceof Error ? (/^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : error.name) : "server startup failed");
     process.exit(1);
   });
 }

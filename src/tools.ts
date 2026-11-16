@@ -12,12 +12,13 @@ import {
   type AuthMode,
   type OAuthToken
 } from "./oauth.js";
-import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
+import { verifyDirectInstagramToken, verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 import { oauthSetupStatus } from "./oauth-setup.js";
 import { createPublishHandlers } from "./publish.js";
 import { captureRuntimeStatus, type RuntimeStatus } from "./runtime-status.js";
 import { createAuthorizationStatus } from "./authorization-status.js";
 import { readOperationalContext } from "./operational-context.js";
+import { buildConnectionPlan, type ConnectionPlanInput } from "./connection-plan.js";
 import { loadStoredToken, sameStoredTokenSnapshot, saveStoredToken, withTokenStoreLock, type StoredInstagramToken, type TokenStoreTransaction } from "./token-store.js";
 
 interface TokenStore {
@@ -83,11 +84,11 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     })
   });
 
-  async function resolveToken(explicitToken?: string, tokenStore: Pick<TokenStoreTransaction, "load"> = store): Promise<ResolvedToken> {
+  async function resolveToken(explicitToken?: string, tokenStore: Pick<TokenStoreTransaction, "load"> = store, bindStoredIdentity = true): Promise<ResolvedToken> {
     if (explicitToken) return { accessToken: explicitToken, authMode: dependencies.config.authMode };
     if (dependencies.config.accessToken) {
-      const stored = dependencies.config.authMode === "unified" ? await tokenStore.load() : undefined;
-      const bound = stored?.authMode === "unified" && stored.accessToken && sameSecret(stored.accessToken, dependencies.config.accessToken)
+      const stored = bindStoredIdentity && dependencies.config.authMode !== "facebook" ? await tokenStore.load() : undefined;
+      const bound = stored?.authMode === dependencies.config.authMode && stored.accessToken && sameSecret(stored.accessToken, dependencies.config.accessToken)
         ? stored : undefined;
       return {
         accessToken: dependencies.config.accessToken,
@@ -126,6 +127,19 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     apiProvider,
     createMediaContainer: publish.createMediaContainer,
     publishMedia: publish.publishMedia,
+
+    async connectionPlan(input: ConnectionPlanInput = {}) {
+      let tokenStoreUnavailable = false;
+      const stored = await store.load().catch(() => { tokenStoreUnavailable = true; return undefined; });
+      const savedAuthMode = stored?.authMode && ["instagram", "facebook", "unified"].includes(stored.authMode) ? stored.authMode : undefined;
+      return buildConnectionPlan(dependencies.config, input, {
+        hasSavedToken: typeof stored?.accessToken === "string" && stored.accessToken.length > 0,
+        savedAuthMode, tokenStoreUnavailable,
+        credentialStoreConflict: Boolean(dependencies.config.accessToken && stored &&
+          (typeof stored.accessToken !== "string" || !sameSecret(stored.accessToken, dependencies.config.accessToken))),
+        browserBridgeConfigured: process.env.INSTAGRAM_MCP_BROWSER_BRIDGE === "true"
+      });
+    },
 
     async authStatus(args: { verify?: boolean } = {}) {
       let storeUnavailable = false;
@@ -254,6 +268,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
           await tokenStore.save({
             ...token,
             userId: identity.userId,
+            ...(dependencies.config.authMode === "instagram" ? { identityKind: "instagram_professional_user_id" as const } : {}),
             ...(identity.pageId ? { pageId: identity.pageId } : {}),
           } as StoredInstagramToken);
           return redactStoredToken({ ...token, userId: identity.userId, ...(identity.pageId ? { pageId: identity.pageId } : {}) });
@@ -266,7 +281,7 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     async refreshToken(args: ToolArgs = {}) {
       const save = args.save ?? true;
       const refresh = async (tokenStore: TokenStoreTransaction) => {
-        const resolved = await resolveToken(args.accessToken, tokenStore);
+        const resolved = await resolveToken(args.accessToken, tokenStore, false);
         const current = save ? resolved.stored ?? await tokenStore.load() : resolved.stored;
         if (save && current && (!current.accessToken || !sameSecret(resolved.accessToken, current.accessToken))) {
           throw new Error("TOKEN_STORE_NOT_EMPTY: the supplied refresh token does not match the active token store.");
@@ -402,12 +417,30 @@ export function createToolHandlers(dependencies: ToolDependencies) {
     async resolveInstagramAccount(args: ToolArgs = {}) {
       const save = args.save ?? true;
       const resolve = async (tokenStore: TokenStoreTransaction) => {
-        const resolved = await resolveToken(args.accessToken, tokenStore);
+        const resolved = await resolveToken(args.accessToken, tokenStore, false);
         const current = save ? resolved.stored ?? await tokenStore.load() : resolved.stored;
         if (save && current && (!current.accessToken || !sameSecret(resolved.accessToken, current.accessToken))) {
           throw new Error("TOKEN_STORE_NOT_EMPTY: account resolution must use the active token store.");
         }
         if (dependencies.config.authMode === "unified" && resolved.authMode !== "unified") throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+        if (resolved.authMode === "instagram") {
+          if (current?.authMode && current.authMode !== "instagram") throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
+          if (args.pageId || resolved.pageId || dependencies.config.pageId) throw new Error("INSTAGRAM_FACEBOOK_PAGE_UNSUPPORTED");
+          const legacyAccountId = current?.userId && current.identityKind !== "instagram_professional_user_id" ? current.userId : undefined;
+          const expectedAccountId = dependencies.config.userId ?? (legacyAccountId ? undefined : current?.userId)
+            ?? (args.userId === legacyAccountId ? undefined : args.userId);
+          if (args.userId && expectedAccountId && args.userId !== expectedAccountId) throw new Error("TOKEN_STORE_IDENTITY_MISMATCH");
+          const { accessToken } = resolved;
+          const identity = await verifyDirectInstagramToken(dependencies.config, accessToken,
+            { ...(expectedAccountId ? { expectedAccountId } : {}), ...(legacyAccountId ? { expectedLegacyAccountId: legacyAccountId } : {}) }, () => makeClient(accessToken, "instagram"));
+          if (save) {
+            if (!sameStoredTokenSnapshot(current, await tokenStore.load())) throw new Error("TOKEN_STORE_CHANGED");
+            await tokenStore.save({ ...current, accessToken, authMode: "instagram", tokenType: current?.tokenType ?? "bearer",
+              userId: identity.userId, username: identity.username, permissions: undefined, identityKind: "instagram_professional_user_id" });
+          }
+          return { authMode: "instagram", resolutionMode: "direct_instagram_login", permissionsVerification: "unknown",
+            instagramBusinessAccount: { user_id: identity.userId, username: identity.username }, saved: save };
+        }
         if (resolved.authMode === "unified") {
           if (current?.authMode && current.authMode !== "unified") throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
           if (args.pageId || resolved.pageId || dependencies.config.pageId) throw new Error("UNIFIED_FACEBOOK_PAGE_UNSUPPORTED");

@@ -1,6 +1,6 @@
 # Карта проекта
 
-Обновлено: 2026-11-05.
+Обновлено: 2026-11-16.
 
 ## Как читать репозиторий
 
@@ -59,9 +59,9 @@ Hosted multi-user: `src/student-server.ts` — отдельный entrypoint; `s
 
 | Путь | Слой | Назначение |
 |---|---|---|
-| `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes, находит token store path, редактирует tokens. |
+| `src/config.ts` | Config | Читает `.env`/environment, парсит auth mode/scopes и находит token-store path; сами credentials сохраняются отдельным storage слоем. |
 | `src/runtime-status.ts` | Startup identity | Фиксирует package version и валидированный installer/server revision; не проверяет целостность файлов. |
-| `src/authorization-status.ts` | Read-only status verification | Bounded Facebook debug GET, безопасная проекция expiry/scopes и private credential-bound in-memory cache. |
+| `src/authorization-status.ts` | Read-only status verification | Bounded Facebook/Unified debug GET, безопасная проекция expiry/scopes и private credential-bound in-memory cache. |
 | `src/operational-context.ts` | Private config projection | Возвращает только разрешённые public legal URLs и manual/unknown workflow. |
 | `src/read-context.ts` | Read execution context | Carries an advisory provider deadline/signal; underlying cancellation is operation-specific (currently Direct triage and companion queue reads). |
 | `src/private-fs.ts` | Local storage safety | Создаёт и проверяет приватные файлы/каталоги по POSIX mode или защищённому Windows DACL; выполняет path-containment проверки средствами текущей ОС. |
@@ -92,7 +92,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 | `meta_exchange_code` | Legacy-путь для пустого token-store; existing store отклоняется до обмена. Для reauth используйте `meta_begin_oauth` и callback. |
 | `meta_refresh_token` | Обновляет текущий long-lived token и опционально сохраняет. |
 | `meta_list_facebook_pages` | Показывает Pages, доступные Facebook token. |
-| `meta_resolve_instagram_account` | Сохраняет IG user id из Page-linked account или direct `userId`. |
+| `meta_resolve_instagram_account` | Проверяет direct professional identity/legacy mapping либо Unified/Page-linked account и по умолчанию сохраняет привязку (stateful). |
 | `meta_get_account_info` | Читает account metadata. |
 | `meta_list_media` | Читает media list. |
 | `meta_get_media` | Читает один media object. |
@@ -184,3 +184,7 @@ Legacy API tools remain available alongside layered and mutation tools from the 
 ## Unified Login в portable MCP
 
 `docs/unified-login.md` — обновление, Meta Dashboard test token, HTTPS callback, выбор account и границы login challenge. `tests/unified-oauth.test.ts`, `tests/unified-context.test.ts`, `tests/portable-unified-runtime.test.ts` проверяют provider, state/grants/identity, host/domain routing и runtime/callback/CLI. `tools/test-installer.mjs` дополнительно загружает неизменённый `.env.example`, чтобы параметры hosted broker не ломали свежую portable установку.
+
+## Direct-first и browser local (v0.4.0)
+
+`src/connection-plan.ts` — offline выбор пути; `meta_connection_plan` регистрируется в mcp-server.ts, handler только читает приватные metadata. `docs/connect-instagram.md` — вход ученика и copy prompt; `docs/direct-instagram-login.md` — direct Dashboard/OAuth; `docs/browser-only.md` — local Chrome setup. `tools/browser-setup.mjs` и `tools/cli.mjs browser-setup` — dry-run/apply/private config/host guards; `src/server.ts` обслуживает stdio+opt-in loopback Hub одним runtime. Source selector — source-router.ts. Новые tests: connection-plan, direct-instagram-oauth/tools, local-browser-bridge; standalone `npm run test:browser-setup`.

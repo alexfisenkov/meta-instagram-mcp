@@ -64,27 +64,28 @@ describe("meta_exchange_code safety", () => {
     httpMock.mockReset();
     httpMock
       .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-lived-token", user_id: "ig-account" }))
-      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-lived-private-token", expires_in: 3600 }));
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "sample-long-lived-token", expires_in: 3600 }));
     const subject = handlers({ accessToken: "existing-private-token", userId: "existing-account" });
 
     const result = await subject.handlers.exchangeCode({ code: "fixture-code", save: false });
 
     expect(subject.load).not.toHaveBeenCalled();
     expect(subject.save).not.toHaveBeenCalled();
-    expect(result.accessToken).not.toBe("long-lived-private-token");
-    expect(JSON.stringify(result)).not.toContain("long-lived-private-token");
+    expect(result.accessToken).not.toBe("sample-long-lived-token");
+    expect(JSON.stringify(result)).not.toContain("sample-long-lived-token");
   });
 
   it("retains first-install save behavior when the token store is empty", async () => {
     httpMock.mockReset();
     httpMock
       .mockResolvedValueOnce(jsonHttpResponse({ access_token: "short-lived-token", user_id: "ig-account" }))
-      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "long-lived-private-token", expires_in: 3600 }));
+      .mockResolvedValueOnce(jsonHttpResponse({ access_token: "sample-long-lived-token", expires_in: 3600 }))
+      .mockResolvedValueOnce(jsonHttpResponse({ user_id: "ig-account", username: "creator" }));
     const subject = handlers(undefined);
 
     await subject.handlers.exchangeCode({ code: "fixture-code" });
 
-    expect(httpMock).toHaveBeenCalledTimes(2);
+    expect(httpMock).toHaveBeenCalledTimes(3);
     expect(subject.save).toHaveBeenCalledWith(expect.objectContaining({ userId: "ig-account" }));
   });
 

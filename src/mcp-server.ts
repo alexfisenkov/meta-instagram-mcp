@@ -19,6 +19,20 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     version: packageVersion
   });
 
+  server.registerTool("meta_connection_plan", {
+    title: "Choose Instagram Connection",
+    description: "Start here before configuring Instagram. Offline direct-Instagram-first setup plan, separate local browser option without a Meta app, and conditional Unified/Facebook routes. Dashboard observations are caller-supplied, not verified eligibility. Never creates business portfolios, invites, credentials, login, or config changes; keep working connections.",
+    inputSchema: z.object({
+      directInstagramSetup: z.enum(["unknown", "available", "unavailable"]).optional(),
+      unifiedSetup: z.enum(["unknown", "available", "unavailable"]).optional(),
+      businessPortfolio: z.enum(["unknown", "available", "blocked"]).optional(),
+      preferredSource: z.enum(["auto", "browser"]).optional(),
+      existingBrowserControl: z.enum(["unknown", "available", "unavailable"]).optional(),
+      existingConnectionWorking: z.boolean().optional()
+    }).strict(),
+    annotations: { readOnlyHint: true }
+  }, async (args) => jsonToolResult(await handlers.connectionPlan(args)));
+
   server.registerTool(
     "meta_auth_status",
     {
@@ -230,14 +244,14 @@ export function createMcpServer(handlers: ExistingToolHandlers = createToolHandl
     "meta_resolve_instagram_account",
     {
       title: "Resolve Instagram Account",
-      description: "Resolve and save the Instagram account for later Graph calls from the configured credential. Unified verifies the Meta app, SYSTEM_USER grants, and assigned Instagram assets; use userId to select one of multiple granted accounts. Facebook Login supports Page-linked accounts. Prefer credentials entered in private local config, never in chat.",
+      description: "Verify the Instagram identity and, by default, SAVE its binding in the private token store. Set save=false for a read-only preview. Direct Login verifies professional user_id via /me; Unified verifies its App, SYSTEM_USER grants and assigned assets; Facebook Login supports Page-linked accounts. Never enter tokens in chat.",
       inputSchema: z.object({
         accessToken: z.string().optional(),
         pageId: z.string().optional(),
         userId: z.string().optional(),
         save: z.boolean().optional()
       }),
-      annotations: { readOnlyHint: true }
+      annotations: { readOnlyHint: false }
     },
     async (args) => jsonToolResult(await handlers.resolveInstagramAccount(args))
   );
@@ -325,7 +339,7 @@ function registerLayeredTools(server: McpServer, handlers: LayeredToolHandlers):
   server.registerTool("meta_read_source", {
     title: "Read selected Instagram source data",
     description: "Read one bounded inbox, selected conversation (including an older API cursor), comments, replies, or insights request through the configured API→browser→phone router. UI conversation reads may mark messages seen; the observation reports that side effect. Imported observations are never accepted as fresh mutation context.",
-    inputSchema: z.object({ operation: z.enum(["account.inspect", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"]), target: z.object({ accountBinding: z.string().min(1).max(128), nativeId: z.string().max(512).optional(), instagramUrl: z.string().max(2048).optional(), explicitOwnerRef: z.string().max(512).optional() }).optional(), limit: z.number().int().min(1).max(100).optional(), cursor: z.string().max(2048).optional(), olderCursor: z.string().max(2048).optional(), period: z.string().max(64).optional() }),
+    inputSchema: z.object({ operation: z.enum(["account.inspect", "inbox.list", "conversation.read", "comments.list", "comments.replies", "insights.read"]), source: z.enum(["auto", "api", "browser", "phone"]).optional(), target: z.object({ accountBinding: z.string().min(1).max(128), nativeId: z.string().max(512).optional(), instagramUrl: z.string().max(2048).optional(), explicitOwnerRef: z.string().max(512).optional() }).optional(), limit: z.number().int().min(1).max(100).optional(), cursor: z.string().max(2048).optional(), olderCursor: z.string().max(2048).optional(), period: z.string().max(64).optional() }).strict(),
     annotations: { readOnlyHint: false }
   }, async (args) => jsonToolResult(await handlers.readSource(args as Parameters<LayeredToolHandlers["readSource"]>[0])));
   server.registerTool("meta_read_inbox", {

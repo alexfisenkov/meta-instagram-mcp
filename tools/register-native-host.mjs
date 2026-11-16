@@ -56,7 +56,8 @@ export function getRegistrationPaths({ platform, home, localAppData, installRoot
       hostPath,
       manifestPath: join(localAppData ?? join(home, "AppData", "Local"), "MetaInstagramCompanion", "native-host.json"),
       registryKey: `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`,
-      markerPath: join(localAppData ?? join(home, "AppData", "Local"), "MetaInstagramCompanion", markerName)
+      markerPath: join(localAppData ?? join(home, "AppData", "Local"), "MetaInstagramCompanion", markerName),
+      configFile: join(localAppData ?? join(home, "AppData", "Local"), "MetaInstagramCompanion", "browser-bridge.json")
     };
   }
   if (!configFile || !isAbsolute(configFile)) fail("CONFIG_PATH_MUST_BE_ABSOLUTE");
@@ -147,8 +148,9 @@ async function sha256(value) {
 
 /** Writes a per-user Chrome manifest/launcher. registryAdapter is used only by isolated Windows fixtures. */
 export async function registerNativeHost({ platform, home, installRoot, configFile, extensionId, nodePath = process.execPath,
-  localAppData = process.env.LOCALAPPDATA, registryAdapter = defaultRegistryAdapter(), dryRun = false, pathsOverride } = {}) {
+  localAppData = process.env.LOCALAPPDATA, registryAdapter = defaultRegistryAdapter(), dryRun = false, pathsOverride, pendingConfig = false } = {}) {
   const os = osPlatform(platform ?? process.platform);
+  if (pendingConfig && !dryRun) fail("PENDING_CONFIG_REQUIRES_DRY_RUN");
   if (!/^[a-p]{32}$/.test(extensionId ?? "")) fail("INVALID_EXTENSION_ID");
   if (!isAbsolute(installRoot ?? "")) fail("INSTALL_ROOT_MUST_BE_ABSOLUTE");
   const resolvedHome = resolve(home ?? homedir());
@@ -162,41 +164,40 @@ export async function registerNativeHost({ platform, home, installRoot, configFi
   if (!pathsOverride && os !== "windows") paths.hostScript = join(root, "dist", "companion", "browser-native-host.js");
   if (os === "windows") {
     await assertRegularPrivateFile(paths.hostPath, "WINDOWS_HOST_MISSING", { privateMode: false });
+    if (configFile && resolve(configFile) !== resolve(paths.configFile)) fail("WINDOWS_BRIDGE_CONFIG_PATH_FIXED");
     await registryAdapter.ensureOwnedOrEmpty(paths.registryKey, paths.manifestPath);
   } else {
-    await assertRegularPrivateFile(paths.configFile, "BRIDGE_CONFIG_MISSING");
     await assertRegularPrivateFile(paths.hostScript, "HOST_SCRIPT_MISSING", { privateMode: false });
     if (!isAbsolute(paths.nodePath) || !isAbsolute(paths.hostScript)) fail("HOST_PATH_MUST_BE_ABSOLUTE");
+  }
+  let missingConfig = false;
+  try { await lstat(paths.configFile); } catch (error) { if (error?.code === "ENOENT") missingConfig = true; else fail("BRIDGE_CONFIG_MISSING"); }
+  if (missingConfig && dryRun && pendingConfig) await assertDirectoryNoSymlink(dirname(paths.configFile));
+  else {
+    await assertRegularPrivateFile(paths.configFile, "BRIDGE_CONFIG_MISSING");
+    if (os === "windows" && process.platform === "win32") {
+      const { assertPrivateFile } = await import("../dist/private-fs.js");
+      await assertPrivateFile(paths.configFile);
+    }
   }
   const manifest = buildNativeManifest({ platform: os, extensionId, hostPath: paths.hostPath });
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
   const plan = { hostName: HOST_NAME, manifestPath: paths.manifestPath, hostPath: paths.hostPath,
     allowedOrigin: manifest.allowed_origins[0], ...(os === "windows" ? { registryKey: paths.registryKey } : {}) };
-  if (dryRun) return { plan, manifest };
-
   const manifestDir = await assertDirectoryNoSymlink(dirname(paths.manifestPath));
   const privateDir = await assertDirectoryNoSymlink(dirname(paths.markerPath));
-  await mkdir(manifestDir, { recursive: true, mode: 0o700 });
-  await mkdir(privateDir, { recursive: true, mode: 0o700 });
   const manifestFile = join(manifestDir, paths.manifestPath.slice(dirname(paths.manifestPath).length + 1));
-  const marker = JSON.stringify({ owner: "meta-instagram-mcp", manifestPath: manifestFile,
-    manifestSha256: await sha256(manifestText), hostName: HOST_NAME }, null, 2) + "\n";
   const markerState = await readMarker(paths.markerPath);
   await assertOwnedOrAbsent(manifestFile, markerState);
+  const launcher = os !== "windows" ? launcherText({ nodePath: paths.nodePath, hostScript: paths.hostScript, configFile: paths.configFile, extensionId }) : undefined;
+  const priorLauncher = launcher === undefined ? undefined : await readOwnedLauncher(paths.hostPath, markerState, manifestFile, launcher);
+  if (dryRun) return { plan, manifest };
+
+  await mkdir(manifestDir, { recursive: true, mode: 0o700 });
+  await mkdir(privateDir, { recursive: true, mode: 0o700 });
+  const marker = JSON.stringify({ owner: "meta-instagram-mcp", manifestPath: manifestFile,
+    manifestSha256: await sha256(manifestText), hostName: HOST_NAME, ...(launcher ? { launcherSha256: await sha256(launcher) } : {}) }, null, 2) + "\n";
   if (os !== "windows") {
-    const launcher = launcherText({ nodePath: paths.nodePath, hostScript: paths.hostScript, configFile: paths.configFile, extensionId });
-    let priorLauncher;
-    try {
-      const info = await lstat(paths.hostPath);
-      if (!info.isFile() || info.isSymbolicLink()) fail("EXISTING_LAUNCHER_CONFLICT");
-      priorLauncher = await readFile(paths.hostPath, "utf8");
-    } catch (error) {
-      if (error?.code !== "ENOENT") {
-        if (error instanceof Error && error.message === "EXISTING_LAUNCHER_CONFLICT") throw error;
-        fail("REGISTRATION_READ_FAILED");
-      }
-    }
-    if (priorLauncher !== undefined && (!markerState || markerState.manifestPath !== manifestFile)) fail("EXISTING_LAUNCHER_CONFLICT");
     if (priorLauncher !== undefined) {
       const backup = `${paths.hostPath}.backup.${new Date().toISOString().replaceAll(/[:.]/g, "-")}`;
       await copyFile(paths.hostPath, backup);
@@ -219,20 +220,60 @@ export async function registerNativeHost({ platform, home, installRoot, configFi
   return { plan };
 }
 
-function defaultRegistryAdapter() {
+const registryReadScript = [
+  "$ErrorActionPreference = 'Stop'",
+  "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
+  "$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($env:INSTAGRAM_NATIVE_REGISTRY_SUBKEY)",
+  "if ($null -eq $key) { [Console]::Out.Write((@{state='missing'} | ConvertTo-Json -Compress)); exit 0 }",
+  "try { $kind = $key.GetValueKind(''); $value = $key.GetValue('', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); [Console]::Out.Write((@{state='present';kind=$kind.ToString();value=$value} | ConvertTo-Json -Compress)) } finally { $key.Dispose() }"
+].join("; ");
+
+export function defaultRegistryAdapter(runRegistry = execFileSync) {
+  function readDefault(key) {
+    if (!/^HKCU\\Software\\/i.test(key)) fail("REGISTRY_READ_FAILED");
+    let result;
+    try {
+      const output = runRegistry("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", registryReadScript], {
+        encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, INSTAGRAM_NATIVE_REGISTRY_SUBKEY: key.slice(5) }
+      });
+      result = JSON.parse(output);
+    } catch { fail("REGISTRY_READ_FAILED"); }
+    // .NET returns null only for an absent key. Permission/reader errors never
+    // become 'missing'; UTF-8 JSON also preserves non-ASCII manifest paths.
+    if (result && result.state === "missing" && Object.keys(result).length === 1) return undefined;
+    if (!result || result.state !== "present" || result.kind !== "String" || typeof result.value !== "string" || !result.value) fail("REGISTRY_READ_FAILED");
+    return result.value;
+  }
+  function assertValue(value, manifestPath) {
+    if (value && resolve(value).toLowerCase() !== resolve(manifestPath).toLowerCase()) fail("EXISTING_REGISTRY_CONFLICT");
+  }
   return {
-    async ensureOwnedOrEmpty(key, manifestPath) {
-      let value;
-      try {
-        const output = execFileSync("reg.exe", ["query", key, "/ve"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-        value = output.split(/\r?\n/).find((line) => /\s+REG_SZ\s+/.test(line))?.split(/\s+REG_SZ\s+/)[1]?.trim();
-      } catch { return; }
-      if (value && resolve(value).toLowerCase() !== resolve(manifestPath).toLowerCase()) fail("EXISTING_REGISTRY_CONFLICT");
-    },
+    async ensureOwnedOrEmpty(key, manifestPath) { assertValue(readDefault(key), manifestPath); },
     async setDefault(key, manifestPath) {
-      execFileSync("reg.exe", ["add", key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f"], { stdio: ["ignore", "ignore", "ignore"] });
+      const value = readDefault(key);
+      assertValue(value, manifestPath);
+      if (value !== undefined) return;
+      // Never /f: a concurrently created value cannot be force-replaced.
+      try { runRegistry("reg.exe", ["add", key, "/ve", "/t", "REG_SZ", "/d", manifestPath], { stdio: ["ignore", "ignore", "ignore"] }); }
+      catch { fail("REGISTRY_WRITE_FAILED"); }
     }
   };
+}
+
+async function readOwnedLauncher(path, marker, manifestFile, expectedText) {
+  let text;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) fail("EXISTING_LAUNCHER_CONFLICT");
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    if (error instanceof Error && error.message === "EXISTING_LAUNCHER_CONFLICT") throw error;
+    fail("REGISTRATION_READ_FAILED");
+  }
+  if (!marker || marker.manifestPath !== manifestFile || (marker.launcherSha256 ? marker.launcherSha256 !== await sha256(text) : text !== expectedText)) fail("EXISTING_LAUNCHER_CONFLICT");
+  return text;
 }
 
 async function readMarker(path) {

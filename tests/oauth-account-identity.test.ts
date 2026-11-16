@@ -7,23 +7,23 @@ function clientFactory(client: { get: ReturnType<typeof vi.fn>; forFacebookPage:
 }
 
 describe("OAuth account identity verification", () => {
-  it("uses only the Instagram OAuth response user_id and binds it to the expected account", async () => {
+  it("binds the Instagram OAuth response to a fresh professional profile", async () => {
     const client = {
-      get: vi.fn(),
+      get: vi.fn(async () => ({ user_id: "ig-account-1", username: "creator" })),
       forFacebookPage: vi.fn(),
     };
     const token: OAuthToken = { accessToken: "fresh-token", authMode: "instagram", userId: "ig-account-1" };
 
     await expect(verifyOAuthAccountIdentity({ authMode: "instagram", graphApiVersion: "v25.0" }, token,
       { expectedAccountId: "ig-account-1" }, clientFactory(client)))
-      .resolves.toEqual({ userId: "ig-account-1" });
-    expect(client.get).not.toHaveBeenCalled();
+      .resolves.toEqual({ userId: "ig-account-1", username: "creator", oauthUserId: "ig-account-1" });
+    expect(client.get).toHaveBeenCalledOnce();
     await expect(verifyOAuthAccountIdentity({ authMode: "instagram", graphApiVersion: "v25.0" }, token,
       { expectedAccountId: "ig-account-2" }, clientFactory(client)))
       .rejects.toThrow("OAUTH_IDENTITY_MISMATCH");
     await expect(verifyOAuthAccountIdentity({ authMode: "instagram", graphApiVersion: "v25.0" },
       { accessToken: "fresh-token", authMode: "instagram" }, {}, clientFactory(client)))
-      .rejects.toThrow("OAUTH_IDENTITY_UNVERIFIED");
+      .resolves.toEqual({ userId: "ig-account-1", username: "creator" });
   });
 
   it("accepts a Facebook Login token only when the selected Page resolves to the expected Instagram account", async () => {

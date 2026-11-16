@@ -110,9 +110,14 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
         if (current?.authMode && current.authMode !== options.binding.authMode) return reject("context_mismatch");
         let expectedAccountId = consumed.expectedAccountId ?? options.binding.expectedAccountId ?? current?.userId;
         let expectedPageId = consumed.expectedPageId ?? options.binding.expectedPageId ?? current?.pageId;
-        if ((expectedAccountId && current?.userId && !constantStringEqual(expectedAccountId, current.userId)) ||
+        const legacyAccountId = options.binding.authMode === "instagram" && current?.userId && current.identityKind !== "instagram_professional_user_id" ? current.userId : undefined;
+        if (legacyAccountId && options.binding.expectedAccountId === undefined) {
+          if (expectedAccountId && !constantStringEqual(expectedAccountId, legacyAccountId)) return reject("context_mismatch");
+          expectedAccountId = undefined;
+        }
+        if ((!legacyAccountId && expectedAccountId && current?.userId && !constantStringEqual(expectedAccountId, current.userId)) ||
             (expectedPageId && current?.pageId && !constantStringEqual(expectedPageId, current.pageId))) return reject("context_mismatch");
-        const verifyCurrent = Boolean(current?.accessToken && (
+        const verifyCurrent = Boolean(!legacyAccountId && current?.accessToken && (
           (!expectedAccountId && !expectedPageId) ||
           (expectedAccountId && !current.userId) ||
           (expectedPageId && !current.pageId)
@@ -137,12 +142,16 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
         phase = "identity";
         const identity = await options.verifyAccount(next, {
           ...(expectedAccountId ? { expectedAccountId } : {}),
+          ...(legacyAccountId ? { expectedLegacyAccountId: legacyAccountId } : {}),
           ...(expectedPageId ? { expectedPageId } : {}),
         }, verification);
         if (!identity.userId || (expectedAccountId && !constantStringEqual(expectedAccountId, identity.userId)) ||
             (expectedPageId && (!identity.pageId || !constantStringEqual(expectedPageId, identity.pageId)))) return reject("identity_mismatch");
+        if (legacyAccountId && !constantStringEqual(legacyAccountId, identity.userId) &&
+            (!identity.legacyAccountId || !constantStringEqual(legacyAccountId, identity.legacyAccountId))) return reject("identity_mismatch");
         if (options.binding.authMode === "instagram" && next.userId &&
-            !constantStringEqual(identity.userId, next.userId)) return reject("identity_mismatch");
+            !constantStringEqual(identity.userId, next.userId) &&
+            (!identity.oauthUserId || !constantStringEqual(identity.oauthUserId, next.userId))) return reject("identity_mismatch");
         let permissions = next.permissions;
         if (options.binding.authMode !== "instagram") {
           if (!consumed.requiredScopes?.length || !options.readGrantedPermissions) return reject("permissions_unverified");
@@ -154,9 +163,11 @@ export function createOAuthCallbackService(options: OAuthCallbackServiceOptions)
           ...next,
           authMode: options.binding.authMode,
           userId: identity.userId,
+          ...(options.binding.authMode === "instagram" ? { identityKind: "instagram_professional_user_id" as const } : {}),
           ...(identity.pageId ? { pageId: identity.pageId } : {}),
           ...(identity.clientBusinessId ? { clientBusinessId: identity.clientBusinessId } : {}),
-          ...(options.binding.authMode !== "instagram" ? { permissions } : next.permissions || !current?.permissions ? {} : { permissions: current.permissions }),
+          ...(identity.username ? { username: identity.username } : {}),
+          ...(options.binding.authMode !== "instagram" ? { permissions } : {}),
         };
         phase = "commit";
         if (options.commitToken) {
@@ -198,7 +209,7 @@ export async function runCallbackServer(): Promise<void> {
   assertOAuthSetup(config);
   const listener = resolveCallbackListener({ authMode: config.authMode, redirectUri: config.redirectUri });
   const current = await loadStoredToken(config.tokenStorePath);
-  const expectedAccountId = config.userId ?? current?.userId;
+  const expectedAccountId = config.userId ?? (config.authMode === "instagram" ? undefined : current?.userId);
   const expectedPageId = config.pageId ?? current?.pageId;
   const authorizationScopes = [...(config.defaultScopes ?? defaultScopesForAuthMode(config.authMode))];
   const binding: OAuthStateBinding = {

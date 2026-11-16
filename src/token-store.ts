@@ -15,6 +15,7 @@ export interface StoredTokenFields {
   pageId?: string;
   permissions?: string[];
   clientBusinessId?: string;
+  identityKind?: "instagram_professional_user_id";
 }
 
 /**

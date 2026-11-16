@@ -137,7 +137,7 @@ describe("runtime composition", () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(27);
+      expect(tools.tools).toHaveLength(28);
       expect(tools.tools.map((tool) => tool.name)).toContain("meta_prepare_action");
       const response = await client.callTool({ name: "meta_triage_inbox", arguments: { source: "auto", limit: 4 } });
       const content = (response as { content?: Array<{ text?: string }> }).content;
@@ -271,7 +271,7 @@ describe("runtime composition", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
       const listed = await client.listTools();
-      expect(listed.tools).toHaveLength(27);
+      expect(listed.tools).toHaveLength(28);
       expect(listed.tools.map((tool) => tool.name)).toContain("meta_reconcile_action");
       const browserRead = await client.callTool({ name: "meta_read_source", arguments: { operation: "account.inspect" } });
       expect(JSON.parse(((browserRead as { content: Array<{ text: string }> }).content[0]!).text)).toMatchObject({ triedSources: ["browser"], observations: [{ availability: "ready" }] });

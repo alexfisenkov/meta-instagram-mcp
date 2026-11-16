@@ -29,7 +29,7 @@ describe("stdio factory compatibility", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(27);
+      expect(tools.tools).toHaveLength(28);
       expect(tools.tools.map((tool) => tool.name)).toContain("meta_triage_inbox");
       expect(tools.tools.map((tool) => tool.name)).toContain("meta_reconcile_action");
       const result = await client.callTool({ name: "meta_scope_presets", arguments: {} });

@@ -226,7 +226,7 @@ describe("safe additive auth status", () => {
     const [ct, st] = InMemoryTransport.createLinkedPair();
     try {
       await server.connect(st); await client.connect(ct);
-      expect((await client.listTools()).tools).toHaveLength(18);
+      expect((await client.listTools()).tools).toHaveLength(19);
       const call = await client.callTool({ name: "meta_auth_status", arguments: { verify: true } });
       const content = call.content as Array<{ text: string }>;
       expect(JSON.parse(content[0].text).authorization).toMatchObject({ verification: "live", tokenValid: true });

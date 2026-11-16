@@ -146,11 +146,11 @@ describe("exchangeCodeForLongLivedToken", () => {
         redirectUri: "http://localhost:8787/callback",
         graphApiVersion: "v25.0"
       })
-    ).rejects.toThrow("Instagram short-lived access_token was not returned by Meta.");
+    ).rejects.toThrow("INSTAGRAM_OAUTH_RESPONSE_INVALID");
     expect(httpMock).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces the Meta OAuth error message", async () => {
+  it("reports a fixed failure without the Meta OAuth error message", async () => {
     httpMock.mockResolvedValueOnce(metaErrorResponse("Invalid verification code format."));
 
     await expect(
@@ -162,7 +162,7 @@ describe("exchangeCodeForLongLivedToken", () => {
         redirectUri: "http://localhost:8787/callback",
         graphApiVersion: "v25.0"
       })
-    ).rejects.toThrow("Meta OAuth error: Invalid verification code format.");
+    ).rejects.toThrow("INSTAGRAM_OAUTH_EXCHANGE_FAILED");
   });
 });
 

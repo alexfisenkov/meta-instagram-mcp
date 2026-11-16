@@ -14,6 +14,29 @@ const provider = (source: "api" | "browser" | "phone", result: Observation<unkno
 });
 
 describe("SourceRouter", () => {
+  it("uses only an explicitly selected browser without consulting API or phone", async () => {
+    const api = provider("api", observation("api")); const browser = provider("browser", observation("browser")); const phone = provider("phone", observation("phone"));
+    const apiStatus = vi.fn(api.status); const phoneStatus = vi.fn(phone.status);
+    api.status = apiStatus; phone.status = phoneStatus;
+    const result = await createSourceRouter({ providers: [api,browser,phone], maxProviders: 1 }).read({ operation: "inbox.list", source: "browser" });
+    expect(result.triedSources).toEqual(["browser"]);
+    expect(apiStatus).not.toHaveBeenCalled(); expect(phoneStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to another source after an explicit browser fails or is absent", async () => {
+    const api = provider("api", observation("api"));
+    const browser = provider("browser", observation("browser", { availability: "offline", coverage: "unknown" }));
+    const result = await createSourceRouter({ providers: [api,browser] }).read({ operation: "inbox.list", source: "browser" });
+    expect(result.triedSources).toEqual(["browser"]); expect(api.read).not.toHaveBeenCalled();
+    const absent = await createSourceRouter({ providers: [api] }).read({ operation: "inbox.list", source: "browser" });
+    expect(absent.errors).toContainEqual(expect.objectContaining({ source: "browser", code: "not_connected" }));
+  });
+
+  it("rejects an explicit non-browser source for ephemeral browser row refs", async () => {
+    const api = provider("api", observation("api"));
+    const result = await createSourceRouter({ providers: [api] }).read({ operation: "conversation.read", source: "api", target: { accountBinding: "acct:fixture", explicitOwnerRef: "browser-inbox-row:sample-ref" } });
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: "browser_ref_source_mismatch" })); expect(api.read).not.toHaveBeenCalled();
+  });
   it("keeps the Windows shared read budget below the MCP client's default request deadline", () => {
     expect(defaultSourceRouterTimeoutMs("win32")).toBe(50_000);
     expect(defaultSourceRouterTimeoutMs("win32")).toBeLessThan(60_000);

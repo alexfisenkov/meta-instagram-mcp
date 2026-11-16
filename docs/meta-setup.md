@@ -2,11 +2,13 @@
 
 ## Сначала выберите реальный login setup
 
-Если Dashboard предлагает **API setup with Unified login**, используйте `META_AUTH_MODE=unified` и [пошаговую инструкцию](unified-login.md). Unified, Instagram Login и Facebook Login используют разные App credentials, scopes, типы токенов и discovery. Ошибка одного пути не требует привязывать Facebook Page для другого.
+Начните с `meta_connection_plan` и [инструкции выбора пути](connect-instagram.md). Первым проверьте доступность **API setup with Instagram login**, его Instagram App credentials и возможность получить свой Instagram User token. Отдельный [Chrome-путь](browser-only.md) обходится без Meta App и business portfolio.
+
+Если direct setup недоступен и осознанно выбран **Unified Login**, используйте его [отдельный регламент](unified-login.md) и Meta credentials. Наличие окна Unified само по себе не доказывает отсутствие direct setup. Ошибка назначения App или приглашения в portfolio не исправляется переключением одной переменной либо повторными приглашениями.
 
 ## Facebook Login -> Instagram Graph API
 
-Ошибка `Invalid platform app` обычно означает, что обычный Meta/Facebook App ID используется в Instagram Login URL. Для стандартного Meta App используйте Facebook Login:
+Ошибка `Invalid platform app` требует проверки соответствия credentials выбранному login setup: у direct Instagram свои Instagram App ID/Secret. Не переключайте пользователя автоматически на Facebook Login. Следующие шаги применяются только когда фактически выбран и доступен соответствующий Facebook Login setup:
 
 1. Meta App Dashboard -> `Вход через Facebook` -> `Настройки`.
 2. Добавить `http://localhost:8787/callback` в `Действительные URI перенаправления для OAuth`.
@@ -39,7 +41,7 @@ instagram_manage_comments
 3. `GET /{ig-user-id}/insights?metric=reach&period=day`
 4. `GET /{media-id}/insights`
 
-## Альтернативный путь: Instagram Login Flow
+## Прямой Instagram Login Flow
 
 По официальной документации Meta Business Login for Instagram использует:
 
@@ -48,12 +50,13 @@ instagram_manage_comments
 - `https://graph.instagram.com/access_token` для обмена short-lived token на long-lived token;
 - `https://graph.instagram.com/refresh_access_token` для обновления long-lived token еще на 60 дней.
 
-Минимальные read-only scopes для этого проекта:
+Для первого базового direct подключения запрашивается только:
 
 ```text
 instagram_business_basic
-instagram_business_manage_insights
 ```
+
+Analytics/comments scopes добавляйте отдельно под нужную задачу и только если они доступны приложению.
 
 Текущий практичный analytics preset проекта:
 
@@ -63,11 +66,11 @@ instagram_business_manage_insights
 instagram_business_manage_comments
 ```
 
-`fullStandard` preset в коде также знает `instagram_business_content_publish` и `instagram_business_manage_messages`, но write-инструменты в MCP намеренно не включены.
+`fullStandard` дополнительно знает publish/messages scopes; запись остаётся за отдельными локальными gates и явным подтверждением конкретного действия. Для первого подключения direct default — только `instagram_business_basic`, а analytics preset выбирается по необходимости. Пошаговая инструкция — [Direct Instagram Login](direct-instagram-login.md).
 
 ## Что сделать в Meta App Dashboard
 
-Для текущего `facebook` режима:
+Для уже выбранного `facebook` режима:
 
 1. Добавить продукт `Facebook Login`.
 2. В `Facebook Login -> Settings` добавить OAuth redirect URI, совпадающий с `META_INSTAGRAM_REDIRECT_URI`.

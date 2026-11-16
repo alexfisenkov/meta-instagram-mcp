@@ -11,8 +11,11 @@ const entries = {
 };
 
 const selected = process.argv[2];
-if (!entries[selected]) {
-  process.stderr.write("Usage: node tools/cli.mjs <auth-url|callback>\n");
+if (selected === "browser-setup") {
+  const { runBrowserSetupCli } = await import("./browser-setup.mjs");
+  await runBrowserSetupCli(process.argv.slice(3));
+} else if (!entries[selected]) {
+  process.stderr.write("Usage: node tools/cli.mjs <auth-url|callback|browser-setup>\n");
   process.exitCode = 2;
 } else {
   try {

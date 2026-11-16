@@ -11,6 +11,7 @@ const packageRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const fixture = "remote-entrypoint-fixture-token-0123456789";
 
 assert.equal(serverEntrypoint(packageRoot, {}), join(packageRoot, "dist", "server.js"));
+assert.throws(()=>serverEntrypoint(packageRoot,{INSTAGRAM_MCP_BROWSER_BRIDGE:"true",INSTAGRAM_MCP_REMOTE_URL:"https://example.test/mcp"}),/BROWSER_BRIDGE_REMOTE_CONFLICT/);
 for (const env of [
   { INSTAGRAM_MCP_REMOTE_CONFIG: "/private/remote.json" },
   { INSTAGRAM_MCP_REMOTE_URL: "https://mcp.example.test", INSTAGRAM_MCP_REMOTE_BEARER_TOKEN: fixture },

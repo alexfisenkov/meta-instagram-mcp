@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OutboundBridgeClient } from "../src/bridge-client.js";
+import { OutboundBridgeClient, loadBridgeClientConfig } from "../src/bridge-client.js";
 import { ensurePrivateFile } from "../src/private-fs.js";
 
 const base = {
@@ -26,6 +26,25 @@ describe("OutboundBridgeClient", () => {
     expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://hub.example.test" })).toThrow(/HTTPS/);
     expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://127.0.0.1", allowLoopbackHttpForTests: true })).not.toThrow();
     expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://192.168.1.4", allowLoopbackHttpForTests: true })).toThrow(/HTTPS/);
+  });
+
+  it("allows explicit production HTTP only for the literal local browser bridge", () => {
+    const browser = { ...base, mode: "browser_native_host" as const, source: "browser" as const, allowLoopbackHttp: true };
+    for (const baseUrl of ["http://127.0.0.1:8788", "http://[::1]:8788"]) {
+      expect(() => new OutboundBridgeClient({ ...browser, baseUrl })).not.toThrow();
+    }
+    for (const baseUrl of ["http://localhost:8788", "http://127.1:8788", "http://127.0.0.2:8788", "http://2130706433:8788", "http://192.168.1.1:8788", "http://hub.example:8788", "http://user@127.0.0.1:8788", "http://127.0.0.1:8788/?token=private", "http://127.0.0.1:8788/#fragment"]) {
+      expect(() => new OutboundBridgeClient({ ...browser, baseUrl })).toThrow();
+    }
+    expect(() => new OutboundBridgeClient({ ...base, baseUrl: "http://127.0.0.1:8788", allowLoopbackHttp: true })).toThrow();
+  });
+
+  it("never enables test-only HTTP through a persisted companion config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "instagram-bridge-test-bypass-")); roots.push(root);
+    const path = join(root, "bridge.json");
+    await writeFile(path, JSON.stringify({ ...base, baseUrl: "http://127.1:8788", allowLoopbackHttpForTests: true }), { mode: 0o600 });
+    await ensurePrivateFile(path);
+    await expect(loadBridgeClientConfig(path)).rejects.toThrow();
   });
 
   it("sends source and protocol provenance without retrying a failed write", async () => {

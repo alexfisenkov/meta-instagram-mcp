@@ -3,6 +3,7 @@ import { MetaClient, type FacebookPageClient } from "./meta-client.js";
 import { defaultScopesForAuthMode, type AuthMode } from "./oauth.js";
 import { loadStoredToken, type StoredInstagramToken } from "./token-store.js";
 import type { SourceReadContext } from "./read-context.js";
+import { timingSafeEqual } from "node:crypto";
 import { verifyOAuthAccountIdentity } from "./oauth-account-identity.js";
 
 export interface AccountContextTokenStore {
@@ -52,7 +53,9 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
     const authMode = useEnvironmentToken ? options.config.authMode : stored?.authMode ?? options.config.authMode;
     if (!useEnvironmentToken && authMode !== options.config.authMode
       && (authMode === "unified" || options.config.authMode === "unified")) throw new Error("TOKEN_STORE_AUTH_MODE_MISMATCH");
-    let instagramUserId = options.config.userId ?? (useEnvironmentToken ? undefined : stored?.userId);
+    const sameCredential = useEnvironmentToken && stored?.authMode === authMode && typeof stored.accessToken === "string"
+      && sameToken(stored.accessToken, accessToken);
+    let instagramUserId = options.config.userId ?? (!useEnvironmentToken || sameCredential ? stored?.userId : undefined);
     let unifiedPermissions: string[] | undefined;
     if (authMode === "unified") {
       const identity = await verifyOAuthAccountIdentity(options.config, { accessToken, authMode }, instagramUserId ? { expectedAccountId: instagramUserId } : {}, undefined,
@@ -103,6 +106,11 @@ export function createAccountContextResolver(options: AccountContextResolverOpti
       ...(pageClient ? { pageClient, pageTasks } : {})
     };
   };
+}
+
+function sameToken(left: string, right: string): boolean {
+  const a = Buffer.from(left), b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function isOptionalPageUnavailable(error: unknown): boolean {

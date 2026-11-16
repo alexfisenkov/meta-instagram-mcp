@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createToolHandlers } from "../src/tools.js";
 
 describe("tool handlers", () => {
-  it("builds login URLs with the analytics scope preset by default", () => {
+  it("builds direct login URLs with only basic access by default", () => {
     const handlers = createToolHandlers({
       config: {
         authMode: "instagram",
@@ -23,10 +23,8 @@ describe("tool handlers", () => {
 
     expect(result.scopes).toEqual([
       "instagram_business_basic",
-      "instagram_business_manage_insights",
-      "instagram_business_manage_comments",
     ]);
-    expect(result.url).toContain("instagram_business_manage_comments");
+    expect(result.url).not.toContain("instagram_business_manage_comments");
   });
 
   it("ranks media locally by engagement", async () => {
@@ -90,8 +88,6 @@ describe("tool handlers", () => {
     expect(result.config.hasAppSecret).toBe(true);
     expect(result.config.defaultScopes).toEqual([
       "instagram_business_basic",
-      "instagram_business_manage_insights",
-      "instagram_business_manage_comments",
     ]);
     expect(result.envToken).toBe("[redacted]");
     expect(result.storedToken?.accessToken).toBe("[redacted]");

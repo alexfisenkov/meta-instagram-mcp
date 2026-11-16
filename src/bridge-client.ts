@@ -17,9 +17,12 @@ export interface BridgeClientConfig {
   bridgeId?: string;
   bridgeToken?: string;
   trustedApprovalPublicKey?: string;
-  allowLoopbackHttpForTests?: boolean;
+  /** Explicit browser-only transport to a literal local Hub; never enables remote HTTP. */
+  allowLoopbackHttp?: boolean;
 }
 export interface BridgeClientOptions extends BridgeClientConfig {
+  /** Constructor-only seam. Persisted companion configs cannot activate this. */
+  allowLoopbackHttpForTests?: boolean;
   credentialsPath: string;
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
@@ -33,7 +36,7 @@ export class OutboundBridgeClient {
   private readonly bridgeBasePath: string;
 
   constructor(private readonly options: BridgeClientOptions) {
-    validateConfig(options);
+    validateConfig(options, options.allowLoopbackHttpForTests === true);
     this.bridgeBasePath = validateBridgeBasePath(options.bridgeBasePath);
     this.bridgeId = options.bridgeId;
     this.bridgeToken = options.bridgeToken;
@@ -113,6 +116,7 @@ export async function loadBridgeClientConfig(path: string): Promise<BridgeClient
   if (!info.isFile()) throw new Error("bridge config must be a private regular file");
   await assertPrivateFile(path);
   const value = JSON.parse(await readFile(path, "utf8")) as BridgeClientConfig;
+  if (Object.hasOwn(value, "allowLoopbackHttpForTests")) throw new Error("test-only bridge options cannot be loaded from config");
   validateConfig(value);
   return value;
 }
@@ -141,11 +145,13 @@ export async function saveBridgeCredentials(path: string, credentials: { bridgeI
 
 function validPublicKey(value: string): boolean { return value.length <= 4_096 && value.startsWith("-----BEGIN PUBLIC KEY-----") && value.includes("-----END PUBLIC KEY-----"); }
 
-function validateConfig(config: BridgeClientConfig): void {
+function validateConfig(config: BridgeClientConfig, testLoopback = false): void {
   let url: URL;
   try { url = new URL(config.baseUrl); } catch { throw new Error("invalid bridge URL"); }
-  const localTestHttp = config.allowLoopbackHttpForTests === true && url.protocol === "http:" && isLoopbackHost(url.hostname);
-  if (url.protocol !== "https:" && !localTestHttp) throw new Error("bridge URL must use HTTPS");
+  const localTestHttp = testLoopback && url.protocol === "http:" && isLoopbackHost(url.hostname);
+  const localBrowserHttp = config.allowLoopbackHttp === true && config.mode === "browser_native_host" && config.source === "browser"
+    && /^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::[1-9]\d{0,4})?\/?$/.test(config.baseUrl) && url.protocol === "http:";
+  if (url.protocol !== "https:" && !localTestHttp && !localBrowserHttp) throw new Error("bridge URL must use HTTPS or an explicitly enabled literal local browser Hub");
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("bridge URL must be an origin only");
   validateBridgeBasePath(config.bridgeBasePath);
   if (typeof config.bearerToken !== "string" || Buffer.byteLength(config.bearerToken) < 32) throw new Error("invalid bridge bearer token");

@@ -90,7 +90,7 @@ describe("native Streamable HTTP endpoint", () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(18);
+      expect(tools.tools).toHaveLength(19);
       expect(tools.tools.map((tool) => tool.name)).toContain("meta_auth_status");
       const result = await client.callTool({ name: "meta_scope_presets", arguments: {} });
       expect(result.isError).not.toBe(true);

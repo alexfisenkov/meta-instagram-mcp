@@ -14,8 +14,8 @@ const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], {
 });
 if (result.status !== 0) process.exit(result.status ?? 1);
 try {
-  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const workingTreeClean = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length === 0;
+  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  const workingTreeClean = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().length === 0;
   mkdirSync("dist/student", { recursive: true });
   writeFileSync("dist/student/build-info.json", `${JSON.stringify({ sourceSha, workingTreeClean })}\n`, { mode: 0o600 });
 } catch { /* Non-Git package builds remain valid; provenance-gated E2E requires this marker. */ }

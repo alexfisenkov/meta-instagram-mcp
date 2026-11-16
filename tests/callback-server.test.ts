@@ -271,4 +271,25 @@ describe("callback server helpers", () => {
       .resolves.toMatchObject({ status: "success" });
     expect(order).toEqual(["backup", "save"]);
   });
+
+  it.each([undefined, ["instagram_business_basic"]])("stores only the fresh direct grant list, never the old permissions", async (permissions) => {
+    const directory = await mkdtemp(join(tmpdir(), "oauth-direct-grants-"));
+    const tokenPath = join(directory, "token.json");
+    const redirectUri = "https://mcp.example/oauth/callback";
+    await saveStoredToken(tokenPath, { accessToken: "old", authMode: "instagram", userId: "professional", permissions: ["instagram_business_content_publish"] });
+    const service = createOAuthCallbackService({
+      stateStore: createOAuthStateStore({ directory: join(directory, "state") }),
+      binding: { accountBinding: "instagram:professional", authMode: "instagram", redirectUri },
+      readCurrentToken: () => loadStoredToken(tokenPath),
+      exchangeCode: async () => ({ accessToken: "new", authMode: "instagram", userId: "app-scoped", ...(permissions ? { permissions } : {}) }),
+      verifyAccount: async () => ({ userId: "professional", oauthUserId: "app-scoped", username: "creator" }),
+      commitToken: (current, next) => commitStoredOAuthToken(tokenPath, current, next),
+    });
+    const state = await service.issueState();
+    await expect(service.handleCallback({ url: `${redirectUri}?code=private&state=${state}` })).resolves.toMatchObject({ status: "success" });
+    const next = await loadStoredToken(tokenPath);
+    expect(next?.userId).toBe("professional");
+    expect(next?.username).toBe("creator");
+    expect(next?.permissions).toEqual(permissions);
+  });
 });

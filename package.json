@@ -1,6 +1,6 @@
 {
   "name": "meta-instagram-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Unified Instagram MCP with official Meta API and connected browser/phone companions.",
@@ -35,7 +35,8 @@
     "doctor": "node tools/doctor.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "meta:auth-url": "node tools/cli.mjs auth-url",
-    "meta:callback": "node tools/cli.mjs callback"
+    "meta:callback": "node tools/cli.mjs callback",
+    "test:browser-setup": "node tools/test-browser-setup.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

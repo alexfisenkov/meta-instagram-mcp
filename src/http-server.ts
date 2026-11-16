@@ -7,6 +7,8 @@ import { createHttpOptions } from "./transport-config.js";
 import type { WebhookReceiver } from "./webhooks.js";
 
 export interface HttpOptions {
+  /** Local companion-only listener; never exposes MCP, OAuth, webhook or phone routes. */
+  browserBridgeOnly?: boolean;
   host: "127.0.0.1";
   port: number;
   bearerSecret: string;
@@ -53,6 +55,7 @@ async function dispatch(request: IncomingMessage, response: ServerResponse, opti
   if (!options.allowedHosts.includes((request.headers.host ?? "").toLowerCase())) return sendJson(response, 403, { error: "host_not_allowed" });
   const origin = request.headers.origin;
   if (origin !== undefined && !options.allowedOrigins.includes(origin)) return sendJson(response, 403, { error: "origin_not_allowed" });
+  if (options.browserBridgeOnly && path !== "/health" && !path.startsWith("/bridge/")) return sendJson(response, 404, { error: "not_found" });
   if (path === (options.oauthPath ?? "/oauth/callback")) {
     if (!options.oauthHandler) return sendJson(response, 404, { error: "not_found" });
     return options.oauthHandler(request, response);
@@ -96,6 +99,7 @@ async function dispatch(request: IncomingMessage, response: ServerResponse, opti
   if (!path.startsWith("/bridge/")) return sendJson(response, 404, { error: "not_found" });
   if (request.method !== "POST") return sendJson(response, 405, { error: "method_not_allowed" });
   const bridgeSource = request.headers["x-bridge-source"];
+  if (options.browserBridgeOnly && bridgeSource !== "browser") return sendJson(response, 403, { error: "bridge_source_not_allowed" });
   if (request.headers["x-api-protocol-version"] !== "1" || typeof bridgeSource !== "string" || !["browser", "phone"].includes(bridgeSource)) {
     return sendJson(response, 426, { error: "unsupported_bridge_protocol" });
   }

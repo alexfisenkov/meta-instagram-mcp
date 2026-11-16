@@ -19,7 +19,7 @@ describe("shared MCP factory", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
       expect(client.getServerVersion()).toMatchObject({ name: "meta-instagram-mcp", version: packageVersion });
-      expect((await client.listTools()).tools).toHaveLength(18);
+      expect((await client.listTools()).tools).toHaveLength(19);
       const result = await client.callTool({ name: "meta_scope_presets", arguments: {} });
       expect(result).toMatchObject({ content: [{ type: "text", text: JSON.stringify([{ id: "injected" }], null, 2) }] });
     } finally { await client.close(); await server.close(); }
@@ -37,7 +37,7 @@ describe("shared MCP factory", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      expect(names).toHaveLength(23);
+      expect(names).toHaveLength(24);
       expect(names).toContain("meta_triage_inbox");
       expect(names).toContain("meta_analyze_inbox");
       const result = await client.callTool({ name: "meta_triage_inbox", arguments: { source: "auto", limit: 5 } });

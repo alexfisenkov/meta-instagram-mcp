@@ -4,14 +4,20 @@ import { requestJsonHttp } from "./http-json.js";
 
 export interface OAuthIdentityConstraints {
   expectedAccountId?: string;
+  /** Migration-only pin from a pre-canonical direct token store, never a replacement for user_id. */
+  expectedLegacyAccountId?: string;
   expectedPageId?: string;
 }
 
 export interface VerifiedOAuthIdentity {
   userId: string;
+  legacyAccountId?: string;
   pageId?: string;
   permissions?: string[];
   clientBusinessId?: string;
+  username?: string;
+  /** Raw OAuth identity reconciled with a fresh /me profile; never the canonical resource ID. */
+  oauthUserId?: string;
 }
 
 export interface OAuthIdentityConfig {
@@ -47,10 +53,14 @@ export async function verifyOAuthAccountIdentity(
 
   if (config.authMode === "instagram") {
     if (expected.expectedPageId) throw new Error("OAUTH_IDENTITY_MISMATCH");
-    const userId = token.userId;
-    if (!userId) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
-    if (expected.expectedAccountId && expected.expectedAccountId !== userId) throw new Error("OAUTH_IDENTITY_MISMATCH");
-    return { userId };
+    const identity = await verifyDirectInstagramToken(config, token.accessToken, {
+      expectedAccountId: expected.expectedAccountId,
+      expectedLegacyAccountId: expected.expectedLegacyAccountId,
+      expectedOAuthUserId: token.userId,
+      signal: verification.signal,
+    }, () => clientFactory(token.accessToken, "instagram"));
+    return { userId: identity.userId, username: identity.username, ...(identity.legacyAccountId ? { legacyAccountId: identity.legacyAccountId } : {}),
+      ...(token.userId ? { oauthUserId: token.userId } : {}) };
   }
 
   const client = clientFactory(token.accessToken, config.authMode);
@@ -140,6 +150,55 @@ export async function readFacebookGrantedPermissions(graphApiVersion: string, to
     if (row.status === "granted") granted.push(row.permission);
   }
   return granted;
+}
+
+export interface DirectInstagramIdentity {
+  userId: string;
+  username: string;
+  appScopedId?: string;
+  legacyAccountId?: string;
+  /** Account access is proved by /me; the token's full grant list is not. */
+  permissionsVerification: "unknown";
+}
+export interface DirectInstagramIdentityOptions {
+  expectedAccountId?: string;
+  expectedLegacyAccountId?: string;
+  expectedOAuthUserId?: string;
+  signal?: AbortSignal;
+}
+
+/** Read a Dashboard/OAuth Instagram User token without requiring an App Secret or a portfolio. */
+export async function verifyDirectInstagramToken(
+  config: { graphApiVersion: string },
+  accessToken: string,
+  options: DirectInstagramIdentityOptions = {},
+  clientFactory: () => Pick<MetaClient, "get"> = () => new MetaClient({ accessToken, apiVersion: config.graphApiVersion, baseUrl: "https://graph.instagram.com" }),
+): Promise<DirectInstagramIdentity> {
+  if (options.signal?.aborted) throw new Error("OAUTH_CANCELLED");
+  if (!accessToken || !/^v\d+\.0$/.test(config.graphApiVersion)) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+  const fields = options.expectedOAuthUserId || options.expectedLegacyAccountId ? ["id", "user_id", "username"] : ["user_id", "username"];
+  let body: Record<string, unknown> | undefined;
+  try { body = asRecord(await clientFactory().get("/me", { fields }, options.signal ? { signal: options.signal } : {})); }
+  catch { throw new Error(options.signal?.aborted ? "OAUTH_CANCELLED" : "OAUTH_IDENTITY_UNVERIFIED"); }
+  if (options.signal?.aborted) throw new Error("OAUTH_CANCELLED");
+  const flat = body && ["id", "user_id", "username"].some((field) => Object.hasOwn(body, field));
+  const profile = flat ? (Object.hasOwn(body!, "data") ? undefined : body)
+    : Array.isArray(body?.data) && body.data.length === 1 ? asRecord(body.data[0]) : undefined;
+  const userId = directIdentityValue(profile?.user_id);
+  const username = profile?.username;
+  const appScopedId = profile?.id === undefined ? undefined : directIdentityValue(profile.id);
+  if (!userId || typeof username !== "string" || !/^[A-Za-z0-9._]{1,30}$/.test(username)
+    || (profile?.id !== undefined && !appScopedId)) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
+  if (options.expectedAccountId && options.expectedAccountId !== userId) throw new Error("OAUTH_IDENTITY_MISMATCH");
+  if (options.expectedLegacyAccountId && options.expectedLegacyAccountId !== userId && options.expectedLegacyAccountId !== appScopedId) throw new Error("OAUTH_IDENTITY_MISMATCH");
+  if (options.expectedOAuthUserId && options.expectedOAuthUserId !== userId && options.expectedOAuthUserId !== appScopedId) throw new Error("OAUTH_IDENTITY_MISMATCH");
+  return { userId, username, ...(appScopedId ? { appScopedId } : {}), ...(options.expectedLegacyAccountId ? { legacyAccountId: options.expectedLegacyAccountId } : {}), permissionsVerification: "unknown" };
+}
+
+function directIdentityValue(value: unknown): string | undefined {
+  if (typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value)) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  return undefined;
 }
 
 /** Inspect a BISU token with this Meta app's credentials; stored/requested grants are never proof. */

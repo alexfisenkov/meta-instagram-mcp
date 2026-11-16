@@ -4,6 +4,16 @@ MCP для работы с собственным Instagram-аккаунтом �
 
 Секреты, token-store, OAuth state, browser session и сырые UI-evidence хранятся локально у оператора. MCP не содержит внутренней AI-модели: когда клиент подключён к MCP, анализ и черновики выполняет выбранный пользователем AI-клиент.
 
+## Сначала выберите способ подключения
+
+Начните с [инструкции для ученика и готового запроса агенту](docs/connect-instagram.md). В MCP есть read-only `meta_connection_plan`: он сначала предлагает проверить **прямой Instagram Login**, отдельно показывает **браузер Chrome без Meta App** и сохраняет уже работающие подключения.
+
+- [Прямой официальный API](docs/direct-instagram-login.md): проверенный подходящий Instagram Login setup, свой профессиональный аккаунт, Dashboard token или OAuth. Бизнес-портфолио не обязательный первый шаг.
+- [Локальный браузер](docs/browser-only.md): обычный вход в Chrome, расширение и Native Host; без Meta App, VPS, домена и HTTPS. Читается поддержанный видимый интерфейс, а не полный API/архив.
+- [Unified Login](docs/unified-login.md): отдельный путь для выбранного setup и доступного portfolio. Прежний Facebook Login сохранён для подходящих существующих подключений.
+
+При отказе Meta добавить пользователя или назначить App в portfolio не создавайте новые приглашения по кругу. Сначала проверьте direct setup, затем предложите браузерный путь. Доступность setup, регистрация browser и успешное чтение — разные проверки.
+
 ## Что важно про доступ Meta
 
 - Доступ возможен только в рамках permissions, которые выдаст Meta App и подтвердит пользователь.
@@ -37,6 +47,7 @@ npm run build
 npm run test:remote-entrypoint
 npm run test:installer
 npm run test:native-registration
+npm run test:browser-setup
 ```
 
 Локальный запуск и `npm run meta:callback` читают приватный внешний config; инструкции для первичной настройки — в [docs/install.md](docs/install.md).
@@ -45,6 +56,7 @@ npm run test:native-registration
 
 Ниже перечислена существующая legacy API surface. Точный текущий набор tools проверяется через MCP client/doctor; permissions и per-source readiness ограничивают доступность функций.
 
+- `meta_connection_plan` - offline direct-first план выбора API/browser; наблюдения Dashboard помечаются caller-supplied, секреты и config не меняются.
 - `meta_auth_status` - показывает config, opaque token metadata, startup runtime identity и optional bounded live verification.
 - `meta_scope_presets` - показывает поддерживаемые OAuth scope presets.
 - `meta_build_login_url` - строит официальный OAuth login URL.
@@ -68,7 +80,7 @@ Portable runtime запускается через `tools/run.mjs`, которы
 
 Из приватного внешнего `.env` wrapper принимает только поддерживаемые `META_*` и `INSTAGRAM_MCP_*` имена; неизвестные ключи, включая `META_MCP_CONFIG_DIR`, завершают запуск с безопасным кодом ошибки. Значения читаются как текст без shell substitution. Переменные окружения процесса имеют приоритет над файлом. HTTP включается через `INSTAGRAM_MCP_TRANSPORT=http`; listener требует bearer secret и настраивается через `INSTAGRAM_MCP_HTTP_*`. API, browser и phone write gates независимы: `META_INSTAGRAM_WRITE`, `INSTAGRAM_MCP_BROWSER_WRITES` и `INSTAGRAM_MCP_PHONE_WRITES`. Подробнее — [runtime-параметры](docs/install.md#runtime-параметры-и-transports).
 
-Нативный stdio/HTTP runtime регистрирует 27 инструментов (18 legacy и 9 layered/mutation). Для cloud действует отдельный gateway allowlist: согласованный каталог содержит 19 инструментов — прежние 18 и отдельное разрешение `meta_read_source`; `meta_capabilities` уже входил в прежний cloud-каталог. Из этого репозитория нельзя подтвердить, что приватное изменение allowlist уже развернуто: проверяйте фактический cloud tool list отдельно. Остальные layered/mutation инструменты не открываются этим исключением; запрещённые write/auth/stateful resolver операции остаются закрыты. `meta_read_source` имеет `readOnlyHint: false`: отдельные reads безопасны по данным, но UI-чтение диалога может пометить его просмотренным (`may_mark_seen`). Поддерживаемые read-операции: `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`; sends, replies, reactions и другие writes этим разрешением не включены.
+Нативный stdio/HTTP runtime регистрирует 28 инструментов (18 API, 1 connection planner и 9 layered/mutation). Для cloud действует отдельный gateway allowlist: согласованный каталог содержит 19 инструментов — прежние 18 и отдельное разрешение `meta_read_source`; `meta_capabilities` уже входил в прежний cloud-каталог. Из этого репозитория нельзя подтвердить, что приватное изменение allowlist уже развернуто: проверяйте фактический cloud tool list отдельно. Остальные layered/mutation инструменты не открываются этим исключением; запрещённые write/auth/stateful resolver операции остаются закрыты. `meta_read_source` имеет `readOnlyHint: false`: отдельные reads безопасны по данным, но UI-чтение диалога может пометить его просмотренным (`may_mark_seen`). Поддерживаемые read-операции: `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`; sends, replies, reactions и другие writes этим разрешением не включены.
 
 Для объединённого чтения Direct используйте `meta_read_inbox`: он проверяет API, затем подключённый browser и phone в порядке приоритета. Зарегистрированный, но ещё не проверенный browser проходит bounded `account.inspect` preflight перед обычным чтением. Если один из нескольких свежих browser bridge того же account binding не прошёл owner verification, активный read может проверить до трёх bridge, которые объявили и `account.inspect`, и нужную read capability; после проверки выбранный bridge закрепляется для этого чтения. Проверка выполняется только по запросу, не в фоне. Declared capabilities — заявление companion, а не доказательство готовности: operation status и сам результат чтения должны подтвердить identity и live capability. Явная browser row reference всегда остаётся закреплённой за исходным bridge.
 

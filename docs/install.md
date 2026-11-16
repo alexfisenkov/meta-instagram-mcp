@@ -1,5 +1,7 @@
 # Установка и обновление
 
+Сначала прочитайте [выбор подключения](connect-instagram.md). Для API сначала проверяют direct Instagram Login; для браузера Meta App не требуется. Новая установка не должна автоматически начинаться с business portfolio.
+
 В этом репозитории предусмотрены два способа работы:
 
 - portable MCP для Node.js с конфигурацией и token-store вне каталога приложения;
@@ -35,7 +37,7 @@
 - интернет для получения исходного commit и зависимостей npm;
 - macOS, Linux или Windows с PowerShell 7 для нативного Windows-установщика.
 
-Нужны собственная Meta App и professional Instagram account. Meta выдаёт доступ только после нужного OAuth consent и прав приложения. Instagram Login и Facebook Login используют разные режимы и scopes; аккаунт и Page, если она участвует в выбранном OAuth flow, привязываются явно. До настройки и подтверждения прав Direct, comments и insights могут оставаться недоступными. Общая инструкция по Meta App находится в [Meta setup](meta-setup.md).
+Для официального API нужны собственная Meta App с подходящим setup и professional Instagram account. Для Chrome-пути App и business portfolio не нужны. Meta выдаёт API доступ только после нужного consent и прав приложения. Instagram Login и Facebook Login используют разные режимы и scopes; аккаунт и Page, если она участвует в выбранном OAuth flow, привязываются явно. До настройки и подтверждения прав Direct, comments и insights могут оставаться недоступными. Общая инструкция по Meta App находится в [Meta setup](meta-setup.md).
 
 ## Установить из опубликованного release
 
@@ -119,7 +121,7 @@ claude mcp get meta-instagram-mcp
 
 ## Настроить OAuth
 
-Для нового **API setup with Unified login** сначала откройте [Unified Login](unified-login.md): своя App может использовать Dashboard-token путь без HTTPS callback; для OAuth из MCP нужны numeric config ID и собственный HTTPS redirect. Ниже — прежние login families. Их localhost HTTP callback не переносится в Unified.
+Сначала вызовите `meta_connection_plan` и осмотрите доступные setup по [инструкции](connect-instagram.md). [Direct Instagram Login](direct-instagram-login.md) проверяется первым; [Unified](unified-login.md) выбирают отдельно, если он нужен и выполнены его требования. Нельзя подменять App credentials/token family одного режима другим. Ниже приведён справочный пример Facebook Login для уже выбранного соответствующего setup.
 
 Отредактируйте приватный `.env` во внешнем каталоге конфигурации. Оставьте секреты только в этом файле или защищённой переменной окружения:
 
@@ -203,6 +205,8 @@ tools/rollback.sh --target "$HOME/.local/share/meta-instagram-mcp/app" --backup 
 Uninstall перемещает каталог приложения в `.uninstalled...`; config, token-store и все backups остаются на месте. Они не удаляются автоматически.
 
 ## Профили установки и companions
+
+Простой локальный [Chrome-only профиль](browser-only.md) не требует Meta API credentials, сервера или домена. Штатный helper создаёт защищённый loopback Hub в том же stdio процессе. Таблица ниже дополнительно описывает прежние advanced server/remote профили.
 
 В каждом профиле используется своя конфигурация и отдельный источник readiness. `node tools/doctor.mjs` проверяет локальное stdio соединение; browser/phone readiness и живой Meta access требуют своих проверок.
 
@@ -315,6 +319,8 @@ node tools/register-native-host.mjs --dry-run --install-root "$HOME/.local/share
 
 ### Windows PowerShell 7
 
+Для учеников сначала используйте готовый проверенный exe из опубликованного релиза по [browser-only инструкции](browser-only.md#windows-готовый-native-host); .NET SDK и сборка вручную не требуются. Следующий способ — для разработчика, если он осознанно собирает собственный артефакт.
+
 Нужен `InstagramNativeHost.exe` из self-contained x64 build. CI workflow создаёт 14-дневный artifact для своего run; он не является GitHub Release asset. Его можно собрать из исходников с .NET SDK 8, затем скопировать в фиксированный путь приложения:
 
 ```powershell
@@ -365,3 +371,7 @@ node tools/doctor.mjs
 ```
 
 Он устанавливает MCP SDK соединение, делает `initialize`, перечисляет tools, вызывает `meta_auth_status` и, только если сервер выставил read-only capability/status tool, читает его статусы. Вывод включает booleans, число tools, известные статусы источников и разрешённые поля runtime/version/revision, authorization (включая scope names и expiry) и public legal context. Полные tokens/secrets, account identifiers, локальные пути и raw API/context payload в вывод не входят. `app` помечен как installation metadata; `runtime` относится к подключённому core. Doctor не включает `verify:true` и не подтверждает Chrome login, телефон, внешний HTTPS gateway или фактическую отправку.
+
+## Локальная диагностика custom paths
+
+При нестандартных путях doctor выбирает установку и конфиг явными флагами: `node tools/doctor.mjs --install-dir /absolute/app --config-dir /absolute/private/config`. Один только текущий каталог не меняет его default install directory.

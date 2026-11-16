@@ -4,6 +4,7 @@ export type AuthMode = "facebook" | "instagram" | "unified";
 
 export interface OAuthToken {
   accessToken: string;
+  identityKind?: "instagram_professional_user_id";
   tokenType?: string;
   authMode?: AuthMode;
   expiresAt?: string;
@@ -11,10 +12,11 @@ export interface OAuthToken {
   pageId?: string;
   permissions?: string[];
   clientBusinessId?: string;
+  username?: string;
 }
 
 export function defaultScopesForAuthMode(authMode: AuthMode): string[] {
-  return [...getScopePresets(authMode)[authMode === "unified" ? "readOnly" : "analytics"]];
+  return [...getScopePresets(authMode)[authMode === "facebook" ? "analytics" : "readOnly"]];
 }
 
 export type ScopePreset = "readOnly" | "inbox" | "comments" | "analytics" | "fullStandard";
@@ -102,7 +104,7 @@ export function buildAuthUrl(options: {
     else url.searchParams.set("force_reauth", "true");
   }
   if (options.authMode === "instagram" && options.enableFacebookLogin !== undefined) {
-    url.searchParams.set("enable_fb_login", options.enableFacebookLogin ? "1" : "0");
+    url.searchParams.set("enable_fb_login", options.enableFacebookLogin ? "true" : "false");
   }
   return url;
 }
@@ -144,26 +146,39 @@ export async function exchangeCodeForLongLivedToken(options: {
     return normalizeToken(longToken, "facebook");
   }
 
-  const shortToken = await graphPostForm("https://api.instagram.com/oauth/access_token", {
-    client_id: options.appId,
-    client_secret: options.appSecret,
-    grant_type: "authorization_code",
-    redirect_uri: options.redirectUri,
-    code: options.code
-  });
-  const accessToken = requireString(shortToken.access_token, "Instagram short-lived access_token");
-  const shortUserId = normalizeUserId(shortToken.user_id);
+  const { appId, appSecret, redirectUri, code } = options;
+  let shortResponse: Record<string, unknown>;
+  try {
+    shortResponse = await graphPostForm("https://api.instagram.com/oauth/access_token", {
+      client_id: appId, client_secret: appSecret, grant_type: "authorization_code",
+      redirect_uri: redirectUri, code,
+    });
+  } catch { throw new Error("INSTAGRAM_OAUTH_EXCHANGE_FAILED"); }
+  const shortGrant = directShortGrant(shortResponse);
+  const { access_token: accessToken } = shortGrant;
+  const shortUserId = normalizeUserId(shortGrant.user_id);
   if (!shortUserId) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
-  const longToken = await graphGet("https://graph.instagram.com/access_token", {
-    grant_type: "ig_exchange_token",
-    client_secret: options.appSecret,
-    access_token: accessToken
-  });
+  const permissions = directGrantedPermissions(shortGrant.permissions);
+  let longToken: Record<string, unknown>;
+  try {
+    longToken = await graphGet("https://graph.instagram.com/access_token", {
+      grant_type: "ig_exchange_token", client_secret: appSecret, access_token: accessToken,
+    });
+  } catch { throw new Error("INSTAGRAM_OAUTH_EXCHANGE_FAILED"); }
+  if (typeof longToken.access_token !== "string" || !longToken.access_token || longToken.access_token.length > 8192
+    || (longToken.token_type !== undefined && (typeof longToken.token_type !== "string" || longToken.token_type.toLowerCase() !== "bearer"))
+    || (longToken.expires_in !== undefined && (typeof longToken.expires_in !== "number" || !Number.isSafeInteger(longToken.expires_in) || longToken.expires_in <= 0))) throw new Error("INSTAGRAM_OAUTH_RESPONSE_INVALID");
   const longUserId = normalizeUserId(longToken.user_id);
+  if (longToken.user_id !== undefined && !longUserId) throw new Error("OAUTH_IDENTITY_UNVERIFIED");
   if (longUserId && shortUserId !== longUserId) {
     throw new Error("OAuth identity mismatch.");
   }
-  return { ...normalizeToken(longToken, "instagram"), userId: shortUserId };
+  const result = { ...normalizeToken(longToken, "instagram"), userId: shortUserId };
+  // Only the new short-code grant carries the provider's current permission list.
+  // Neither older credentials nor requested presets become proof of a new grant.
+  delete result.permissions;
+  if (permissions) result.permissions = permissions;
+  return result;
 }
 
 export async function refreshLongLivedToken(options: {
@@ -193,10 +208,13 @@ export async function refreshLongLivedToken(options: {
     };
   }
 
-  const token = await graphGet("https://graph.instagram.com/refresh_access_token", {
-    grant_type: "ig_refresh_token",
-    access_token: options.accessToken
-  });
+  const { accessToken } = options;
+  let token: Record<string, unknown>;
+  try {
+    token = await graphGet("https://graph.instagram.com/refresh_access_token", {
+      grant_type: "ig_refresh_token", access_token: accessToken,
+    });
+  } catch { throw new Error("INSTAGRAM_TOKEN_REFRESH_FAILED"); }
   return {
     ...normalizeToken(token, "instagram"),
     userId: options.userId,
@@ -251,9 +269,28 @@ function normalizeToken(raw: Record<string, unknown>, authMode: AuthMode): OAuth
 }
 
 function normalizeUserId(value: unknown): string | undefined {
-  if (typeof value === "string" && value) return value;
-  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  if (typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value)) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
   return undefined;
+}
+
+/** Meta documents data[0]; retain unambiguous legacy flat responses as well. */
+function directShortGrant(body: Record<string, unknown>): Record<string, unknown> & { access_token: string } {
+  const flat = ["access_token", "user_id", "permissions", "token_type", "expires_in"].some((field) => Object.hasOwn(body, field));
+  const grant = flat ? (Object.hasOwn(body, "data") ? undefined : body)
+    : Array.isArray(body.data) && body.data.length === 1 && isRecord(body.data[0]) ? body.data[0] : undefined;
+  if (!grant || typeof grant.access_token !== "string" || !grant.access_token || grant.access_token.length > 8192) throw new Error("INSTAGRAM_OAUTH_RESPONSE_INVALID");
+  return grant as Record<string, unknown> & { access_token: string };
+}
+
+function directGrantedPermissions(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  const values = typeof value === "string" && value.length <= 4096 ? value.split(",") : Array.isArray(value) ? value : undefined;
+  const allowed = new Set(Object.values(getScopePresets("instagram")).flat());
+  if (!values || values.length === 0 || values.length > 32 || !values.every((scope) => typeof scope === "string" && scope.length <= 128 && allowed.has(scope.trim()))) throw new Error("OAUTH_PERMISSIONS_UNVERIFIED");
+  const result = [...new Set((values as string[]).map((scope) => scope.trim()))];
+  if (!result.includes("instagram_business_basic")) throw new Error("OAUTH_PERMISSIONS_UNVERIFIED");
+  return result;
 }
 
 // Meta отдаёт permissions то массивом, то строкой через запятую — приводим к массиву.

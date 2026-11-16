@@ -1,17 +1,21 @@
 # Операционный runbook
 
-Обновлено: 2026-11-14.
+Обновлено: 2026-11-16.
 
 ## Контракты и границы
 
 Для hosted multi-user подключений используйте отдельный [student broker runbook](student-broker.md): entrypoint `dist/student-server.js`, private registry/env/vault и ограниченный `/student/mcp`. Он не запускает legacy owner runtime или companions. Проверка `/health` относится к listener; проверка Meta grants, внешнего admission и callbacks выполняется отдельно. Публичные legal endpoints `/privacy` и `/data-deletion` требуют операторские name/contact из environment, иначе возвращают 503.
 
-- Нативные stdio и Streamable HTTP server регистрируют 27 инструментов: 18 legacy и 9 layered/mutation. Согласованный cloud allowlist содержит 19 инструментов: прежние 18 и named exception `meta_read_source`; `meta_capabilities` уже был разрешён. Фактический deployed cloud catalog нужно читать отдельно — этот checkout не доказывает deployment приватного allowlist. Это исключение не открывает остальные layered/mutation tools; write/auth/stateful resolver операции остаются закрыты. `meta_read_source` честно помечен `readOnlyHint: false`, потому что UI-read может иметь side effect `may_mark_seen`.
+- Нативные stdio и Streamable HTTP server регистрируют 28 инструментов: 18 API, отдельный connection planner и 9 layered/mutation. Согласованный cloud allowlist содержит 19 инструментов: прежние 18 и named exception `meta_read_source`; `meta_capabilities` уже был разрешён. Фактический deployed cloud catalog нужно читать отдельно — этот checkout не доказывает deployment приватного allowlist. Это исключение не открывает остальные layered/mutation tools; write/auth/stateful resolver операции остаются закрыты. `meta_read_source` честно помечен `readOnlyHint: false`, потому что UI-read может иметь side effect `may_mark_seen`.
 - `meta_read_source` разрешает только read operations `account.inspect`, `inbox.list`, `conversation.read`, `comments.list`, `comments.replies` и `insights.read`. Это не разрешение на send/reply/reaction или другие writes. Проверяйте их результат отдельно от общего snapshot `meta_capabilities`.
 - Для объединённого чтения Direct используйте `meta_read_inbox` или `meta_read_source`. Они маршрутизируют чтение API → browser → phone и возвращают источники, coverage, ограничения и ошибки.
 - `meta_capabilities` показывает общий runtime status и operation-specific status. Generic browser summary может указывать на самый свежий bridge, даже если тот не прошёл account verification; operation status ищет ready bridge с нужной live capability. Ни один из этих snapshot-запросов не открывает UI и не запускает `account.inspect`. При конкретном unpinned browser read provider может по общему deadline проверить до трёх свежих same-binding bridges, заявивших `account.inspect` и нужную read capability; после owner verification он закрепляет bridge до конца этого чтения. Declared capability сама по себе не означает readiness. Явный row ref не переназначается. Ни summary, ни operation status не доказывает, что последующий live read сработал.
 - Неподключённый, неподдержанный или неавторизованный источник пропускается. При отсутствии подтверждённых наблюдений результат имеет `coverage: unknown`; пустой список не означает пустой inbox. Ошибка owner preflight одного допустимого browser bridge не скрывает другой свежий bridge того же binding, но явный bridge/ref остаётся pinned и fail-closed.
 - Запись в API, browser и phone остаётся отдельным подтверждаемым путём. Read fallback не переключает запись между источниками и не повторяет `OUTCOME_UNKNOWN`.
+
+## Первичное подключение ученика
+
+Используйте [direct-first planner и инструкцию](connect-instagram.md). `meta_connection_plan` — offline, read-only, конфигурация/наблюдения caller-supplied не равны доступу. Direct Login проверяется первым. `meta_read_source(source:"browser",operation:"account.inspect")` выбирает только браузер; `source:auto` оставляет прежний fallback. Браузерный локальный Hub может обслуживаться тем же stdio runtime без API credentials: [browser-only](browser-only.md).
 
 ## Локально проверить установленный MCP
 

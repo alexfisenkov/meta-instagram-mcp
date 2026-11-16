@@ -43,7 +43,7 @@ describe("buildAuthUrl", () => {
     expect(buildAuthUrl({ ...base, authMode: "instagram" }).searchParams.has("enable_fb_login")).toBe(false);
     expect(
       buildAuthUrl({ ...base, authMode: "instagram", enableFacebookLogin: false }).searchParams.get("enable_fb_login")
-    ).toBe("0");
+    ).toBe("false");
     expect(
       buildAuthUrl({ ...base, authMode: "facebook", enableFacebookLogin: true }).searchParams.has("enable_fb_login")
     ).toBe(false);
@@ -51,8 +51,8 @@ describe("buildAuthUrl", () => {
 });
 
 describe("scope presets", () => {
-  it("defaults to the analytics preset of the active auth mode", () => {
-    expect(defaultScopesForAuthMode("instagram")).toEqual(getScopePresets("instagram").analytics);
+  it("defaults direct Instagram to basic while preserving the Facebook analytics preset", () => {
+    expect(defaultScopesForAuthMode("instagram")).toEqual(getScopePresets("instagram").readOnly);
     expect(defaultScopesForAuthMode("facebook")).toEqual(getScopePresets("facebook").analytics);
   });
 
