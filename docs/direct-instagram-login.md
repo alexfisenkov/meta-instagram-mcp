@@ -30,7 +30,7 @@ META_GRAPH_API_VERSION=v27.0
 
 Loopback HTTP используется только если его принимает ваш конкретный direct setup в Dashboard. Если Meta его не позволяет, выберите Dashboard-token путь выше или собственный зарегистрированный HTTPS endpoint с настроенным proxy. Не переносите разрешение на HTTP в Unified: там действует требование HTTPS.
 
-Из установленной папки запустите `node tools/cli.mjs callback`. Helper открывает официальный вход в обычном браузере; пользователь вводит секреты и проходит проверки сам. Не копируйте authorization code или полный callback URL в чат. Для настроенного HTTP runtime `meta_begin_oauth` использует тот же state-bound путь; URL preview `meta_build_login_url` его не заменяет.
+Из установленной папки запустите `node tools/cli.mjs callback`. Helper открывает официальный вход в обычном браузере; пользователь вводит секреты и проходит проверки сам. Не копируйте authorization code или полный callback URL в чат. Для полноценного HTTP runtime с настроенным OAuth callback используйте `meta_begin_oauth`; URL preview `meta_build_login_url` его не заменяет. В локальном stdio-профиле запускайте standalone helper и входите по URL, открываемому самим helper: state от другого процесса/flow не подставляйте. Локальный browser-only порт обслуживает только companion и не принимает OAuth callback.
 
 MCP принимает однозначный ответ Meta: flat grant либо один элемент `data[0]`. Смешанные, пустые, множественные ответы и конфликтующие IDs отклоняются до замены credentials. Короткий OAuth ID сверяется со свежим профессиональным профилем; фактические permissions CSV/array сохраняются из ответа, а при их отсутствии остаются неизвестными. Старые права не наследуются. Сохранение защищено от конкурентной смены store и привязки к другому аккаунту.
 
