@@ -80,5 +80,7 @@ describe("one-process stdio browser bridge", () => {
       expect(payload.observations).toContainEqual(expect.objectContaining({ source: "browser", accountBinding, data: expect.objectContaining({ username: "fixture_owner" }) }));
     } finally { await subject.client.close(); }
     await expect(fetch(`${baseUrl}/health`)).rejects.toThrow();
-  }, 15_000);
+  // Includes process startup and Windows ACL-protected fixture files. The
+  // production router/client deadlines remain independently bounded.
+  }, process.platform === "win32" ? 60_000 : 15_000);
 });
